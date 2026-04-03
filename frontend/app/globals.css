@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --font-fredoka: var(--font-fredoka);
+  --font-nunito: var(--font-nunito);
+  --color-fairy-pink: #ffb7b2;
+  --color-fairy-purple: #e2bbfd;
+  --color-fairy-blue: #b5eaea;
+  --color-fairy-yellow: #fff5ba;
+}
+
+@layer utilities {
+  .text-gradient-fairy {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-500;
+  }
+  .bg-gradient-fairy {
+    @apply bg-gradient-to-br from-pink-200 via-purple-200 to-cyan-200;
+  }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px) rotate(0deg); }
+  50% { transform: translateY(-15px) rotate(2deg); }
+}
+
+@keyframes sparkle {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-sparkle {
+  animation: sparkle 3s ease-in-out infinite;
+}
+
+.glass-card {
+  @apply bg-white/40 backdrop-blur-md border border-white/60 shadow-xl shadow-pink-500/10;
+}

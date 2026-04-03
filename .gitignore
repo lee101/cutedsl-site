@@ -1,0 +1,23 @@
+# Dependencies
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Go
+server/cutedsl-server
+*.db
+
+# Environment
+.env
+.env.local
+
+# Build
+*.exe
+*.dll
+*.so
+*.dylib
+
+# OS
+.DS_Store
+Thumbs.db
+*.zip

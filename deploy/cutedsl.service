@@ -1,0 +1,29 @@
+[Unit]
+Description=CuteDSL Site Server
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cutedsl-site
+ExecStart=/opt/cutedsl-site/server/cutedsl-server
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/cutedsl-site/.env
+Environment=PORT=8090
+Environment=DEV=false
+Environment=DIST_DIR=/opt/cutedsl-site/frontend/out
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cutedsl
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/cutedsl-site
+
+[Install]
+WantedBy=multi-user.target
