@@ -249,7 +249,7 @@ export default function Home() {
           <Link href="#models" className="hover:text-pink-500 transition-colors">Models</Link>
           <Link href="#training" className="hover:text-purple-500 transition-colors">LoRA</Link>
           <Link href="#api" className="hover:text-blue-500 transition-colors">API & Credits</Link>
-          <Link href="#token" className="hover:text-cyan-500 transition-colors">$CUTE</Link>
+          <Link href="#token" className="hover:text-cyan-500 transition-colors">$CUTEDSL</Link>
           <Link href="#applied-science" className="hover:text-indigo-500 transition-colors">Applied Science</Link>
         </div>
         <div className="flex items-center gap-3">
@@ -257,7 +257,7 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <div className="hidden sm:flex items-center gap-2 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-full border border-pink-200 shadow-sm">
                 <Coins size={16} className="text-yellow-500" />
-                <span className="font-bold text-slate-700">{balance ? formatCute(balance.credits) : '...'} $CUTE</span>
+                <span className="font-bold text-slate-700">{balance ? formatCute(balance.credits) : '...'} $CUTEDSL</span>
                 {balance && cutePrice > 0 && (
                   <span className="text-xs text-slate-400">(${(balance.credits * cutePrice).toFixed(2)})</span>
                 )}
@@ -307,7 +307,7 @@ export default function Home() {
               Sprinkle <span className="text-gradient-fairy">Magic</span> on Your Models
             </h1>
             <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/40 p-4 rounded-2xl backdrop-blur-sm">
-              Cute DSL is a fairy-themed AI model conversion project. We transform heavy models into lightweight, magical tools. Powered exclusively by $CUTE on Solana.
+              Cute DSL is a fairy-themed AI model conversion project. We transform heavy models into lightweight, magical tools. Powered exclusively by $CUTEDSL on Solana.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start">
               <a href="#models" className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
@@ -373,7 +373,7 @@ export default function Home() {
                 Flagship image generation. Create stunning, fairy-themed artwork with just a few words.
               </p>
               <div className="flex items-center gap-2 text-pink-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTE` : '100 $CUTE'} / gen
+                <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '100 $CUTEDSL'} / gen
               </div>
             </motion.div>
 
@@ -386,7 +386,7 @@ export default function Home() {
                 Time series forecasting, but make it cute. Predict future trends with high accuracy.
               </p>
               <div className="flex items-center gap-2 text-cyan-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTE` : '50 $CUTE'} / forecast
+                <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '50 $CUTEDSL'} / forecast
               </div>
             </motion.div>
 
@@ -399,7 +399,7 @@ export default function Home() {
                 Magical Text-to-Speech. Give your applications a beautiful, enchanting voice.
               </p>
               <div className="flex items-center gap-2 text-purple-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTE` : '10 $CUTE'} / 100 chars
+                <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '10 $CUTEDSL'} / 100 chars
               </div>
             </motion.div>
 
@@ -412,7 +412,7 @@ export default function Home() {
                 Speech-to-Text model. Understand every whisper and spell spoken by your users.
               </p>
               <div className="flex items-center gap-2 text-blue-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTE` : '20 $CUTE'} / minute
+                <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '20 $CUTEDSL'} / minute
               </div>
             </motion.div>
           </div>
@@ -451,7 +451,7 @@ export default function Home() {
                 </li>
               </ul>
               <button className="bg-purple-500 text-white font-bold px-8 py-4 rounded-full shadow-lg hover:bg-purple-600 transition-colors">
-                Start Training (5000 $CUTE)
+                Start Training (5000 $CUTEDSL)
               </button>
             </div>
             <div className="flex-1 relative w-full aspect-video rounded-2xl overflow-hidden shadow-2xl border-4 border-white/50">
@@ -502,7 +502,7 @@ export default function Home() {
                   <div className="bg-gradient-to-r from-yellow-50 to-pink-50 p-6 rounded-2xl border border-yellow-200">
                     <div className="text-sm text-slate-500 mb-1">Your Balance</div>
                     <div className="text-3xl font-fredoka font-bold text-slate-800">
-                      {balance ? formatCute(balance.credits) : '...'} <span className="text-pink-500">$CUTE</span>
+                      {balance ? formatCute(balance.credits) : '...'} <span className="text-pink-500">$CUTEDSL</span>
                     </div>
                     {balance && cutePrice > 0 && (
                       <div className="text-sm text-slate-400 mt-1">&asymp; ${(balance.credits * cutePrice).toFixed(2)} USD</div>
@@ -511,7 +511,7 @@ export default function Home() {
 
                   {/* Deposit */}
                   <div>
-                    <label className="text-sm font-bold text-slate-600 mb-2 block">Deposit $CUTE</label>
+                    <label className="text-sm font-bold text-slate-600 mb-2 block">Deposit $CUTEDSL</label>
                     <div className="flex gap-2">
                       <div className="relative flex-1">
                         <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
@@ -534,7 +534,7 @@ export default function Home() {
                     </div>
                     {cutePrice > 0 && depositAmount && (
                       <div className="text-xs text-slate-400 mt-2">
-                        &asymp; {formatCute(parseFloat(depositAmount || '0') / cutePrice)} $CUTE at current price (${cutePrice.toFixed(8)}/CUTE)
+                        &asymp; {formatCute(parseFloat(depositAmount || '0') / cutePrice)} $CUTEDSL at current price (${cutePrice.toFixed(8)}/CUTEDSL)
                       </div>
                     )}
                   </div>
@@ -567,7 +567,7 @@ export default function Home() {
                           <div key={event.id} className="flex justify-between items-center text-sm py-2 px-3 bg-white/60 rounded-lg">
                             <span className="text-slate-600">{event.description}</span>
                             <span className={`font-bold ${event.amount >= 0 ? 'text-green-600' : 'text-red-500'}`}>
-                              {event.amount >= 0 ? '+' : ''}{formatCute(Math.abs(event.amount))} $CUTE
+                              {event.amount >= 0 ? '+' : ''}{formatCute(Math.abs(event.amount))} $CUTEDSL
                             </span>
                           </div>
                         ))}
@@ -577,7 +577,7 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="text-center py-6">
-                  <p className="text-slate-600 mb-6 text-lg">Connect your Solana wallet to deposit $CUTE and start using AI services.</p>
+                  <p className="text-slate-600 mb-6 text-lg">Connect your Solana wallet to deposit $CUTEDSL and start using AI services.</p>
                   <button
                     onClick={connectWallet}
                     disabled={connectingWallet}
@@ -600,9 +600,9 @@ export default function Home() {
         
         <div className="max-w-4xl mx-auto px-6 text-center relative z-10">
           <Coins size={64} className="text-yellow-400 mx-auto mb-8 animate-bounce" />
-          <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTE</h2>
+          <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTEDSL</h2>
           <p className="text-xl text-slate-200 mb-10 font-medium">
-            Cute DSL operates exclusively on the Solana blockchain. The only way to pay for compute, model conversion, and inference is with our native memecoin, <span className="text-pink-400 font-bold text-2xl">$CUTE</span>.
+            Cute DSL operates exclusively on the Solana blockchain. The only way to pay for compute, model conversion, and inference is with our native memecoin, <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span>.
           </p>
           
           <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-3xl p-8 mb-10">
@@ -611,7 +611,7 @@ export default function Home() {
                 <div className="text-4xl font-bold text-pink-400 mb-2 font-fredoka">
                   {cutePrice > 0 ? `$${cutePrice < 0.01 ? cutePrice.toFixed(6) : cutePrice.toFixed(4)}` : '...'}
                 </div>
-                <div className="text-slate-300">$CUTE Price</div>
+                <div className="text-slate-300">$CUTEDSL Price</div>
               </div>
               <div>
                 <div className="text-4xl font-bold text-pink-400 mb-2 font-fredoka">100%</div>
@@ -629,13 +629,13 @@ export default function Home() {
           </div>
 
           <a 
-            href="https://bags.fm" 
+            href="https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS" 
             target="_blank" 
             rel="noopener noreferrer"
             className="inline-flex items-center gap-3 bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold text-xl px-10 py-5 rounded-full shadow-[0_0_30px_rgba(236,72,153,0.5)] hover:scale-105 transition-transform"
           >
             <Coins size={24} />
-            Buy $CUTE on bags.fm
+            Buy $CUTEDSL on bags.fm
           </a>
         </div>
       </section>

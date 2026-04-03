@@ -126,7 +126,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	// Get user
 	user, err := dbConn.GetUserByWallet(req.WalletAddress)
 	if err != nil {
-		jsonError(ctx, 401, "wallet not registered - deposit $CUTE first")
+		jsonError(ctx, 401, "wallet not registered - deposit $CUTEDSL first")
 		return
 	}
 
@@ -150,7 +150,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	newBalance, err := dbConn.DeductUserCredits(user.ID, cuteCost)
 	if err != nil {
 		if strings.Contains(err.Error(), "insufficient") {
-			jsonError(ctx, 402, fmt.Sprintf("insufficient credits: need %.2f $CUTE, have %.2f", cuteCost, user.Credits))
+			jsonError(ctx, 402, fmt.Sprintf("insufficient credits: need %.2f $CUTEDSL, have %.2f", cuteCost, user.Credits))
 			return
 		}
 		jsonError(ctx, 500, "failed to deduct credits")
@@ -166,11 +166,11 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		Amount:       -cuteCost,
 		CuteAmount:   cuteCost,
 		USDAmount:    usdEquiv,
-		Description:  fmt.Sprintf("%s usage (%.2f $CUTE @ $%.6f)", req.Service, cuteCost, cutePrice),
+		Description:  fmt.Sprintf("%s usage (%.2f $CUTEDSL @ $%.6f)", req.Service, cuteCost, cutePrice),
 		CreditsAfter: newBalance,
 	})
 
-	log.Printf("Service %s: user=%s cost=%.2f CUTE ($%.4f) balance=%.2f",
+	log.Printf("Service %s: user=%s cost=%.2f CUTEDSL ($%.4f) balance=%.2f",
 		req.Service, req.WalletAddress, cuteCost, usdEquiv, newBalance)
 
 	// Proxy to backend service

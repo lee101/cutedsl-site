@@ -304,7 +304,7 @@ func updateCUTEPrice() {
 			cutePriceUSD = price
 			cutePriceUpdated = time.Now()
 			cutePriceMu.Unlock()
-			log.Printf("CUTE price updated: $%.8f (%.0f CUTE/SOL)", price, cutePerSOL)
+			log.Printf("CUTEDSL price updated: $%.8f (%.0f CUTEDSL/SOL)", price, cutePerSOL)
 		}
 	}
 }
@@ -466,7 +466,7 @@ func handleCryptoCheckout(ctx *fasthttp.RequestCtx) {
 	} else {
 		// Pay with $CUTE token
 		mint = cuteTokenMint
-		amountUI = fmt.Sprintf("%.2f CUTE", cuteAmount)
+		amountUI = fmt.Sprintf("%.2f CUTEDSL", cuteAmount)
 		amountLamports = uint64(cuteAmount * 1e9) // Assuming 9 decimals
 	}
 
