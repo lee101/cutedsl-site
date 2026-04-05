@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Benchmarks & Evals — See How CuteDSL Stacks Up</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">Benchmarks &amp; Evals</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">See how CuteDSL acceleration stacks up against baselines</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">We don't just claim speed &mdash; we measure it. Our <a href="https://cutedsl.com/evals" style="color:#6c5ce7; text-decoration:none; font-weight:600;">/evals</a> page has detailed benchmarks for every acceleration technique we ship. Here are the highlights.</p>
+
+<h2 style="margin:28px 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">Key Results</h2>
+
+<!-- CuteChronos2 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<p style="margin:0 0 6px; color:#6c5ce7; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px;">CuteChronos2</p>
+<p style="margin:0 0 8px; color:#2d2d3f; font-size:20px; font-weight:700;">24x speedup</p>
+<p style="margin:0; color:#5a5a6e; font-size:14px; line-height:1.5;">Time series forecasting with fused Triton kernels and optimized attention. Baseline Chronos-2: ~2.4s per forecast. CuteChronos2: ~0.1s.</p>
+</td>
+</tr>
+</table>
+
+<!-- CuteZImage -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<p style="margin:0 0 6px; color:#6c5ce7; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px;">CuteZImage</p>
+<p style="margin:0 0 8px; color:#2d2d3f; font-size:20px; font-weight:700;">Significant throughput gains</p>
+<p style="margin:0; color:#5a5a6e; font-size:14px; line-height:1.5;">CuteZImageTransformer with fused Triton kernels for text-to-image generation. Reduced latency and higher images/sec on consumer GPUs.</p>
+</td>
+</tr>
+</table>
+
+<!-- NVFP4 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<p style="margin:0 0 6px; color:#6c5ce7; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px;">NVFP4 Quantization</p>
+<p style="margin:0 0 8px; color:#2d2d3f; font-size:20px; font-weight:700;">Up to 4x memory reduction</p>
+<p style="margin:0; color:#5a5a6e; font-size:14px; line-height:1.5;">Native FP4 quantization on RTX 5090 via torchao. Run larger models in less VRAM with minimal quality loss.</p>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">More Techniques Benchmarked</h2>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+<tr>
+<td style="padding:10px 0; border-bottom:1px solid #e0dff5;">
+<strong style="color:#2d2d3f; font-size:14px;">Latent Teleportation</strong>
+<span style="color:#5a5a6e; font-size:14px;"> &mdash; Skip redundant diffusion steps by teleporting through latent space</span>
+</td>
+</tr>
+<tr>
+<td style="padding:10px 0; border-bottom:1px solid #e0dff5;">
+<strong style="color:#2d2d3f; font-size:14px;">TurboQuant</strong>
+<span style="color:#5a5a6e; font-size:14px;"> &mdash; Dynamic quantization for maximum throughput with quality guardrails</span>
+</td>
+</tr>
+<tr>
+<td style="padding:10px 0; border-bottom:1px solid #e0dff5;">
+<strong style="color:#2d2d3f; font-size:14px;">stable-diffusion.cpp</strong>
+<span style="color:#5a5a6e; font-size:14px;"> &mdash; Pure C++ inference for CPU and edge deployment</span>
+</td>
+</tr>
+</table>
+
+<p style="margin:0 0 8px; text-align:center;">
+<a href="https://cutedsl.com/evals" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">View Full Benchmarks</a>
+</p>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

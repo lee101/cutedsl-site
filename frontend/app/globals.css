@@ -3,17 +3,17 @@
 @theme {
   --font-fredoka: var(--font-fredoka);
   --font-nunito: var(--font-nunito);
-  --color-fairy-pink: #ffb7b2;
-  --color-fairy-purple: #e2bbfd;
-  --color-fairy-blue: #b5eaea;
-  --color-fairy-yellow: #fff5ba;
+  --color-cute-pink: #ffb7b2;
+  --color-cute-purple: #e2bbfd;
+  --color-cute-blue: #b5eaea;
+  --color-cute-yellow: #fff5ba;
 }
 
 @layer utilities {
-  .text-gradient-fairy {
+  .text-gradient-cute {
     @apply bg-clip-text text-transparent bg-gradient-to-r from-pink-500 via-purple-500 to-cyan-500;
   }
-  .bg-gradient-fairy {
+  .bg-gradient-cute {
     @apply bg-gradient-to-br from-pink-200 via-purple-200 to-cyan-200;
   }
 }
@@ -38,4 +38,16 @@
 
 .glass-card {
   @apply bg-white/40 backdrop-blur-md border border-white/60 shadow-xl shadow-pink-500/10;
+}
+
+/* Reduce layout shift from font loading */
+html {
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* GPU-accelerate background transitions */
+.bg-transition-gpu {
+  will-change: opacity;
+  contain: strict;
 }

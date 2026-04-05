@@ -5,18 +5,19 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   Sparkles, Wand2, Image as ImageIcon, LineChart, Coins, Heart, Star, Zap,
   Mic, Volume2, BookOpen, Cloud, Code, Globe, Cpu, Database, Layout, Search, Gamepad2, Users,
-  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut
+  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 
 const API_BASE = '/api';
+const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
 
 const BACKGROUNDS = [
-  "https://picsum.photos/seed/fairy-landscape1/1920/1080",
-  "https://picsum.photos/seed/fairy-forest/1920/1080",
-  "https://picsum.photos/seed/magic-castle/1920/1080",
-  "https://picsum.photos/seed/enchanted-lake/1920/1080"
+  `${IMG_BASE}/bg-1.webp`,
+  `${IMG_BASE}/bg-2.webp`,
+  `${IMG_BASE}/bg-3.webp`,
+  `${IMG_BASE}/bg-4.webp`,
 ];
 
 interface WalletBalance {
@@ -59,6 +60,23 @@ export default function Home() {
   const [depositResult, setDepositResult] = useState<any>(null);
   const [copied, setCopied] = useState(false);
   const [connectingWallet, setConnectingWallet] = useState(false);
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [demoPrompt, setDemoPrompt] = useState('a cute fairy in an enchanted forest, digital art, pastel colors');
+  const [demoResult, setDemoResult] = useState<string | null>(null);
+  const [demoLoading, setDemoLoading] = useState(false);
+  const [testMode, setTestMode] = useState(false);
+  const [testResults, setTestResults] = useState<{route: string; status: string; ms: number}[]>([]);
+  const [email, setEmail] = useState<string | null>(null);
+  const [emailInput, setEmailInput] = useState('');
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailSaved, setEmailSaved] = useState(false);
+  const [buyTab, setBuyTab] = useState<'buy' | 'deposit'>('buy');
+  const [buySolAmount, setBuySolAmount] = useState('0.1');
+  const [buyQuote, setBuyQuote] = useState<any>(null);
+  const [buyLoading, setBuyLoading] = useState(false);
+  const [buyStatus, setBuyStatus] = useState<string | null>(null);
+  const [showAccount, setShowAccount] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -106,39 +124,102 @@ export default function Home() {
     }
   }, [walletAddress, fetchBalance, fetchHistory]);
 
-  // Restore wallet from localStorage
+  // Restore wallet and API key from localStorage
   useEffect(() => {
     const saved = localStorage.getItem('cutedsl_wallet');
     if (saved) setWalletAddress(saved);
+    const savedKey = localStorage.getItem('cutedsl_api_key');
+    if (savedKey) setApiKey(savedKey);
+    const savedEmail = localStorage.getItem('cutedsl_email');
+    if (savedEmail) setEmail(savedEmail);
+    // ?test=true triggers e2e API test
+    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('test') === 'true') {
+      setTestMode(true);
+      runE2ETests();
+    }
   }, []);
+
+  const runE2ETests = async () => {
+    const results: {route: string; status: string; ms: number}[] = [];
+    const test = async (route: string, opts?: RequestInit) => {
+      const t0 = Date.now();
+      try {
+        const res = await fetch(`${API_BASE}${route}`, opts);
+        const ms = Date.now() - t0;
+        const ok = res.status < 500;
+        results.push({ route, status: ok ? `${res.status} OK` : `${res.status} FAIL`, ms });
+      } catch (e) {
+        results.push({ route, status: 'ERR', ms: Date.now() - t0 });
+      }
+      setTestResults([...results]);
+    };
+    await test('/health');
+    await test('/pricing');
+    await test('/cute-price');
+    await test('/balance?wallet=test_e2e_wallet');
+    await test('/billing-history?wallet=test_e2e_wallet');
+    await test('/auth/wallet', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({wallet_address: 'e2e_test_' + Date.now()}) });
+    await test('/service', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({service:'zimage',wallet_address:'nonexistent'}) });
+  };
+
+  const tryImageGen = async () => {
+    if (!apiKey) return;
+    setDemoLoading(true);
+    setDemoResult(null);
+    try {
+      const res = await fetch(`${API_BASE}/service`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ service: 'zimage', prompt: demoPrompt, width: 512, height: 512, num_steps: 4 }),
+      });
+      const data = await res.json();
+      if (data.result?.image_base64) {
+        setDemoResult(`data:image/webp;base64,${data.result.image_base64}`);
+      } else {
+        alert(data.error || JSON.stringify(data));
+      }
+    } catch (e) {
+      alert('Failed to generate image');
+    } finally {
+      setDemoLoading(false);
+    }
+  };
 
   const connectWallet = async () => {
     setConnectingWallet(true);
     try {
       // Check for Phantom wallet
       const solana = (window as any).solana;
+      const registerWallet = async (addr: string) => {
+        const res = await fetch(`${API_BASE}/auth/wallet`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wallet_address: addr }),
+        });
+        const data = await res.json();
+        if (data.api_key) {
+          setApiKey(data.api_key);
+          localStorage.setItem('cutedsl_api_key', data.api_key);
+        }
+        if (data.user?.email) {
+          setEmail(data.user.email);
+          localStorage.setItem('cutedsl_email', data.user.email);
+        }
+      };
+
       if (solana?.isPhantom) {
         const resp = await solana.connect();
         const addr = resp.publicKey.toString();
         setWalletAddress(addr);
         localStorage.setItem('cutedsl_wallet', addr);
-        // Register with backend
-        await fetch(`${API_BASE}/auth/wallet`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ wallet_address: addr }),
-        });
+        await registerWallet(addr);
       } else {
         // Fallback: prompt for wallet address
         const addr = prompt('Enter your Solana wallet address:');
         if (addr && addr.length > 30) {
           setWalletAddress(addr);
           localStorage.setItem('cutedsl_wallet', addr);
-          await fetch(`${API_BASE}/auth/wallet`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wallet_address: addr }),
-          });
+          await registerWallet(addr);
         }
       }
     } catch (err) {
@@ -152,11 +233,40 @@ export default function Home() {
     setWalletAddress(null);
     setBalance(null);
     setBillingHistory([]);
+    setApiKey(null);
+    setEmail(null);
+    setEmailInput('');
+    setEmailSaved(false);
     localStorage.removeItem('cutedsl_wallet');
+    localStorage.removeItem('cutedsl_api_key');
+    localStorage.removeItem('cutedsl_email');
     try {
       const solana = (window as any).solana;
       if (solana?.isPhantom) solana.disconnect();
     } catch {}
+  };
+
+  const saveEmail = async () => {
+    if (!walletAddress || !emailInput.includes('@')) return;
+    setEmailSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/auth/email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wallet_address: walletAddress, email: emailInput }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setEmail(emailInput);
+        localStorage.setItem('cutedsl_email', emailInput);
+        setEmailSaved(true);
+        setTimeout(() => setEmailSaved(false), 3000);
+      }
+    } catch (err) {
+      console.error('Email save error:', err);
+    } finally {
+      setEmailSaving(false);
+    }
   };
 
   const createDeposit = async () => {
@@ -203,6 +313,98 @@ export default function Home() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Fetch swap quote from bags.fm via our proxy
+  const fetchSwapQuote = async (solAmt: string) => {
+    if (!solAmt || parseFloat(solAmt) <= 0) { setBuyQuote(null); return; }
+    try {
+      const res = await fetch(`${API_BASE}/swap/quote?sol_amount=${solAmt}`);
+      const data = await res.json();
+      if (data.success) setBuyQuote(data);
+      else setBuyQuote(null);
+    } catch { setBuyQuote(null); }
+  };
+
+  // Execute swap: get quote → build tx → sign with Phantom → send
+  const executeBuy = async () => {
+    if (!walletAddress || !buySolAmount || buyLoading) return;
+    const solana = (window as any).solana;
+    if (!solana?.isPhantom) {
+      setBuyStatus('Phantom wallet required for swaps');
+      return;
+    }
+
+    setBuyLoading(true);
+    setBuyStatus('Getting quote...');
+    try {
+      // 1. Get fresh quote
+      const quoteRes = await fetch(`${API_BASE}/swap/quote?sol_amount=${buySolAmount}`);
+      const quoteData = await quoteRes.json();
+      if (!quoteData.success) throw new Error('Failed to get quote');
+
+      // 2. Build swap transaction
+      setBuyStatus('Building transaction...');
+      const swapRes = await fetch(`${API_BASE}/swap/transaction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          quote: quoteData.quote,
+          user_public_key: walletAddress,
+        }),
+      });
+      const swapData = await swapRes.json();
+      if (!swapData.success) throw new Error(swapData.error || 'Failed to build transaction');
+
+      // 3. Deserialize and sign with Phantom
+      setBuyStatus('Sign in your wallet...');
+      const txData = swapData.transaction;
+      const swapTxEncoded = txData.swapTransaction;
+
+      // bags.fm returns base58-encoded VersionedTransaction
+      const bs58 = await import('bs58');
+      const { VersionedTransaction, Connection } = await import('@solana/web3.js');
+      const txBytes = bs58.default.decode(swapTxEncoded);
+      const transaction = VersionedTransaction.deserialize(txBytes);
+
+      // Sign and send via Phantom
+      const signed = await solana.signTransaction(transaction);
+      setBuyStatus('Sending transaction...');
+
+      const connection = new Connection(
+        'https://api.mainnet-beta.solana.com',
+        'confirmed'
+      );
+      const signature = await connection.sendRawTransaction(signed.serialize(), {
+        skipPreflight: true,
+        maxRetries: 3,
+      });
+
+      setBuyStatus('Confirming...');
+      await connection.confirmTransaction(signature, 'confirmed');
+
+      setBuyStatus(`Swap complete! Tx: ${signature.slice(0, 8)}...`);
+      setBuyQuote(null);
+
+      // Refresh balance after a short delay
+      setTimeout(() => {
+        if (walletAddress) {
+          fetchBalance(walletAddress);
+          fetchHistory(walletAddress);
+        }
+      }, 3000);
+
+    } catch (err: any) {
+      const msg = err?.message || 'Swap failed';
+      if (msg.includes('User rejected')) {
+        setBuyStatus('Transaction cancelled');
+      } else {
+        setBuyStatus(`Error: ${msg}`);
+      }
+    } finally {
+      setBuyLoading(false);
+      setTimeout(() => setBuyStatus(null), 8000);
+    }
+  };
+
   const getServicePrice = (service: string) => {
     const p = pricing.find(p => p.service === service);
     return p ? p.price_cute : 0;
@@ -221,17 +423,17 @@ export default function Home() {
         {BACKGROUNDS.map((bg, i) => (
           <div
             key={bg}
-            className={`absolute inset-0 bg-cover bg-center transition-opacity duration-[3000ms] ease-in-out ${
+            className={`absolute inset-0 bg-cover bg-center transition-opacity duration-[3000ms] ease-in-out bg-transition-gpu ${
               i === bgIndex ? 'opacity-40' : 'opacity-0'
             }`}
-            style={{ backgroundImage: `url(${bg})` }}
+            style={{ backgroundImage: i === bgIndex || i === (bgIndex + 1) % BACKGROUNDS.length ? `url(${bg})` : undefined }}
           />
         ))}
         {/* Gradient overlay to ensure text readability */}
         <div className="absolute inset-0 bg-gradient-to-b from-pink-50/90 via-purple-50/80 to-cyan-50/90 backdrop-blur-[2px]" />
       </div>
 
-      {/* Magical Background Elements */}
+      {/* Background Elements */}
       <div className="fixed inset-0 -z-10 pointer-events-none">
         <div className="absolute top-10 left-10 text-pink-400 animate-sparkle" style={{ animationDelay: '0s' }}><Star size={24} /></div>
         <div className="absolute top-40 right-20 text-purple-400 animate-sparkle" style={{ animationDelay: '1s' }}><Sparkles size={32} /></div>
@@ -240,36 +442,39 @@ export default function Home() {
       </div>
 
       {/* Navigation */}
-      <nav className="w-full p-6 flex justify-between items-center max-w-7xl mx-auto relative z-10">
-        <div className="flex items-center gap-2">
-          <Wand2 className="text-pink-500" size={32} />
-          <span className="font-fredoka text-3xl font-bold text-pink-600 tracking-wide">Cute DSL</span>
-        </div>
+      <header>
+      <nav aria-label="Main navigation" className="w-full p-6 flex justify-between items-center max-w-7xl mx-auto relative z-10">
+        <Link href="/" className="flex items-center gap-2">
+          <Image src={`${IMG_BASE}/logo.webp`} alt="CuteDSL" width={40} height={40} className="rounded-lg" />
+          <span className="font-fredoka text-3xl font-bold text-pink-600 tracking-wide">CuteDSL</span>
+        </Link>
         <div className="hidden md:flex gap-6 font-bold text-slate-700">
           <Link href="#models" className="hover:text-pink-500 transition-colors">Models</Link>
-          <Link href="#training" className="hover:text-purple-500 transition-colors">LoRA</Link>
-          <Link href="#api" className="hover:text-blue-500 transition-colors">API & Credits</Link>
+          <Link href="#training" className="hover:text-purple-500 transition-colors">Training</Link>
+          <Link href="#api" className="hover:text-blue-500 transition-colors">Credits</Link>
+          <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
           <Link href="#token" className="hover:text-cyan-500 transition-colors">$CUTEDSL</Link>
+          <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
+          <Link href="/blog" className="hover:text-orange-500 transition-colors">Blog</Link>
           <Link href="#applied-science" className="hover:text-indigo-500 transition-colors">Applied Science</Link>
         </div>
         <div className="flex items-center gap-3">
           {walletAddress ? (
             <div className="flex items-center gap-3">
-              <div className="hidden sm:flex items-center gap-2 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-full border border-pink-200 shadow-sm">
+              <a href="#account" onClick={(e) => { e.preventDefault(); setShowAccount(true); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hidden sm:flex items-center gap-2 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-full border border-pink-200 shadow-sm hover:shadow-md transition-all cursor-pointer">
                 <Coins size={16} className="text-yellow-500" />
                 <span className="font-bold text-slate-700">{balance ? formatCute(balance.credits) : '...'} $CUTEDSL</span>
                 {balance && cutePrice > 0 && (
                   <span className="text-xs text-slate-400">(${(balance.credits * cutePrice).toFixed(2)})</span>
                 )}
-              </div>
+              </a>
               <button
-                onClick={disconnectWallet}
+                onClick={() => setShowAccount(true)}
                 className="flex items-center gap-2 bg-white/80 text-slate-600 font-bold px-4 py-2 rounded-full shadow-sm hover:shadow-md transition-all border border-slate-200 text-sm"
                 title={walletAddress}
               >
                 <Wallet size={16} />
-                {walletAddress.slice(0, 4)}...{walletAddress.slice(-4)}
-                <LogOut size={14} className="text-slate-400" />
+                {email ? email.split('@')[0] : `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`}
               </button>
             </div>
           ) : (
@@ -284,6 +489,140 @@ export default function Home() {
           )}
         </div>
       </nav>
+      </header>
+
+      {/* Account Panel */}
+      <AnimatePresence>
+        {showAccount && walletAddress && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-start justify-center pt-20 px-4"
+            onClick={(e) => { if (e.target === e.currentTarget) setShowAccount(false); }}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: -20, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -20, scale: 0.95 }}
+              className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden"
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-r from-pink-400 to-purple-400 p-6 text-white relative">
+                <button onClick={() => setShowAccount(false)} className="absolute top-4 right-4 p-1 hover:bg-white/20 rounded-lg transition-colors">
+                  <X size={20} />
+                </button>
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="bg-white/20 p-2 rounded-full">
+                    <Wallet size={24} />
+                  </div>
+                  <div>
+                    <div className="font-bold text-lg">{email || 'My Account'}</div>
+                    <div className="text-white/80 text-sm font-mono">{walletAddress.slice(0, 8)}...{walletAddress.slice(-6)}</div>
+                  </div>
+                </div>
+                <div className="bg-white/20 rounded-2xl p-4 mt-2">
+                  <div className="text-white/70 text-xs mb-1">Balance</div>
+                  <div className="text-3xl font-fredoka font-bold">
+                    {balance ? formatCute(balance.credits) : '...'} <span className="text-lg text-white/80">$CUTEDSL</span>
+                  </div>
+                  {balance && cutePrice > 0 && (
+                    <div className="text-white/60 text-sm mt-1">&asymp; ${(balance.credits * cutePrice).toFixed(2)} USD</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-6 space-y-5 max-h-[60vh] overflow-y-auto">
+                {/* Email */}
+                <div>
+                  <label className="text-sm font-bold text-slate-600 mb-2 flex items-center gap-2"><Mail size={14} /> Email (optional)</label>
+                  {!emailSaved ? (
+                    <div className="flex gap-2">
+                      <input
+                        type="email"
+                        value={emailInput}
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        className="flex-1 px-4 py-2 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm"
+                        placeholder="you@example.com"
+                      />
+                      <button
+                        onClick={saveEmail}
+                        disabled={emailSaving || !emailInput}
+                        className="bg-pink-500 text-white font-bold px-4 py-2 rounded-xl text-sm hover:bg-pink-600 transition-colors disabled:opacity-50"
+                      >
+                        {emailSaving ? <RefreshCw size={14} className="animate-spin" /> : 'Save'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-sm text-slate-600 bg-green-50 px-4 py-2 rounded-xl">
+                      <Check size={14} className="text-green-500" />
+                      {email}
+                    </div>
+                  )}
+                  <div className="text-xs text-slate-400 mt-1">Optional. We&apos;ll send onboarding tips about the API.</div>
+                </div>
+
+                {/* API Key */}
+                {apiKey && (
+                  <div>
+                    <label className="text-sm font-bold text-slate-600 mb-2 flex items-center gap-2"><Key size={14} /> API Key</label>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 font-mono text-sm overflow-hidden">
+                        {showApiKey ? apiKey : `${apiKey.slice(0, 8)}${'•'.repeat(20)}`}
+                      </div>
+                      <button onClick={() => setShowApiKey(!showApiKey)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400" title={showApiKey ? 'Hide' : 'Show'}>
+                        {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                      <button onClick={() => copyToClipboard(apiKey)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400" title="Copy">
+                        {copied ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
+                      </button>
+                    </div>
+                    <div className="text-xs text-slate-400 mt-1">Use as: <code className="bg-slate-100 px-1 rounded">Authorization: Bearer {'<key>'}</code></div>
+                  </div>
+                )}
+
+                {/* Quick Actions */}
+                <div className="grid grid-cols-2 gap-3">
+                  <a href="#api" onClick={() => setShowAccount(false)} className="bg-slate-50 hover:bg-slate-100 p-3 rounded-xl text-center transition-colors">
+                    <Coins size={20} className="text-yellow-500 mx-auto mb-1" />
+                    <div className="text-sm font-bold text-slate-700">Add Credits</div>
+                  </a>
+                  <a href="#api-docs" onClick={() => setShowAccount(false)} className="bg-slate-50 hover:bg-slate-100 p-3 rounded-xl text-center transition-colors">
+                    <Code size={20} className="text-blue-500 mx-auto mb-1" />
+                    <div className="text-sm font-bold text-slate-700">API Docs</div>
+                  </a>
+                </div>
+
+                {/* Recent Activity */}
+                {billingHistory.length > 0 && (
+                  <div>
+                    <div className="text-sm font-bold text-slate-600 mb-2">Recent Activity</div>
+                    <div className="space-y-1 max-h-32 overflow-y-auto">
+                      {billingHistory.slice(0, 5).map(event => (
+                        <div key={event.id} className="flex justify-between items-center text-sm py-1.5 px-3 bg-slate-50 rounded-lg">
+                          <span className="text-slate-500 text-xs">{event.description}</span>
+                          <span className={`font-bold text-xs ${event.amount >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                            {event.amount >= 0 ? '+' : ''}{formatCute(Math.abs(event.amount))}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Disconnect */}
+                <button
+                  onClick={() => { disconnectWallet(); setShowAccount(false); }}
+                  className="w-full flex items-center justify-center gap-2 text-slate-400 hover:text-red-500 py-3 border border-slate-200 rounded-xl hover:border-red-200 transition-colors text-sm font-bold"
+                >
+                  <LogOut size={16} />
+                  Disconnect Wallet
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Hero Section */}
       <main className="max-w-7xl mx-auto px-6 pt-12 pb-24 relative z-10">
@@ -294,20 +633,15 @@ export default function Home() {
             transition={{ duration: 0.8 }}
             className="flex-1 text-center lg:text-left relative"
           >
-            {/* Fairy Character Placeholder */}
             <div className="absolute -top-12 -left-12 animate-float hidden lg:block opacity-80">
-              <Image src="https://picsum.photos/seed/fairy-char-1/150/150" alt="Fairy" width={100} height={100} className="rounded-full border-4 border-pink-200 shadow-lg" referrerPolicy="no-referrer" />
+              <Image src={`${IMG_BASE}/avatar.webp`} alt="" width={100} height={100} loading="lazy" className="rounded-full border-4 border-pink-200 shadow-lg" />
             </div>
 
-            <div className="inline-flex items-center gap-2 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-full text-pink-600 font-bold mb-6 border border-pink-200 shadow-sm">
-              <Sparkles size={16} />
-              <span>The most magical model conversion project</span>
-            </div>
             <h1 className="font-fredoka text-6xl lg:text-8xl font-bold mb-6 leading-tight text-slate-800">
-              Sprinkle <span className="text-gradient-fairy">Magic</span> on Your Models
+              Make Your Models <span className="text-gradient-cute">Cute</span>
             </h1>
             <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/40 p-4 rounded-2xl backdrop-blur-sm">
-              Cute DSL is a fairy-themed AI model conversion project. We transform heavy models into lightweight, magical tools. Powered exclusively by $CUTEDSL on Solana.
+              Cute DSL accelerates AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, and more. Powered exclusively by $CUTEDSL on Solana.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start">
               <a href="#models" className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
@@ -329,12 +663,12 @@ export default function Home() {
           >
             <div className="relative w-full max-w-lg mx-auto aspect-square animate-float">
               <div className="absolute inset-0 bg-gradient-to-tr from-pink-300 to-cyan-300 rounded-full blur-3xl opacity-50"></div>
-              <Image 
-                src="https://picsum.photos/seed/fairy-hero/800/800" 
-                alt="Magical Fairy AI" 
-                fill 
+              <Image
+                src={`${IMG_BASE}/hero.webp`}
+                alt="CuteDSL AI model acceleration platform"
+                fill
+                priority
                 className="object-cover rounded-full border-8 border-white/50 shadow-2xl"
-                referrerPolicy="no-referrer"
               />
               {/* Floating badges */}
               <div className="absolute -top-6 -right-6 glass-card p-4 rounded-2xl flex items-center gap-3 animate-bounce" style={{ animationDuration: '3s' }}>
@@ -350,30 +684,47 @@ export default function Home() {
         </div>
       </main>
 
+      {/* E2E Test Panel (shown with ?test=true) */}
+      {testMode && (
+        <div className="fixed top-0 right-0 z-50 bg-slate-900 text-white p-4 rounded-bl-2xl shadow-2xl max-w-sm max-h-96 overflow-y-auto">
+          <div className="font-bold mb-2 text-green-400">E2E API Tests</div>
+          {testResults.length === 0 && <div className="text-slate-400 text-sm">Running...</div>}
+          {testResults.map((r, i) => (
+            <div key={i} className="flex justify-between text-xs py-1 border-b border-slate-700">
+              <span className="font-mono">{r.route}</span>
+              <span className={r.status.includes('FAIL') || r.status === 'ERR' ? 'text-red-400' : 'text-green-400'}>
+                {r.status} ({r.ms}ms)
+              </span>
+            </div>
+          ))}
+          {testResults.length > 0 && (
+            <div className="mt-2 text-xs text-slate-400">
+              {testResults.filter(r => r.status.includes('OK')).length}/{testResults.length} passed
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Models Section */}
       <section id="models" className="py-24 relative z-10">
         <div className="absolute inset-0 bg-white/40 backdrop-blur-md -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16 relative">
-            {/* Fairy Character Placeholder */}
-            <div className="absolute -top-10 right-10 animate-float opacity-80 hidden md:block" style={{ animationDelay: '1s' }}>
-              <Image src="https://picsum.photos/seed/fairy-char-2/120/120" alt="Fairy" width={80} height={80} className="rounded-full border-2 border-purple-200 shadow-md" referrerPolicy="no-referrer" />
-            </div>
-            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Our Magical Models</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Converted and optimized for maximum cuteness and performance.</p>
+            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Our Models</h2>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Custom fused Triton kernels and kernel-level optimizations for maximum throughput.</p>
           </div>
 
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
               <div className="bg-pink-100 w-14 h-14 rounded-2xl flex items-center justify-center text-pink-500 mb-4 shadow-inner">
                 <ImageIcon size={28} />
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">zimage</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Flagship image generation. Create stunning, fairy-themed artwork with just a few words.
+                CuteDSL-accelerated Z-Image Turbo with fused QK-norm+RoPE kernel and custom Triton kernels. 2x faster transformer blocks via kernel fusion and NVFP4 quantization on RTX 5090.
               </p>
               <div className="flex items-center gap-2 text-pink-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '100 $CUTEDSL'} / gen
+                <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '1000 $CUTEDSL'} / gen
               </div>
             </motion.div>
 
@@ -383,10 +734,10 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">chronos2</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Time series forecasting, but make it cute. Predict future trends with high accuracy.
+                SOTA time series forecasting. CuteDSL-accelerated Chronos-2 with 27x faster inference via 8 custom Triton kernels, fused preprocessing, and torch.compile. Quantile predictions for uncertainty estimation.
               </p>
               <div className="flex items-center gap-2 text-cyan-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '50 $CUTEDSL'} / forecast
+                <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '500 $CUTEDSL'} / forecast
               </div>
             </motion.div>
 
@@ -396,10 +747,10 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Kokoro TTS</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Magical Text-to-Speech. Give your applications a beautiful, enchanting voice.
+                Text-to-Speech with 20+ cute voices and languages. Beautiful, natural voices for your applications.
               </p>
               <div className="flex items-center gap-2 text-purple-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '10 $CUTEDSL'} / 100 chars
+                <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '100 $CUTEDSL'} / 100 chars
               </div>
             </motion.div>
 
@@ -407,41 +758,126 @@ export default function Home() {
               <div className="bg-blue-100 w-14 h-14 rounded-2xl flex items-center justify-center text-blue-500 mb-4 shadow-inner">
                 <Mic size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Coherelabs STT</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Speech-to-Text</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Speech-to-Text model. Understand every whisper and spell spoken by your users.
+                Gemma4-powered audio transcription. High-accuracy speech recognition for your applications.
               </p>
               <div className="flex items-center gap-2 text-blue-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '20 $CUTEDSL'} / minute
+                <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '200 $CUTEDSL'} / minute
+              </div>
+            </motion.div>
+
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+              <div className="bg-emerald-100 w-14 h-14 rounded-2xl flex items-center justify-center text-emerald-500 mb-4 shadow-inner">
+                <Cpu size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Gemma4 Chat</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                Google Gemma4 26B multimodal LLM. Text and vision understanding with OpenAI-compatible API. Powered by text-generator.io.
+              </p>
+              <div className="flex items-center gap-2 text-emerald-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> {getServicePrice('gemma4') > 0 ? `${formatCute(getServicePrice('gemma4'))} $CUTEDSL` : '50 $CUTEDSL'} / request
+              </div>
+            </motion.div>
+
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+              <div className="bg-orange-100 w-14 h-14 rounded-2xl flex items-center justify-center text-orange-500 mb-4 shadow-inner">
+                <Search size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Image Caption</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                GitBase-powered image captioning. Generate accurate descriptions of any image for accessibility, search, or AI pipelines.
+              </p>
+              <div className="flex items-center gap-2 text-orange-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> {getServicePrice('caption') > 0 ? `${formatCute(getServicePrice('caption'))} $CUTEDSL` : '50 $CUTEDSL'} / image
+              </div>
+            </motion.div>
+
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+              <div className="bg-red-100 w-14 h-14 rounded-2xl flex items-center justify-center text-red-500 mb-4 shadow-inner">
+                <Gamepad2 size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">LTX 2.3 Video</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                Text-to-video generation via LTX 2.3. Generate 6-second 1080p videos from text prompts. Powered by fal.ai.
+              </p>
+              <div className="flex items-center gap-2 text-red-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> {getServicePrice('ltx_video') > 0 ? `${formatCute(getServicePrice('ltx_video'))} $CUTEDSL` : '300 $CUTEDSL'} / video
+              </div>
+            </motion.div>
+
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+              <div className="bg-indigo-100 w-14 h-14 rounded-2xl flex items-center justify-center text-indigo-500 mb-4 shadow-inner">
+                <Globe size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Flux Image</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                Fast image generation via Flux Schnell. 4-step inference for quick 1024x1024 images. Also available on <a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 underline">eBank.nz</a>.
+              </p>
+              <div className="flex items-center gap-2 text-indigo-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> {getServicePrice('flux_image') > 0 ? `${formatCute(getServicePrice('flux_image'))} $CUTEDSL` : '40 $CUTEDSL'} / image
               </div>
             </motion.div>
           </div>
         </div>
       </section>
 
+      {/* Try It - Image Gen Demo */}
+      {walletAddress && apiKey && (
+        <section className="py-16 relative z-10">
+          <div className="max-w-4xl mx-auto px-6">
+            <div className="bg-white/80 backdrop-blur-xl rounded-3xl p-8 border border-pink-200 shadow-lg">
+              <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>
+              <p className="text-slate-500 mb-6 text-sm">Generate an image with your API key. This calls <code className="bg-slate-100 px-1 rounded">POST /api/service</code> with your credits.</p>
+              <div className="flex gap-3 mb-4">
+                <input
+                  type="text"
+                  value={demoPrompt}
+                  onChange={e => setDemoPrompt(e.target.value)}
+                  className="flex-1 px-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none"
+                  placeholder="a cute fairy in a forest..."
+                />
+                <button
+                  onClick={tryImageGen}
+                  disabled={demoLoading}
+                  className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 flex items-center gap-2"
+                >
+                  {demoLoading ? <RefreshCw size={18} className="animate-spin" /> : <ImageIcon size={18} />}
+                  Generate
+                </button>
+              </div>
+              <pre className="text-xs text-slate-500 bg-slate-50 p-3 rounded-lg mb-4 overflow-x-auto">{`curl -X POST ${typeof window !== 'undefined' ? window.location.origin : ''}/api/service \\
+  -H "Authorization: Bearer ${apiKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"service":"zimage","prompt":"${demoPrompt}","width":512,"height":512}'`}</pre>
+              {demoResult && (
+                <div className="mt-4">
+                  <img src={demoResult} alt="Generated" className="rounded-2xl shadow-lg max-w-full mx-auto" style={{maxHeight: 512}} />
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* LoRA Training & Inference */}
       <section id="training" className="py-24 relative z-10">
         <div className="max-w-7xl mx-auto px-6">
           <div className="glass-card rounded-3xl p-10 lg:p-16 flex flex-col lg:flex-row items-center gap-12 bg-gradient-to-r from-purple-100/90 to-pink-100/90 backdrop-blur-xl">
             <div className="flex-1 relative">
-              {/* Fairy Character Placeholder */}
-              <div className="absolute -top-16 -left-8 animate-float opacity-90" style={{ animationDelay: '2s' }}>
-                <Image src="https://picsum.photos/seed/fairy-char-3/100/100" alt="Fairy" width={80} height={80} className="rounded-full border-2 border-pink-300 shadow-md" referrerPolicy="no-referrer" />
-              </div>
-
               <div className="bg-purple-200 w-16 h-16 rounded-2xl flex items-center justify-center text-purple-600 mb-6 shadow-inner">
                 <Wand2 size={32} />
               </div>
-              <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">LoRA Training & Inference</h2>
+              <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">Training API</h2>
               <p className="text-lg text-slate-700 mb-6 font-medium">
-                Want to add your own magical touch? We support full training and inference of custom LoRAs for both <strong className="text-pink-600">zimage</strong> and <strong className="text-cyan-600">chronos2</strong>.
+                Fine-tune your own custom LoRAs for both <strong className="text-pink-600">zimage</strong> and <strong className="text-cyan-600">chronos2</strong> via our training API.
               </p>
               <p className="text-md text-slate-600 mb-8">
-                Upload your dataset, and our fairy workers will craft a personalized model just for you, ready to be queried via our API.
+                Upload your dataset and we&apos;ll train a personalized model for you, ready to query via our inference API.
               </p>
               <ul className="space-y-4 mb-8">
                 <li className="flex items-center gap-3 text-slate-700 font-medium">
-                  <Star className="text-yellow-500" size={20} /> Fast training times on enchanted GPUs
+                  <Star className="text-yellow-500" size={20} /> Fast training on high-end GPUs
                 </li>
                 <li className="flex items-center gap-3 text-slate-700 font-medium">
                   <Star className="text-yellow-500" size={20} /> LoRA support for Image Gen (zimage)
@@ -455,12 +891,12 @@ export default function Home() {
               </button>
             </div>
             <div className="flex-1 relative w-full aspect-video rounded-2xl overflow-hidden shadow-2xl border-4 border-white/50">
-              <Image 
-                src="https://picsum.photos/seed/magic-lora/800/600" 
-                alt="LoRA Training Magic" 
-                fill 
+              <Image
+                src={`${IMG_BASE}/training.webp`}
+                alt="LoRA fine-tuning for zimage and chronos2 models"
+                fill
+                loading="lazy"
                 className="object-cover"
-                referrerPolicy="no-referrer"
               />
             </div>
           </div>
@@ -472,8 +908,8 @@ export default function Home() {
         <div className="absolute inset-0 bg-blue-50/60 backdrop-blur-md -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
-            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Developer Magic</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Integrate our models into your own spells and applications.</p>
+            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Developer API</h2>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Integrate our models into your applications.</p>
           </div>
 
           <div className="grid md:grid-cols-2 gap-8">
@@ -483,10 +919,10 @@ export default function Home() {
                 <h3 className="font-fredoka text-3xl font-bold text-slate-800">API Usage Docs</h3>
               </div>
               <p className="text-slate-600 mb-8 text-lg">
-                Comprehensive documentation on how to authenticate, call our models (zimage, chronos2, Kokoro, Coherelabs), and manage your custom LoRAs.
+                Comprehensive documentation on how to authenticate, call our models (zimage, chronos2, Kokoro TTS, STT, Gemma4, Image Caption), and manage your custom LoRAs.
               </p>
-              <Link href="#docs" className="inline-flex items-center gap-2 text-blue-600 font-bold hover:text-blue-700">
-                Read the Grimoire (Docs) &rarr;
+              <Link href="#api-docs" className="inline-flex items-center gap-2 text-blue-600 font-bold hover:text-blue-700">
+                Read the Docs &rarr;
               </Link>
             </div>
 
@@ -509,32 +945,133 @@ export default function Home() {
                     )}
                   </div>
 
-                  {/* Deposit */}
-                  <div>
-                    <label className="text-sm font-bold text-slate-600 mb-2 block">Deposit $CUTEDSL</label>
-                    <div className="flex gap-2">
-                      <div className="relative flex-1">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                  {/* Email signup */}
+                  {!email ? (
+                    <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-5 rounded-2xl border border-indigo-200">
+                      <div className="text-sm font-bold text-slate-600 mb-2">Get updates & API tips via email</div>
+                      <div className="flex gap-2">
                         <input
-                          type="number"
-                          min="1"
-                          value={depositAmount}
-                          onChange={(e) => setDepositAmount(e.target.value)}
-                          className="w-full pl-7 pr-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-lg"
-                          placeholder="10"
+                          type="email"
+                          value={emailInput}
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && saveEmail()}
+                          className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-200 outline-none text-sm"
+                          placeholder="your@email.com"
                         />
+                        <button
+                          onClick={saveEmail}
+                          disabled={emailSaving || !emailInput.includes('@')}
+                          className="bg-gradient-to-r from-indigo-400 to-purple-400 text-white font-bold px-5 py-2.5 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 text-sm"
+                        >
+                          {emailSaving ? <RefreshCw size={16} className="animate-spin" /> : emailSaved ? <Check size={16} /> : 'Save'}
+                        </button>
                       </div>
+                      <div className="text-xs text-slate-400 mt-2">We&apos;ll send you a 20-part onboarding series about our API, acceleration techniques, and tips.</div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-sm text-slate-500 bg-indigo-50/50 px-4 py-2 rounded-xl">
+                      <Check size={14} className="text-green-500" />
+                      Signed up as {email}
+                    </div>
+                  )}
+
+                  {/* Buy / Deposit Tabs */}
+                  <div>
+                    <div className="flex gap-1 mb-3 bg-slate-100 p-1 rounded-xl">
                       <button
-                        onClick={createDeposit}
-                        disabled={depositLoading}
-                        className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50"
+                        onClick={() => setBuyTab('buy')}
+                        className={`flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all ${buyTab === 'buy' ? 'bg-gradient-to-r from-pink-400 to-purple-400 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                       >
-                        {depositLoading ? <RefreshCw size={20} className="animate-spin" /> : 'Deposit'}
+                        Buy $CUTEDSL
+                      </button>
+                      <button
+                        onClick={() => setBuyTab('deposit')}
+                        className={`flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all ${buyTab === 'deposit' ? 'bg-gradient-to-r from-pink-400 to-purple-400 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        Deposit
                       </button>
                     </div>
-                    {cutePrice > 0 && depositAmount && (
-                      <div className="text-xs text-slate-400 mt-2">
-                        &asymp; {formatCute(parseFloat(depositAmount || '0') / cutePrice)} $CUTEDSL at current price (${cutePrice.toFixed(8)}/CUTEDSL)
+
+                    {buyTab === 'buy' ? (
+                      <div className="space-y-3">
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm font-bold">SOL</span>
+                            <input
+                              type="number"
+                              min="0.01"
+                              step="0.01"
+                              value={buySolAmount}
+                              onChange={(e) => { setBuySolAmount(e.target.value); fetchSwapQuote(e.target.value); }}
+                              onBlur={() => fetchSwapQuote(buySolAmount)}
+                              className="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-lg"
+                              placeholder="0.1"
+                            />
+                          </div>
+                          <button
+                            onClick={executeBuy}
+                            disabled={buyLoading || !buySolAmount}
+                            className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50"
+                          >
+                            {buyLoading ? <RefreshCw size={20} className="animate-spin" /> : 'Swap'}
+                          </button>
+                        </div>
+                        {buyQuote && (
+                          <div className="bg-pink-50 p-3 rounded-xl text-sm space-y-1">
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">You pay</span>
+                              <span className="font-bold text-slate-700">{buyQuote.sol_amount} SOL (~${buyQuote.usd_value?.toFixed(2)})</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-500">You receive</span>
+                              <span className="font-bold text-pink-600">{formatCute(buyQuote.cute_amount)} $CUTEDSL</span>
+                            </div>
+                            {buyQuote.price_impact > 0.5 && (
+                              <div className="text-xs text-orange-500">Price impact: {buyQuote.price_impact.toFixed(2)}%</div>
+                            )}
+                          </div>
+                        )}
+                        {!buyQuote && buySolAmount && parseFloat(buySolAmount) > 0 && solPrice > 0 && (
+                          <div className="text-xs text-slate-400">
+                            ~${(parseFloat(buySolAmount || '0') * solPrice).toFixed(2)} USD &middot; Click Swap to get live quote from bags.fm pool
+                          </div>
+                        )}
+                        {buyStatus && (
+                          <div className={`text-sm font-medium px-3 py-2 rounded-lg ${buyStatus.includes('Error') || buyStatus.includes('cancelled') ? 'bg-red-50 text-red-600' : buyStatus.includes('complete') ? 'bg-green-50 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
+                            {buyStatus}
+                          </div>
+                        )}
+                        <div className="text-xs text-slate-400">
+                          Swaps SOL for $CUTEDSL via bags.fm liquidity pool. Signed with your Phantom wallet.
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                            <input
+                              type="number"
+                              min="1"
+                              value={depositAmount}
+                              onChange={(e) => setDepositAmount(e.target.value)}
+                              className="w-full pl-7 pr-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-lg"
+                              placeholder="10"
+                            />
+                          </div>
+                          <button
+                            onClick={createDeposit}
+                            disabled={depositLoading}
+                            className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50"
+                          >
+                            {depositLoading ? <RefreshCw size={20} className="animate-spin" /> : 'Deposit'}
+                          </button>
+                        </div>
+                        {cutePrice > 0 && depositAmount && (
+                          <div className="text-xs text-slate-400">
+                            &asymp; {formatCute(parseFloat(depositAmount || '0') / cutePrice)} $CUTEDSL at current price (${cutePrice.toFixed(8)}/CUTEDSL)
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -593,16 +1130,75 @@ export default function Home() {
         </div>
       </section>
 
+      {/* API Docs */}
+      <section id="api-docs" className="py-24 relative z-10">
+        <div className="absolute inset-0 bg-slate-50/80 backdrop-blur-md -z-10"></div>
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="text-center mb-16">
+            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">API Reference</h2>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">One unified endpoint for all services. Authenticate with your API key and start building.</p>
+          </div>
+
+          {/* API Key display */}
+          {apiKey && (
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-indigo-200 mb-8">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-bold text-slate-600 mb-1">Your API Key</div>
+                  <code className="text-sm bg-slate-100 px-3 py-2 rounded-lg font-mono">{apiKey}</code>
+                </div>
+                <button onClick={() => { navigator.clipboard.writeText(apiKey); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className="p-2 hover:bg-slate-100 rounded-lg">
+                  {copied ? <Check size={18} className="text-green-500" /> : <Copy size={18} className="text-slate-400" />}
+                </button>
+              </div>
+              <p className="text-xs text-slate-400 mt-2">Use as: <code className="bg-slate-100 px-1 rounded">Authorization: Bearer {apiKey}</code></p>
+            </div>
+          )}
+
+          {/* Quick example */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-8">
+            <pre className="text-xs text-slate-600 bg-slate-50 p-4 rounded-lg overflow-x-auto">{`curl -X POST https://cutedsl.com/api/service \\
+  -H "Authorization: Bearer ${apiKey || 'YOUR_API_KEY'}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"service": "zimage", "prompt": "a cute fairy in a forest", "width": 1024}'`}</pre>
+          </div>
+
+          {/* Preview cards */}
+          <div className="grid md:grid-cols-3 gap-4 mb-10">
+            {[
+              { name: 'Z-Image', slug: 'zimage', icon: <ImageIcon size={18} className="text-pink-500" />, desc: 'Text-to-image generation' },
+              { name: 'Chronos-2', slug: 'chronos2', icon: <LineChart size={18} className="text-cyan-500" />, desc: 'Time series forecasting' },
+              { name: 'Kokoro TTS', slug: 'tts', icon: <Volume2 size={18} className="text-purple-500" />, desc: 'Text-to-speech synthesis' },
+            ].map(s => (
+              <Link key={s.slug} href={`/docs/${s.slug}`} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 hover:border-pink-300 hover:shadow-md transition-all group">
+                <div className="flex items-center gap-2 mb-2">
+                  {s.icon}
+                  <h3 className="font-bold text-slate-800 group-hover:text-pink-600 transition-colors">{s.name}</h3>
+                </div>
+                <p className="text-sm text-slate-500">{s.desc}</p>
+              </Link>
+            ))}
+          </div>
+
+          <div className="text-center">
+            <Link href="/docs" className="inline-flex items-center gap-2 bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-8 py-3 rounded-full shadow-lg hover:shadow-pink-300/50 hover:scale-105 transition-all">
+              View Full API Docs <ArrowRight size={18} />
+            </Link>
+            <p className="text-sm text-slate-500 mt-3">9 services with interactive playgrounds, full parameter docs, and code examples</p>
+          </div>
+        </div>
+      </section>
+
       {/* Tokenomics */}
       <section id="token" className="py-24 bg-slate-900 text-white relative z-10 overflow-hidden">
-        <div className="absolute inset-0 bg-[url('https://picsum.photos/seed/stars/1920/1080')] opacity-20 mix-blend-overlay"></div>
+        <div className="absolute inset-0 opacity-20 mix-blend-overlay" style={{ backgroundImage: `url(${IMG_BASE}/token-bg.webp)`, backgroundSize: 'cover' }}></div>
         <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-transparent to-pink-900/80"></div>
         
         <div className="max-w-4xl mx-auto px-6 text-center relative z-10">
           <Coins size={64} className="text-yellow-400 mx-auto mb-8 animate-bounce" />
           <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTEDSL</h2>
           <p className="text-xl text-slate-200 mb-10 font-medium">
-            Cute DSL operates exclusively on the Solana blockchain. The only way to pay for compute, model conversion, and inference is with our native memecoin, <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span>.
+            Pay for AI inference with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span> on Solana. First-party models (zimage, chronos2, TTS) are priced at the token&apos;s all-time high &mdash; so early holders get cheaper inference forever. The more $CUTEDSL grows, the better your rate locks in.
           </p>
           
           <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-3xl p-8 mb-10">
@@ -644,10 +1240,10 @@ export default function Home() {
       <section id="applied-science" className="py-24 relative z-10 bg-slate-50/90 backdrop-blur-lg border-t border-slate-200">
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
-            <div className="inline-block bg-indigo-100 text-indigo-700 px-4 py-1 rounded-full font-bold text-sm mb-4">The Applied Science Company</div>
+            <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="inline-block bg-indigo-100 text-indigo-700 px-4 py-1 rounded-full font-bold text-sm mb-4 hover:bg-indigo-200 transition-colors">The Applied Science Company</a>
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">Our Ecosystem</h2>
             <p className="text-lg text-slate-600 max-w-3xl mx-auto">
-              Cute DSL is part of a broader ecosystem of cutting-edge AI and technology products developed by the Applied Science Company.
+              Cute DSL is part of a broader ecosystem of cutting-edge AI and technology products developed by <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-800 underline">the Applied Science Company</a>.
             </p>
           </div>
 
@@ -656,7 +1252,7 @@ export default function Home() {
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-16">
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
               <div className="flex justify-between items-start mb-4">
-                <h4 className="font-bold text-xl text-slate-800">Dictatorflow.com</h4>
+                <a href="https://dictatorflow.com" target="_blank" rel="noopener noreferrer" className="font-bold text-xl text-slate-800 hover:text-indigo-600 transition-colors">Dictatorflow.com</a>
                 <Mic className="text-indigo-500" size={20} />
               </div>
               <p className="text-slate-600 text-sm mb-4">Speak to your computer. Advanced voice control and dictation.</p>
@@ -664,7 +1260,7 @@ export default function Home() {
             
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
               <div className="flex justify-between items-start mb-4">
-                <h4 className="font-bold text-xl text-slate-800">Netwrck.com</h4>
+                <a href="https://netwrck.com" target="_blank" rel="noopener noreferrer" className="font-bold text-xl text-slate-800 hover:text-pink-600 transition-colors">Netwrck.com</a>
                 <Users className="text-pink-500" size={20} />
               </div>
               <p className="text-slate-600 text-sm mb-4">Social AI Community Network. Interact with advanced AI chatbots and create immersive illustrated stories voiced by AI agents.</p>
@@ -677,7 +1273,7 @@ export default function Home() {
 
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
               <div className="flex justify-between items-start mb-4">
-                <h4 className="font-bold text-xl text-slate-800">eBank.nz</h4>
+                <a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-xl text-slate-800 hover:text-cyan-600 transition-colors">eBank.nz</a>
                 <ImageIcon className="text-cyan-500" size={20} />
               </div>
               <p className="text-slate-600 text-sm mb-4">Affordable AI Art Generator. State-of-the-art generative art platform creating HD visuals using diffusion models and LoRAs.</p>
@@ -689,7 +1285,7 @@ export default function Home() {
 
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
               <div className="flex justify-between items-start mb-4">
-                <h4 className="font-bold text-xl text-slate-800">Helix.app.nz</h4>
+                <a href="https://helix.app.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-xl text-slate-800 hover:text-emerald-600 transition-colors">Helix.app.nz</a>
                 <Database className="text-emerald-500" size={20} />
               </div>
               <p className="text-slate-600 text-sm mb-4">The AI Data Scientist. Interprets complex datasets, generates insights, and automates reporting with human-like reasoning.</p>
@@ -701,7 +1297,7 @@ export default function Home() {
 
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 hover:shadow-md transition-shadow">
               <div className="flex justify-between items-start mb-4">
-                <h4 className="font-bold text-xl text-slate-800">BitBank.nz</h4>
+                <a href="https://bitbank.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-xl text-slate-800 hover:text-orange-600 transition-colors">BitBank.nz</a>
                 <LineChart className="text-orange-500" size={20} />
               </div>
               <p className="text-slate-600 text-sm mb-4">Live Crypto Forecasting. Institutional-grade forecasting platform providing actionable predictions backed by real-time AI analysis.</p>
@@ -715,41 +1311,45 @@ export default function Home() {
           <h3 className="text-2xl font-bold text-slate-800 mb-8 border-b border-slate-200 pb-2">Innovation Lab</h3>
           <div className="grid md:grid-cols-3 gap-6 mb-16">
             <div className="bg-slate-100/50 p-6 rounded-2xl border border-slate-200">
-              <h4 className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2"><Code size={16}/> Text-Generator.io</h4>
+              <a href="https://text-generator.io" target="_blank" rel="noopener noreferrer" className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2 hover:text-indigo-600 transition-colors"><Code size={16}/> Text-Generator.io</a>
               <p className="text-slate-600 text-sm">Secure, multilingual text and code generation powered by massive neural networks.</p>
             </div>
             <div className="bg-slate-100/50 p-6 rounded-2xl border border-slate-200">
-              <h4 className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2"><Cpu size={16}/> StackHack</h4>
+              <a href="https://stackhack.netwrck.com" target="_blank" rel="noopener noreferrer" className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2 hover:text-indigo-600 transition-colors"><Cpu size={16}/> StackHack</a>
               <p className="text-slate-600 text-sm">Analyze and breakdown any technology stack instantly using Large Language Models.</p>
             </div>
             <div className="bg-slate-100/50 p-6 rounded-2xl border border-slate-200">
-              <h4 className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2"><Layout size={16}/> WebSim</h4>
+              <a href="https://sitesim.net" target="_blank" rel="noopener noreferrer" className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2 hover:text-indigo-600 transition-colors"><Layout size={16}/> SiteSim</a>
               <p className="text-slate-600 text-sm">Dream it, prompt it, browse it. Create entire simulated websites using LLMs on the fly.</p>
             </div>
           </div>
 
-          {/* Legacy Portfolio */}
-          <h3 className="text-2xl font-bold text-slate-800 mb-8 border-b border-slate-200 pb-2">Legacy Portfolio</h3>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          {/* More Products */}
+          <h3 className="text-2xl font-bold text-slate-800 mb-8 border-b border-slate-200 pb-2">More Products</h3>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
-              <h4 className="font-bold text-slate-800 text-sm">How.nz</h4>
-              <p className="text-xs text-slate-500 mt-1">Node deep dives</p>
+              <a href="https://bigmultiplayerchess.com" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">BigMultiplayerChess</a>
+              <p className="text-xs text-slate-500 mt-1">Large-scale AI chess game</p>
             </div>
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
-              <h4 className="font-bold text-slate-800 text-sm">Ring.nz</h4>
-              <p className="text-xs text-slate-500 mt-1">Search Algorithms</p>
+              <a href="https://rung.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">Rung.nz</a>
+              <p className="text-xs text-slate-500 mt-1">Voice chat with AI</p>
             </div>
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
-              <h4 className="font-bold text-slate-800 text-sm">reWord Game</h4>
-              <p className="text-xs text-slate-500 mt-1">Game Logic</p>
+              <a href="https://evangeler.com" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">Evangeler.com</a>
+              <p className="text-xs text-slate-500 mt-1">Affiliate marketing platform</p>
             </div>
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
-              <h4 className="font-bold text-slate-800 text-sm">BigMultiplayerChess</h4>
-              <p className="text-xs text-slate-500 mt-1">Real-time Sockets</p>
+              <a href="https://rewordgame.com" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">reWord Game</a>
+              <p className="text-xs text-slate-500 mt-1">AI word puzzle game</p>
             </div>
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
-              <h4 className="font-bold text-slate-800 text-sm">Evangeler.com</h4>
-              <p className="text-xs text-slate-500 mt-1">Social Graph</p>
+              <a href="https://how.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">How.nz</a>
+              <p className="text-xs text-slate-500 mt-1">Technical deep dives</p>
+            </div>
+            <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
+              <a href="https://ring.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">Ring.nz</a>
+              <p className="text-xs text-slate-500 mt-1">Search engine</p>
             </div>
           </div>
         </div>
@@ -761,11 +1361,11 @@ export default function Home() {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
             <div className="col-span-1 md:col-span-2">
               <div className="flex items-center gap-2 mb-4">
-                <Wand2 className="text-pink-500" size={24} />
-                <span className="font-fredoka text-2xl font-bold text-slate-800">Cute DSL</span>
+                <Image src={`${IMG_BASE}/logo.webp`} alt="CuteDSL" width={32} height={32} className="rounded-lg" />
+                <span className="font-fredoka text-2xl font-bold text-slate-800">CuteDSL</span>
               </div>
               <p className="text-slate-500 font-medium max-w-sm">
-                A magical AI model conversion and training platform. Part of the Applied Science Company ecosystem.
+                SOTA model acceleration &amp; inference platform. Part of the <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-700 underline">Applied Science Company</a> ecosystem.
               </p>
             </div>
             
@@ -782,19 +1382,20 @@ export default function Home() {
             <div>
               <h4 className="font-bold text-slate-800 mb-4">Ecosystem</h4>
               <ul className="space-y-2 text-slate-500 font-medium">
+                <li><a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">App.nz — Applied Science Co.</a></li>
                 <li><a href="https://netwrck.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Netwrck.com</a></li>
                 <li><a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">eBank.nz</a></li>
                 <li><a href="https://helix.app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Helix.app.nz</a></li>
                 <li><a href="https://bitbank.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">BitBank.nz</a></li>
+                <li><a href="https://dictatorflow.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Dictatorflow.com</a></li>
               </ul>
             </div>
           </div>
           
           <div className="border-t border-slate-200 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
-            <p className="text-slate-400 font-medium text-sm">© 2026 Applied Science Company. All magic reserved.</p>
+            <p className="text-slate-400 font-medium text-sm">© 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Applied Science Company</a>. All rights reserved.</p>
             <div className="flex gap-4">
-              <a href="#" className="text-slate-400 hover:text-pink-500 transition-colors">Twitter</a>
-              <a href="#" className="text-slate-400 hover:text-purple-500 transition-colors">Discord</a>
+              <a href="https://x.com/leeleepenkman" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-pink-500 transition-colors">X</a>
               <a href="#" className="text-slate-400 hover:text-cyan-500 transition-colors">GitHub</a>
             </div>
           </div>

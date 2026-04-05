@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How CuteChronos2 Achieves 24x Speedup — Applied Science</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">CuteChronos2: 24x Faster Forecasting</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">A technical deep dive from Applied Science</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Amazon's Chronos-2 is a powerful time-series foundation model, but out of the box it leaves a lot of performance on the table. <strong>CuteChronos2</strong> is our optimized pipeline that delivers a <strong>24x speedup</strong> with identical output quality. Here is how we did it.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">1. Batch-Compiled Attention</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">The default Chronos-2 attention implementation processes sequences one at a time. CuteChronos2 rewrites the attention path to batch across forecast horizons, then wraps the entire module with <code style="background:#f0f0f5; padding:2px 6px; border-radius:4px; font-size:13px;">torch.compile</code>. This alone eliminates Python dispatch overhead and enables the compiler to fuse softmax, scaling, and dropout into a single kernel.</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:13px; font-weight:700;">BEFORE</p>
+<p style="margin:0; color:#2d2d3f; font-size:14px; line-height:1.5;">Sequential attention heads, eager-mode execution, Python loop per head.</p>
+</td>
+</tr>
+<tr><td style="padding:6px 0;"></td></tr>
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<p style="margin:0 0 4px; color:#00b894; font-size:13px; font-weight:700;">AFTER</p>
+<p style="margin:0; color:#2d2d3f; font-size:14px; line-height:1.5;">Batched multi-head attention, compiled into a single CUDA graph with zero Python overhead.</p>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">2. Fused MLP Layers</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Each transformer block in Chronos-2 has two linear projections separated by a GELU activation. CuteChronos2 fuses these into a single kernel, cutting memory round-trips in half and improving arithmetic intensity. Combined with weight pre-packing, the MLP path runs roughly 3x faster in isolation.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">3. torch.compile with reduce-overhead</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">We compile the full pipeline using <code style="background:#f0f0f5; padding:2px 6px; border-radius:4px; font-size:13px;">torch.compile(mode="reduce-overhead")</code>, which traces the entire forward pass into CUDA graphs. This eliminates kernel launch latency and CPU-GPU synchronization points that dominate small-batch inference.</p>
+
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">from cutedsl import CuteChronos2Pipeline
+
+pipe = CuteChronos2Pipeline.from_pretrained(
+    "amazon/chronos-bolt-base",
+    torch_compile=True,
+    compile_mode="reduce-overhead"
+)
+forecast = pipe.predict(context, prediction_length=64)</pre>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Benchmark Results</h2>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#2d2d3f; font-size:14px; font-weight:700; padding:0 0 8px;">Pipeline</td>
+<td style="color:#2d2d3f; font-size:14px; font-weight:700; padding:0 0 8px; text-align:right;">Latency (64-step)</td>
+</tr>
+<tr>
+<td style="color:#2d2d3f; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5;">Chronos-2 (baseline)</td>
+<td style="color:#2d2d3f; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; text-align:right;">~2400 ms</td>
+</tr>
+<tr>
+<td style="color:#00b894; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; font-weight:600;">CuteChronos2</td>
+<td style="color:#00b894; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; text-align:right; font-weight:600;">~100 ms (24x)</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">Read the full write-up on our blog, or see the raw numbers on the benchmarks page.</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+<tr>
+<td align="center" style="padding-right:12px;">
+<a href="https://cutedsl.com/blog" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Read the Blog Post</a>
+</td>
+<td align="center">
+<a href="https://cutedsl.com/evals" style="display:inline-block; background:#ffffff; color:#6c5ce7; text-decoration:none; padding:12px 36px; border-radius:8px; font-size:16px; font-weight:600; border:2px solid #6c5ce7;">View Benchmarks</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;·&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL · by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

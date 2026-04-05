@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chronos-2 Forecasting — 24x Faster Time Series Predictions</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">Chronos-2 Forecasting</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">24x faster time series predictions with CuteChronos2Pipeline</p>
+</td>
+</tr>
+
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#333; font-size:15px; line-height:1.6;">Hi {{.WalletShort}},</p>
+<p style="margin:0 0 16px; color:#333; font-size:15px; line-height:1.6;">Chronos-2 is Amazon's foundation model for time series forecasting. Our <strong>CuteChronos2Pipeline</strong> accelerates it by 24x through compiled inference, optimized tokenization, and batched prediction -- making real-time forecasting practical at scale.</p>
+
+<!-- Stats Cards -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td width="33%" style="padding:0 4px 0 0; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">24x</p>
+<p style="margin:0; color:#666; font-size:12px;">Speedup</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">$0.50</p>
+<p style="margin:0; color:#666; font-size:12px;">Per Forecast</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 0 0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">512</p>
+<p style="margin:0; color:#666; font-size:12px;">Max Context</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<!-- How It Works -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">How CuteChronos2Pipeline Works</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; margin-bottom:24px;">
+<tr>
+<td style="padding:20px;">
+<p style="margin:0 0 8px; color:#333; font-size:14px; line-height:1.5;"><strong>Compiled Inference</strong> -- torch.compile with reduce-overhead mode eliminates Python overhead and fuses operations.</p>
+<p style="margin:0 0 8px; color:#333; font-size:14px; line-height:1.5;"><strong>Optimized Tokenization</strong> -- custom tokenizer avoids redundant scaling and normalization passes.</p>
+<p style="margin:0; color:#333; font-size:14px; line-height:1.5;"><strong>Batched Prediction</strong> -- multiple forecast horizons computed in a single forward pass.</p>
+</td>
+</tr>
+</table>
+
+<!-- Use Cases -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">Use Cases</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td width="33%" style="padding:0 4px 0 0; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 12px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">Finance</p>
+<p style="margin:0; color:#666; font-size:12px; line-height:1.4;">Price prediction, volatility, portfolio signals</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 12px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">IoT</p>
+<p style="margin:0; color:#666; font-size:12px; line-height:1.4;">Sensor anomalies, equipment monitoring</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 0 0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 12px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">Demand</p>
+<p style="margin:0; color:#666; font-size:12px; line-height:1.4;">Inventory planning, capacity forecasting</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<!-- API Example -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">Try It Now</h2>
+<p style="margin:0 0 12px; color:#666; font-size:14px; line-height:1.5;">Pass your historical values and the number of steps to predict:</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl -X POST https://cutedsl.com/api/service \
+  -H "Authorization: Bearer {{.APIKey}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "chronos2",
+    "values": [120, 135, 142, 138, 155, 160, 172, 168, 180, 195],
+    "prediction_length": 12
+  }'</pre>
+<p style="margin:12px 0 0; color:#666; font-size:13px; line-height:1.5;">Returns a JSON response with <code style="background:#f8f7ff; padding:2px 6px; border-radius:4px; font-size:12px; color:#6c5ce7;">predictions</code> -- an array of forecasted values with confidence intervals.</p>
+
+<!-- CTA -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td align="center" style="padding:28px 0 8px;">
+<a href="https://cutedsl.com" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Run Your First Forecast</a>
+</td>
+</tr>
+</table>
+
+<p style="margin:16px 0 0; color:#666; font-size:13px; line-height:1.5; text-align:center;">Read the full deep dive on <a href="https://cutedsl.com/blog" style="color:#6c5ce7; text-decoration:none; font-weight:600;">the blog</a> or check <a href="https://cutedsl.com/evals" style="color:#6c5ce7; text-decoration:none; font-weight:600;">benchmarks</a>.</p>
+</td>
+</tr>
+
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

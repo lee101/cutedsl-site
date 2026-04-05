@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speech-to-Text — Transcribe Audio With Gemma4 STT</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">Speech-to-Text</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">Transcribe audio with Gemma4 STT at $0.20 per minute</p>
+</td>
+</tr>
+
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#333; font-size:15px; line-height:1.6;">Hi {{.WalletShort}},</p>
+<p style="margin:0 0 16px; color:#333; font-size:15px; line-height:1.6;">Our speech-to-text service is powered by Gemma4's audio understanding capabilities. Upload an audio file or pass a URL, and get back accurate transcriptions -- ideal for meetings, podcasts, voice notes, and any audio content you need in text form.</p>
+
+<!-- Stats Cards -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td width="33%" style="padding:0 4px 0 0; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">$0.20</p>
+<p style="margin:0; color:#666; font-size:12px;">Per Minute</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">Gemma4</p>
+<p style="margin:0; color:#666; font-size:12px;">Powered</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 0 0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">JSON</p>
+<p style="margin:0; color:#666; font-size:12px;">Output</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<!-- Accuracy -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">Why Gemma4 STT</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; margin-bottom:24px;">
+<tr>
+<td style="padding:20px;">
+<p style="margin:0 0 8px; color:#333; font-size:14px; line-height:1.5;"><strong>Multimodal Foundation</strong> -- Gemma4's native audio understanding produces highly accurate transcriptions without a separate ASR pipeline.</p>
+<p style="margin:0 0 8px; color:#333; font-size:14px; line-height:1.5;"><strong>Context Awareness</strong> -- the model understands context, handling technical jargon, accents, and noisy environments better than traditional STT systems.</p>
+<p style="margin:0; color:#333; font-size:14px; line-height:1.5;"><strong>Simple API</strong> -- pass an audio URL and get structured JSON back. No configuration, no model selection, no preprocessing required.</p>
+</td>
+</tr>
+</table>
+
+<!-- Use Cases -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">Use Cases</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td width="50%" style="padding:0 6px 12px 0; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px;">
+<tr>
+<td style="padding:16px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">Meeting Notes</p>
+<p style="margin:0; color:#666; font-size:13px; line-height:1.4;">Transcribe calls and meetings automatically.</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="50%" style="padding:0 0 12px 6px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px;">
+<tr>
+<td style="padding:16px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">Podcast Indexing</p>
+<p style="margin:0; color:#666; font-size:13px; line-height:1.4;">Make audio content searchable with full transcripts.</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td width="50%" style="padding:0 6px 0 0; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px;">
+<tr>
+<td style="padding:16px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">Voice Commands</p>
+<p style="margin:0; color:#666; font-size:13px; line-height:1.4;">Add voice input to apps and interfaces.</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="50%" style="padding:0 0 0 6px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px;">
+<tr>
+<td style="padding:16px;">
+<p style="margin:0 0 4px; color:#333; font-size:14px; font-weight:700;">Accessibility</p>
+<p style="margin:0; color:#666; font-size:13px; line-height:1.4;">Generate captions and subtitles from audio.</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<!-- API Example -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">Try It Now</h2>
+<p style="margin:0 0 12px; color:#666; font-size:14px; line-height:1.5;">Pass an audio URL to transcribe:</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl -X POST https://cutedsl.com/api/service \
+  -H "Authorization: Bearer {{.APIKey}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "stt",
+    "audio_url": "https://example.com/meeting-recording.wav"
+  }'</pre>
+<p style="margin:12px 0 0; color:#666; font-size:13px; line-height:1.5;">Returns a JSON response with <code style="background:#f8f7ff; padding:2px 6px; border-radius:4px; font-size:12px; color:#6c5ce7;">transcription</code> text and <code style="background:#f8f7ff; padding:2px 6px; border-radius:4px; font-size:12px; color:#6c5ce7;">duration_seconds</code>. Billing is based on audio duration.</p>
+
+<!-- CTA -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td align="center" style="padding:28px 0 8px;">
+<a href="https://cutedsl.com" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Transcribe Audio Now</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

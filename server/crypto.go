@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -58,9 +59,19 @@ var (
 // $CUTE price cache
 var (
 	cutePriceUSD     float64 = 0.001 // Default fallback
+	cutePriceATH     float64 = 0.001 // All-time high for subsidized pricing
 	cutePriceMu      sync.RWMutex
 	cutePriceUpdated time.Time
 )
+
+// getCUTEPriceATH returns the all-time high price.
+// First-party services on our hardware are priced at ATH rate,
+// meaning if you bought $CUTEDSL early you get cheaper inference forever.
+func getCUTEPriceATH() float64 {
+	cutePriceMu.RLock()
+	defer cutePriceMu.RUnlock()
+	return cutePriceATH
+}
 
 // SOL price cache (needed for conversions)
 var (
@@ -302,9 +313,13 @@ func updateCUTEPrice() {
 			price := solPrice / cutePerSOL
 			cutePriceMu.Lock()
 			cutePriceUSD = price
+			if price > cutePriceATH {
+				cutePriceATH = price
+				log.Printf("CUTEDSL new ATH: $%.8f", price)
+			}
 			cutePriceUpdated = time.Now()
 			cutePriceMu.Unlock()
-			log.Printf("CUTEDSL price updated: $%.8f (%.0f CUTEDSL/SOL)", price, cutePerSOL)
+			log.Printf("CUTEDSL price updated: $%.8f (ATH: $%.8f, %.0f CUTEDSL/SOL)", price, cutePriceATH, cutePerSOL)
 		}
 	}
 }
@@ -876,4 +891,179 @@ func sweepSOL(intent CryptoCheckoutIntent, amount uint64) error {
 
 	_ = privKey // Used in actual transaction signing
 	return nil
+}
+
+// --- Bags.fm Swap Proxy ---
+// These endpoints proxy to bags.fm API so the frontend can build swap transactions
+// without exposing our API key. Users sign with their own wallet.
+
+func handleSwapQuote(ctx *fasthttp.RequestCtx) {
+	if bagsAPIKey == "" || cuteTokenMint == "" {
+		jsonError(ctx, 503, "swap not configured")
+		return
+	}
+
+	// Parse SOL amount from query
+	solAmountStr := string(ctx.QueryArgs().Peek("sol_amount"))
+	if solAmountStr == "" {
+		solAmountStr = "0.1"
+	}
+	solAmount := parseFloat(solAmountStr)
+	if solAmount <= 0 || solAmount > 100 {
+		jsonError(ctx, 400, "sol_amount must be between 0 and 100")
+		return
+	}
+
+	// Convert SOL to lamports
+	lamports := int64(solAmount * 1e9)
+
+	// Get quote from bags.fm
+	quoteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	quoteURL := fmt.Sprintf("%s/trade/quote?inputMint=%s&outputMint=%s&amount=%d&slippageBps=300&slippageMode=manual",
+		bagsAPIBaseURL, solMint, cuteTokenMint, lamports)
+
+	req, err := http.NewRequestWithContext(quoteCtx, "GET", quoteURL, nil)
+	if err != nil {
+		jsonError(ctx, 500, "failed to create quote request")
+		return
+	}
+	req.Header.Set("x-api-key", bagsAPIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		jsonError(ctx, 502, "bags.fm quote request failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var quoteResp struct {
+		Success  bool            `json:"success"`
+		Response json.RawMessage `json:"response"`
+		Error    string          `json:"error"`
+		Message  string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &quoteResp); err != nil {
+		jsonError(ctx, 502, "failed to parse bags.fm response")
+		return
+	}
+
+	if !quoteResp.Success {
+		errMsg := quoteResp.Error
+		if errMsg == "" {
+			errMsg = quoteResp.Message
+		}
+		jsonError(ctx, 400, fmt.Sprintf("quote failed: %s", errMsg))
+		return
+	}
+
+	// Parse key fields for the frontend
+	var parsed struct {
+		InAmount              string          `json:"inAmount"`
+		OutAmount             string          `json:"outAmount"`
+		MinOutAmount          string          `json:"minOutAmount"`
+		PriceImpactPct        float64         `json:"priceImpactPct"`
+		PlatformFee           json.RawMessage `json:"platformFee"`
+		SimulatedComputeUnits *int            `json:"simulatedComputeUnits"`
+	}
+	json.Unmarshal(quoteResp.Response, &parsed)
+
+	outTokens := parseFloat(parsed.OutAmount)
+	cuteDecimals := 9.0 // SPL token decimals
+
+	solPrice := getSOLPriceUSD()
+	usdValue := solAmount * solPrice
+
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"success":        true,
+		"quote":          quoteResp.Response, // Pass full quote for swap building
+		"sol_amount":     solAmount,
+		"cute_amount":    outTokens / math.Pow(10, cuteDecimals),
+		"cute_amount_raw": parsed.OutAmount,
+		"min_cute_amount": parseFloat(parsed.MinOutAmount) / math.Pow(10, cuteDecimals),
+		"usd_value":     usdValue,
+		"sol_price_usd":  solPrice,
+		"price_impact":   parsed.PriceImpactPct,
+	})
+}
+
+func handleSwapTransaction(ctx *fasthttp.RequestCtx) {
+	if bagsAPIKey == "" || cuteTokenMint == "" {
+		jsonError(ctx, 503, "swap not configured")
+		return
+	}
+
+	var req struct {
+		QuoteResponse json.RawMessage `json:"quote"`
+		UserPublicKey string          `json:"user_public_key"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		jsonError(ctx, 400, "invalid request body")
+		return
+	}
+	if req.UserPublicKey == "" {
+		jsonError(ctx, 400, "user_public_key required")
+		return
+	}
+	if req.QuoteResponse == nil {
+		jsonError(ctx, 400, "quote required")
+		return
+	}
+
+	// Build swap transaction via bags.fm
+	swapCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"quoteResponse": json.RawMessage(req.QuoteResponse),
+		"userPublicKey": req.UserPublicKey,
+	})
+
+	swapReq, err := http.NewRequestWithContext(swapCtx, "POST",
+		fmt.Sprintf("%s/trade/swap", bagsAPIBaseURL),
+		strings.NewReader(string(payload)))
+	if err != nil {
+		jsonError(ctx, 500, "failed to create swap request")
+		return
+	}
+	swapReq.Header.Set("x-api-key", bagsAPIKey)
+	swapReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(swapReq)
+	if err != nil {
+		jsonError(ctx, 502, "bags.fm swap request failed")
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var swapResp struct {
+		Success  bool            `json:"success"`
+		Response json.RawMessage `json:"response"`
+		Error    string          `json:"error"`
+		Message  string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &swapResp); err != nil {
+		jsonError(ctx, 502, "failed to parse swap response")
+		return
+	}
+
+	if !swapResp.Success {
+		errMsg := swapResp.Error
+		if errMsg == "" {
+			errMsg = swapResp.Message
+		}
+		jsonError(ctx, 400, fmt.Sprintf("swap build failed: %s", errMsg))
+		return
+	}
+
+	// Return the transaction for the frontend to sign
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"success":     true,
+		"transaction": swapResp.Response,
+	})
 }

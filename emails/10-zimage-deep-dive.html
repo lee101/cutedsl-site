@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CuteZImage: Fused Attention Kernels Explained</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">CuteZImage: Fused Attention Kernels</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">How custom Triton kernels make Z-Image Turbo fly</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Z-Image Turbo is already one of the fastest text-to-image models available, but standard PyTorch attention is still the bottleneck. <strong>CuteZImage</strong> replaces the entire attention path with a custom <strong>CuteZImageTransformer</strong> built on fused Triton kernels. Here is what that means in practice.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">The Problem with Standard Attention</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">In a typical diffusion transformer, attention involves separate kernel launches for Q/K/V projections, the scaled dot-product, softmax normalization, and the output projection. Each kernel launch incurs overhead, and intermediate tensors (the full attention matrix) consume significant GPU memory — especially at higher resolutions.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">CuteZImageTransformer: Fused Triton Kernels</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">The CuteZImageTransformer replaces the multi-kernel attention pipeline with a single fused Triton kernel that handles:</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.8;">
+<strong style="color:#6c5ce7;">1.</strong> Q, K, V projection from input hidden states<br>
+<strong style="color:#6c5ce7;">2.</strong> Tiled matrix multiplication with online softmax<br>
+<strong style="color:#6c5ce7;">3.</strong> Output projection and residual addition<br>
+<strong style="color:#6c5ce7;">4.</strong> Layer normalization (fused into the same kernel)
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Because the full attention matrix is never materialized in global memory, peak VRAM usage drops substantially. The tiled approach keeps data in SRAM throughout the computation.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Memory Savings</h2>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#2d2d3f; font-size:14px; font-weight:700; padding:0 0 8px;">Resolution</td>
+<td style="color:#2d2d3f; font-size:14px; font-weight:700; padding:0 0 8px; text-align:center;">Standard</td>
+<td style="color:#2d2d3f; font-size:14px; font-weight:700; padding:0 0 8px; text-align:right;">CuteZImage</td>
+</tr>
+<tr>
+<td style="color:#2d2d3f; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5;">512x512</td>
+<td style="color:#2d2d3f; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; text-align:center;">6.2 GB</td>
+<td style="color:#00b894; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; text-align:right; font-weight:600;">3.8 GB</td>
+</tr>
+<tr>
+<td style="color:#2d2d3f; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5;">1024x1024</td>
+<td style="color:#2d2d3f; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; text-align:center;">14.1 GB</td>
+<td style="color:#00b894; font-size:14px; padding:4px 0; border-top:1px solid #e0dff5; text-align:right; font-weight:600;">7.3 GB</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Throughput Gains</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Fewer kernel launches, no intermediate memory allocations, and better GPU occupancy add up. On an A100, CuteZImage generates 1024x1024 images approximately <strong>2.5x faster</strong> than the default attention path, with no quality degradation — the outputs are numerically identical.</p>
+
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">from cutedsl import CuteZImageTransformer
+
+# Drop-in replacement for the standard transformer
+model.transformer = CuteZImageTransformer.from_standard(
+    model.transformer,
+    fuse_layer_norm=True
+)</pre>
+
+<p style="margin:24px 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">For the full technical write-up with flame graphs and roofline analysis, check out the blog. Raw latency numbers are on the benchmarks page.</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+<tr>
+<td align="center" style="padding-right:12px;">
+<a href="https://cutedsl.com/blog" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Read the Blog Post</a>
+</td>
+<td align="center">
+<a href="https://cutedsl.com/evals" style="display:inline-block; background:#ffffff; color:#6c5ce7; text-decoration:none; padding:12px 36px; border-radius:8px; font-size:16px; font-weight:600; border:2px solid #6c5ce7;">View Benchmarks</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;·&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL · by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

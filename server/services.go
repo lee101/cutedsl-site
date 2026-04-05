@@ -19,49 +19,104 @@ var servicePricesUSD = map[string]float64{
 	"chronos2":      0.50, // per forecast
 	"tts":           0.10, // per 100 chars
 	"stt":           0.20, // per minute
+	"gemma4":        0.05, // per request
+	"caption":       0.05, // per image
 	"lora_training": 50.00,
+	"ltx_video":     0.30, // per ~6s 1080p video via fal.ai
+	"flux_image":    0.04, // per image via fal.ai or netwrck
+	"nsfw_detect":   0.01, // per image classification
+}
+
+// First-party services run on our hardware — priced at ATH rate to reward early holders.
+// If you bought $CUTEDSL at $0.001 and ATH is $0.01, you pay 10x fewer tokens.
+var firstPartyServices = map[string]bool{
+	"zimage": true, "chronos2": true, "tts": true,
+	"stt": true, "gemma4": true, "caption": true, "lora_training": true,
+	"nsfw_detect": true,
+}
+
+// FAL API key for third-party proxied services
+var falAPIKey string
+
+// Reusable HTTP client with connection pooling
+var backendClient = &http.Client{
+	Timeout: 180 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		MaxConnsPerHost:     50,
+		IdleConnTimeout:     90 * time.Second,
+	},
 }
 
 // Service backend URLs
 var serviceBackends = map[string]string{}
 
 func initServices() {
-	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", "http://localhost:8000")
-	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", "http://localhost:8001")
-	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", "http://localhost:8002")
-	serviceBackends["stt"] = getEnv("STT_BACKEND_URL", "http://localhost:8003")
+	// CuteDSL inference server serves zimage, chronos2, tts, stt, caption, gemma4
+	inferenceURL := getEnv("INFERENCE_BACKEND_URL", "http://localhost:8100")
+
+	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", inferenceURL)
+	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", inferenceURL)
+	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", inferenceURL)
+	serviceBackends["stt"] = getEnv("STT_BACKEND_URL", inferenceURL)
+	serviceBackends["gemma4"] = getEnv("GEMMA4_BACKEND_URL", inferenceURL)
+	serviceBackends["caption"] = getEnv("CAPTION_BACKEND_URL", inferenceURL)
+	serviceBackends["lora_training"] = getEnv("LORA_TRAINING_BACKEND_URL", inferenceURL)
+	serviceBackends["ltx_video"] = "https://fal.run"
+	serviceBackends["flux_image"] = "https://fal.run"
+
+	falAPIKey = getEnv("FAL_KEY", getEnv("FAL_API_KEY", ""))
+	if falAPIKey != "" {
+		log.Printf("FAL API key configured for ltx_video and flux_image services")
+	}
 
 	// Load custom prices from env
-	if p := os.Getenv("ZIMAGE_PRICE_USD"); p != "" {
-		servicePricesUSD["zimage"] = parseFloat(p)
+	envPriceMap := map[string]string{
+		"zimage":        "ZIMAGE_PRICE_USD",
+		"chronos2":      "CHRONOS_PRICE_USD",
+		"tts":           "TTS_PRICE_USD_PER_100CHARS",
+		"stt":           "STT_PRICE_USD_PER_MINUTE",
+		"gemma4":        "GEMMA4_PRICE_USD",
+		"caption":       "CAPTION_PRICE_USD",
+		"lora_training": "LORA_TRAINING_PRICE_USD",
+		"ltx_video":     "LTX_VIDEO_PRICE_USD",
+		"flux_image":    "FLUX_IMAGE_PRICE_USD",
 	}
-	if p := os.Getenv("CHRONOS_PRICE_USD"); p != "" {
-		servicePricesUSD["chronos2"] = parseFloat(p)
-	}
-	if p := os.Getenv("TTS_PRICE_USD_PER_100CHARS"); p != "" {
-		servicePricesUSD["tts"] = parseFloat(p)
-	}
-	if p := os.Getenv("STT_PRICE_USD_PER_MINUTE"); p != "" {
-		servicePricesUSD["stt"] = parseFloat(p)
-	}
-	if p := os.Getenv("LORA_TRAINING_PRICE_USD"); p != "" {
-		servicePricesUSD["lora_training"] = parseFloat(p)
+	for svc, envKey := range envPriceMap {
+		if p := os.Getenv(envKey); p != "" {
+			servicePricesUSD[svc] = parseFloat(p)
+		}
 	}
 
 	log.Printf("Service pricing loaded: %v", servicePricesUSD)
+	log.Printf("Service backends: %v", serviceBackends)
+
+	// Initialize diffusionz C engine for direct GPU inference (optional)
+	initDiffusionzEngine()
 }
 
-// getServicePriceCUTE returns the current $CUTE cost for a service
+// getServicePriceCUTE returns the current $CUTE cost for a service.
+// First-party services use ATH pricing — rewarding early token holders with
+// permanently lower rates. Third-party proxy services use current market price.
 func getServicePriceCUTE(service string) float64 {
 	usdPrice, ok := servicePricesUSD[service]
 	if !ok {
 		return 0
 	}
-	cutePrice := getCUTEPriceUSD()
-	if cutePrice <= 0 {
+
+	var pricePerToken float64
+	if firstPartyServices[service] {
+		// ATH pricing: divide by ATH price, so if token pumps, you need fewer tokens
+		pricePerToken = getCUTEPriceATH()
+	} else {
+		pricePerToken = getCUTEPriceUSD()
+	}
+
+	if pricePerToken <= 0 {
 		return 0
 	}
-	return usdPrice / cutePrice
+	return usdPrice / pricePerToken
 }
 
 // handleGetPricing returns current pricing for all services
@@ -73,7 +128,11 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 		"chronos2":      "per forecast",
 		"tts":           "per 100 characters",
 		"stt":           "per minute",
+		"gemma4":        "per request",
+		"caption":       "per image",
 		"lora_training": "per training job",
+		"ltx_video":     "per ~6s video",
+		"flux_image":    "per image",
 	}
 
 	var pricing []ServicePricing
@@ -92,9 +151,10 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	}
 
 	jsonResponse(ctx, 200, map[string]interface{}{
-		"pricing":        pricing,
-		"cute_price_usd": cutePrice,
-		"sol_price_usd":  getSOLPriceUSD(),
+		"pricing":          pricing,
+		"cute_price_usd":   cutePrice,
+		"cute_price_ath":   getCUTEPriceATH(),
+		"sol_price_usd":    getSOLPriceUSD(),
 	})
 }
 
@@ -106,13 +166,8 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if req.WalletAddress == "" {
-		jsonError(ctx, 401, "wallet_address required")
-		return
-	}
-
 	if req.Service == "" {
-		jsonError(ctx, 400, "service required (zimage, chronos2, tts, stt)")
+		jsonError(ctx, 400, "service required (zimage, chronos2, tts, stt, gemma4, caption)")
 		return
 	}
 
@@ -123,10 +178,25 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Get user
-	user, err := dbConn.GetUserByWallet(req.WalletAddress)
-	if err != nil {
-		jsonError(ctx, 401, "wallet not registered - deposit $CUTEDSL first")
+	// Authenticate: API key (Authorization header) or wallet_address in body
+	var user *User
+	var err error
+	authHeader := string(ctx.Request.Header.Peek("Authorization"))
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+		user, err = dbConn.GetUserByAPIKey(apiKey)
+		if err != nil {
+			jsonError(ctx, 401, "invalid API key")
+			return
+		}
+	} else if req.WalletAddress != "" {
+		user, err = dbConn.GetUserByWallet(req.WalletAddress)
+		if err != nil {
+			jsonError(ctx, 401, "wallet not registered - deposit $CUTEDSL first")
+			return
+		}
+	} else {
+		jsonError(ctx, 401, "authorization required: use Authorization header with API key or wallet_address in body")
 		return
 	}
 
@@ -213,30 +283,95 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) {
 	var endpoint string
 	var body io.Reader
+	var method = "POST"
 
 	switch req.Service {
 	case "zimage":
-		endpoint = fmt.Sprintf("%s/create_and_upload_image?prompt=%s", backendURL,
-			strings.ReplaceAll(req.Prompt, " ", "%20"))
+		// Fast path: use diffusionz C engine for direct GPU inference
+		if diffusionzAvailable {
+			width := req.Width
+			if width <= 0 {
+				width = 1024
+			}
+			height := req.Height
+			if height <= 0 {
+				height = 1024
+			}
+			steps := req.NumSteps
+			if steps <= 0 {
+				steps = 4
+			}
+			guidance := req.Guidance
+			if guidance <= 0 {
+				guidance = 3.5
+			}
+			seed := req.Seed // 0 means random in the C engine
+
+			imgBytes, err := generateImageC(req.Prompt, width, height, steps, seed, guidance)
+			if err != nil {
+				log.Printf("diffusionz generateImageC failed, falling back to HTTP proxy: %v", err)
+			} else {
+				// Return a JSON response matching the HTTP backend format
+				result, _ := json.Marshal(map[string]interface{}{
+					"image_bytes_len": len(imgBytes),
+					"width":           width,
+					"height":          height,
+					"format":          "webp",
+					"engine":          "diffusionz",
+				})
+				return result, nil
+			}
+		}
+
+		// Fallback: HTTP proxy to backend
+		endpoint = fmt.Sprintf("%s/generate_image", backendURL)
+		payload := map[string]interface{}{
+			"prompt": req.Prompt,
+		}
 		if req.Width > 0 {
-			endpoint += fmt.Sprintf("&width=%d", req.Width)
+			payload["width"] = req.Width
 		}
 		if req.Height > 0 {
-			endpoint += fmt.Sprintf("&height=%d", req.Height)
+			payload["height"] = req.Height
 		}
+		if req.NumSteps > 0 {
+			payload["num_inference_steps"] = req.NumSteps
+		}
+		if req.Guidance > 0 {
+			payload["guidance_scale"] = req.Guidance
+		}
+		if req.Seed > 0 {
+			payload["seed"] = req.Seed
+		}
+		jsonBody, _ := json.Marshal(payload)
+		body = strings.NewReader(string(jsonBody))
 
 	case "chronos2":
 		endpoint = fmt.Sprintf("%s/forecast", backendURL)
-		jsonBody, _ := json.Marshal(map[string]interface{}{
-			"prompt": req.Prompt,
-		})
+		payload := map[string]interface{}{
+			"values": req.Values,
+		}
+		if req.PredictionLength > 0 {
+			payload["prediction_length"] = req.PredictionLength
+		}
+		if len(req.QuantileLevels) > 0 {
+			payload["quantile_levels"] = req.QuantileLevels
+		}
+		jsonBody, _ := json.Marshal(payload)
 		body = strings.NewReader(string(jsonBody))
 
 	case "tts":
 		endpoint = fmt.Sprintf("%s/synthesize", backendURL)
-		jsonBody, _ := json.Marshal(map[string]interface{}{
+		payload := map[string]interface{}{
 			"text": req.Text,
-		})
+		}
+		if req.Voice != "" {
+			payload["voice"] = req.Voice
+		}
+		if req.Speed > 0 {
+			payload["speed"] = req.Speed
+		}
+		jsonBody, _ := json.Marshal(payload)
 		body = strings.NewReader(string(jsonBody))
 
 	case "stt":
@@ -246,18 +381,95 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		})
 		body = strings.NewReader(string(jsonBody))
 
+	case "gemma4":
+		endpoint = fmt.Sprintf("%s/chat", backendURL)
+		payload := map[string]interface{}{
+			"messages":    req.Messages,
+			"max_tokens":  req.MaxTokens,
+			"temperature": req.Temperature,
+		}
+		if req.MaxTokens == 0 {
+			payload["max_tokens"] = 1024
+		}
+		if req.Temperature == 0 {
+			payload["temperature"] = 0.7
+		}
+		jsonBody, _ := json.Marshal(payload)
+		body = strings.NewReader(string(jsonBody))
+
+	case "caption":
+		endpoint = fmt.Sprintf("%s/caption", backendURL)
+		jsonBody, _ := json.Marshal(map[string]interface{}{
+			"image_url": req.ImageURL,
+		})
+		body = strings.NewReader(string(jsonBody))
+
+	case "ltx_video":
+		endpoint = "https://fal.run/fal-ai/ltx-2.3/text-to-video"
+		payload := map[string]interface{}{
+			"prompt":     req.Prompt,
+			"duration":   6,
+			"resolution": "1080p",
+			"fps":        25,
+		}
+		jsonBody, _ := json.Marshal(payload)
+		body = strings.NewReader(string(jsonBody))
+		// FAL auth is handled below in the request
+
+	case "flux_image":
+		endpoint = "https://fal.run/fal-ai/flux/schnell"
+		payload := map[string]interface{}{
+			"prompt":               req.Prompt,
+			"image_size":           "1024x1024",
+			"num_inference_steps":  4,
+			"guidance_scale":       3.5,
+		}
+		jsonBody, _ := json.Marshal(payload)
+		body = strings.NewReader(string(jsonBody))
+
+	case "lora_training":
+		endpoint = fmt.Sprintf("%s/train", backendURL)
+		payload := map[string]interface{}{
+			"model":        req.Model,
+			"dataset_name": req.DatasetName,
+		}
+		if len(req.TrainValues) > 0 {
+			payload["values"] = req.TrainValues
+		}
+		if req.LoRAR > 0 {
+			payload["lora_r"] = req.LoRAR
+		}
+		if req.LoRAAlpha > 0 {
+			payload["lora_alpha"] = req.LoRAAlpha
+		}
+		if req.LearningRate > 0 {
+			payload["learning_rate"] = req.LearningRate
+		}
+		if req.TrainSteps > 0 {
+			payload["num_steps"] = req.TrainSteps
+		}
+		if req.TrainBatch > 0 {
+			payload["batch_size"] = req.TrainBatch
+		}
+		jsonBody, _ := json.Marshal(payload)
+		body = strings.NewReader(string(jsonBody))
+
 	default:
 		return nil, fmt.Errorf("unknown service: %s", req.Service)
 	}
 
-	httpReq, err := http.NewRequest("POST", endpoint, body)
+	httpReq, err := http.NewRequest(method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
+	// Add FAL API key for fal.ai proxy services
+	if (req.Service == "ltx_video" || req.Service == "flux_image") && falAPIKey != "" {
+		httpReq.Header.Set("Authorization", "Key "+falAPIKey)
+	}
+
+	resp, err := backendClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -273,6 +485,28 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	}
 
 	return respBody, nil
+}
+
+// handleTrainStatus proxies training job status from inference server
+func handleTrainStatus(ctx *fasthttp.RequestCtx, jobID string) {
+	backendURL := serviceBackends["lora_training"]
+	endpoint := fmt.Sprintf("%s/train/%s", backendURL, jobID)
+
+	resp, err := backendClient.Get(endpoint)
+	if err != nil {
+		jsonError(ctx, 502, "training backend unavailable")
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		jsonError(ctx, 502, "failed to read training status")
+		return
+	}
+
+	ctx.SetStatusCode(resp.StatusCode)
+	ctx.SetBody(respBody)
 }
 
 // handleGetBalance returns wallet balance and credit info

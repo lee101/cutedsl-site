@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVFP4 Quantization — RTX 5090 Native 4-Bit Inference</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">NVFP4: Native 4-Bit Inference</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">RTX 5090 Blackwell hardware acceleration, ready today</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">NVIDIA's Blackwell architecture (RTX 5090 and beyond) introduces native hardware support for <strong>FP4 — 4-bit floating point</strong> computation. CuteDSL already supports it. Here is what that means for inference performance.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">What is NVFP4?</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">NVFP4 is NVIDIA's 4-bit floating point format, supported natively by the Blackwell GPU tensor cores. Unlike software-emulated INT4 quantization, NVFP4 operations run at full hardware speed with dedicated FP4 tensor core instructions. Each value uses just 4 bits — half the size of INT8 — while the floating point format preserves more dynamic range than fixed-point alternatives.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Benefits</h2>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#6c5ce7; font-size:14px; font-weight:700; padding:0 0 6px;">Memory</td>
+<td style="color:#2d2d3f; font-size:14px; padding:0 0 6px;">4x smaller than FP16, 2x smaller than INT8. Fit larger models on a single GPU.</td>
+</tr>
+<tr>
+<td style="color:#6c5ce7; font-size:14px; font-weight:700; padding:8px 0 6px; border-top:1px solid #e0dff5;">Speed</td>
+<td style="color:#2d2d3f; font-size:14px; padding:8px 0 6px; border-top:1px solid #e0dff5;">Blackwell tensor cores process FP4 at 2x the throughput of FP8, translating to significantly faster matrix multiplications.</td>
+</tr>
+<tr>
+<td style="color:#6c5ce7; font-size:14px; font-weight:700; padding:8px 0 0; border-top:1px solid #e0dff5;">Quality</td>
+<td style="color:#2d2d3f; font-size:14px; padding:8px 0 0; border-top:1px solid #e0dff5;">Floating point format preserves outlier weights better than INT4, maintaining model accuracy.</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">torchao Integration</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">CuteDSL uses <strong>torchao</strong> (PyTorch Architecture Optimization) to handle NVFP4 quantization. The integration is seamless — torchao quantizes model weights to FP4 at load time, and the Blackwell tensor cores handle the rest. No changes to model code are required.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">How to Enable</h2>
+
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">If you are running the CuteDSL inference server on an RTX 5090 or other Blackwell GPU, enable NVFP4 with a single environment variable:</p>
+
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;"># Enable NVFP4 quantization for Blackwell GPUs
+ENABLE_NVFP4=1 make inference
+
+# Or set it in your environment
+export ENABLE_NVFP4=1
+python inference/server.py</pre>
+
+<p style="margin:16px 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">The server will automatically detect Blackwell hardware and apply FP4 quantization to all supported model weights. On non-Blackwell GPUs, the flag is safely ignored.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">CuteDSL is Ready for Next-Gen Hardware</h2>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">As Blackwell GPUs become available in data centers, CuteDSL will progressively migrate inference workloads to NVFP4. This means faster generation, lower costs, and the same quality you expect — all passed directly to you through $CUTEDSL pricing.</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+<tr>
+<td align="center">
+<a href="https://cutedsl.com/evals" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">View Benchmarks</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;·&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL · by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

@@ -55,6 +55,8 @@ func main() {
 	// Initialize subsystems
 	initCrypto()
 	initServices()
+	initEmail()
+	initPromptSearch() // Background: loads gobed model + indexes 1.7M prompts
 
 	port := getPort()
 	log.Printf("CuteDSL server starting on :%d (dev=%v)", port, devMode)
@@ -79,6 +81,12 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	// API routes
 	if strings.HasPrefix(path, "/api/") {
 		routeAPI(ctx, path, method)
+		return
+	}
+
+	// Serve generated images from /sdb-disk/cutedsl-images
+	if strings.HasPrefix(path, "/images/") {
+		serveImage(ctx, path)
 		return
 	}
 
@@ -154,9 +162,38 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/service" && method == "POST":
 		handleServiceRequest(ctx)
 
+	// Training job status (proxy to inference)
+	case strings.HasPrefix(path, "/api/train/") && method == "GET":
+		handleTrainStatus(ctx, strings.TrimPrefix(path, "/api/train/"))
+
 	// Register / login (wallet-based)
 	case path == "/api/auth/wallet" && method == "POST":
 		handleWalletAuth(ctx)
+
+	// Update user email
+	case path == "/api/auth/email" && method == "POST":
+		handleUpdateEmail(ctx)
+
+	// Image gallery / search
+	case path == "/api/images" && method == "GET":
+		handleImageSearch(ctx)
+
+	case path == "/api/images/count" && method == "GET":
+		handleImageCount(ctx)
+
+	// Swap (buy $CUTEDSL via bags.fm liquidity pool)
+	case path == "/api/swap/quote" && method == "GET":
+		handleSwapQuote(ctx)
+
+	case path == "/api/swap/transaction" && method == "POST":
+		handleSwapTransaction(ctx)
+
+	// Semantic prompt search (gobed)
+	case path == "/api/search" && method == "GET":
+		handleSemanticSearch(ctx)
+
+	case path == "/api/search/stats" && method == "GET":
+		handleSearchStats(ctx)
 
 	default:
 		jsonError(ctx, 404, "not found")
@@ -173,6 +210,7 @@ func extractPathParam(path, prefix, suffix string) string {
 func handleWalletAuth(ctx *fasthttp.RequestCtx) {
 	var req struct {
 		WalletAddress string `json:"wallet_address"`
+		Email         string `json:"email,omitempty"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil || req.WalletAddress == "" {
 		jsonError(ctx, 400, "wallet_address required")
@@ -185,12 +223,86 @@ func handleWalletAuth(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	// If email provided (on signup or update), set it and start drip
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email != "" && req.Email != user.Email {
+		if err := dbConn.UpdateUserEmail(user.ID, req.Email); err != nil {
+			log.Printf("Failed to update email for %s: %v", user.ID, err)
+		} else {
+			user.Email = req.Email
+			// Send welcome email immediately for new email signups
+			if created || user.DripStep == 0 {
+				go func() {
+					if dripConfig != nil && len(dripConfig.Emails) > 0 {
+						if err := sendDripEmail(user, dripConfig.Emails[0]); err != nil {
+							log.Printf("Welcome email error: %v", err)
+						}
+					}
+				}()
+			}
+		}
+	}
+
 	cutePrice := getCUTEPriceUSD()
 	jsonResponse(ctx, 200, map[string]interface{}{
 		"user":           user,
+		"api_key":        user.APIKey,
 		"created":        created,
 		"cute_price_usd": cutePrice,
 		"credits_usd":    user.Credits * cutePrice,
+	})
+}
+
+// handleUpdateEmail updates a user's email address
+func handleUpdateEmail(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		WalletAddress string `json:"wallet_address"`
+		Email         string `json:"email"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		jsonError(ctx, 400, "invalid request")
+		return
+	}
+
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email == "" || req.WalletAddress == "" {
+		jsonError(ctx, 400, "wallet_address and email required")
+		return
+	}
+
+	// Basic email validation
+	if !strings.Contains(req.Email, "@") || !strings.Contains(req.Email, ".") {
+		jsonError(ctx, 400, "invalid email address")
+		return
+	}
+
+	user, err := dbConn.GetUserByWallet(req.WalletAddress)
+	if err != nil {
+		jsonError(ctx, 404, "wallet not found")
+		return
+	}
+
+	wasEmpty := user.Email == ""
+	if err := dbConn.UpdateUserEmail(user.ID, req.Email); err != nil {
+		jsonError(ctx, 500, "failed to update email")
+		return
+	}
+	user.Email = req.Email
+
+	// Start drip campaign if this is a new email
+	if wasEmpty {
+		go func() {
+			if dripConfig != nil && len(dripConfig.Emails) > 0 {
+				if err := sendDripEmail(user, dripConfig.Emails[0]); err != nil {
+					log.Printf("Welcome email error: %v", err)
+				}
+			}
+		}()
+	}
+
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"success": true,
+		"email":   req.Email,
 	})
 }
 
@@ -272,4 +384,102 @@ func jsonError(ctx *fasthttp.RequestCtx, status int, msg string) {
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	body, _ := json.Marshal(map[string]string{"error": msg})
 	ctx.SetBody(body)
+}
+
+// handleImageSearch handles GET /api/images?q=query&page=1&per_page=48&allow_nsfw=false
+func handleImageSearch(ctx *fasthttp.RequestCtx) {
+	query := string(ctx.QueryArgs().Peek("q"))
+	page, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("page")))
+	perPage, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("per_page")))
+	allowNSFW := string(ctx.QueryArgs().Peek("allow_nsfw")) == "true"
+
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 || perPage > 100 {
+		perPage = 48
+	}
+
+	result, err := dbConn.SearchImages(query, page, perPage, allowNSFW)
+	if err != nil {
+		jsonError(ctx, 500, "search failed")
+		return
+	}
+	jsonResponse(ctx, 200, result)
+}
+
+// handleImageCount handles GET /api/images/count
+func handleImageCount(ctx *fasthttp.RequestCtx) {
+	count, err := dbConn.GetImageCount()
+	if err != nil {
+		jsonError(ctx, 500, "count failed")
+		return
+	}
+	jsonResponse(ctx, 200, map[string]int{"count": count})
+}
+
+// handleSemanticSearch handles GET /api/search?q=query&top_k=20
+func handleSemanticSearch(ctx *fasthttp.RequestCtx) {
+	query := string(ctx.QueryArgs().Peek("q"))
+	if query == "" {
+		jsonError(ctx, 400, "q parameter required")
+		return
+	}
+
+	topK, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("top_k")))
+	if topK < 1 || topK > 200 {
+		topK = 20
+	}
+
+	if promptSearch == nil || !promptSearch.IsReady() {
+		jsonError(ctx, 503, "search engine not ready (still indexing)")
+		return
+	}
+
+	results, err := promptSearch.Search(query, topK)
+	if err != nil {
+		jsonError(ctx, 500, "search failed")
+		return
+	}
+
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"query":   query,
+		"results": results,
+		"count":   len(results),
+	})
+}
+
+// handleSearchStats handles GET /api/search/stats
+func handleSearchStats(ctx *fasthttp.RequestCtx) {
+	if promptSearch == nil {
+		jsonResponse(ctx, 200, map[string]interface{}{"ready": false})
+		return
+	}
+	jsonResponse(ctx, 200, promptSearch.Stats())
+}
+
+// serveImage serves generated images from /sdb-disk/cutedsl-images
+func serveImage(ctx *fasthttp.RequestCtx, path string) {
+	imagesDir := getEnv("IMAGES_DIR", "/sdb-disk/cutedsl-images")
+	// Strip /images/ prefix
+	relPath := strings.TrimPrefix(path, "/images/")
+
+	// Prevent directory traversal
+	if strings.Contains(relPath, "..") {
+		ctx.SetStatusCode(404)
+		return
+	}
+
+	filePath := filepath.Join(imagesDir, relPath)
+	if _, err := os.Stat(filePath); err != nil {
+		ctx.SetStatusCode(404)
+		return
+	}
+
+	ext := filepath.Ext(filePath)
+	if ct, ok := mimeTypes[ext]; ok {
+		ctx.Response.Header.Set("Content-Type", ct)
+	}
+	ctx.Response.Header.Set("Cache-Control", "public, max-age=31536000, immutable")
+	fasthttp.ServeFile(ctx, filePath)
 }

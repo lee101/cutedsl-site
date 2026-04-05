@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoRA Fine-Tuning via API — Train Custom Models for $50</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">LoRA Fine-Tuning via API</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">Train custom models for $50 per job — no GPU setup required</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">You can now fine-tune <strong>Z-Image</strong> and <strong>Chronos-2</strong> models through the CuteDSL API using <strong>LoRA</strong> (Low-Rank Adaptation). One API call, $50, and you get a custom model tailored to your data.</p>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">What is LoRA?</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">LoRA is a parameter-efficient fine-tuning technique. Instead of updating all model weights (billions of parameters), LoRA injects small trainable matrices into specific layers. The result: your model learns your style or domain in minutes rather than hours, using a fraction of the compute, while the base model stays intact.</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.8;">
+<strong style="color:#6c5ce7;">Full fine-tune:</strong> Update all ~3B parameters, needs 80 GB VRAM, takes hours<br>
+<strong style="color:#00b894;">LoRA:</strong> Update ~4M parameters (0.1%), needs 16 GB VRAM, takes minutes
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Train via API — $50 per Job</h2>
+
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">Upload your dataset, specify the base model and training steps, and CuteDSL handles the rest.</p>
+
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl -X POST https://cutedsl.com/api/service \
+  -H "Authorization: Bearer {{.APIKey}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "lora-train",
+    "model": "zimage",
+    "dataset_name": "my-brand-photos",
+    "train_steps": 1000
+  }'</pre>
+
+<p style="margin:16px 0 8px; color:#2d2d3f; font-size:15px; line-height:1.6;">Parameters:</p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#6c5ce7; font-size:13px; font-weight:700; padding:0 0 6px; width:120px;"><code>model</code></td>
+<td style="color:#2d2d3f; font-size:14px; padding:0 0 6px;">Base model to fine-tune: <code style="background:#f0f0f5; padding:2px 6px; border-radius:4px; font-size:13px;">zimage</code> or <code style="background:#f0f0f5; padding:2px 6px; border-radius:4px; font-size:13px;">chronos2</code></td>
+</tr>
+<tr>
+<td style="color:#6c5ce7; font-size:13px; font-weight:700; padding:8px 0 6px; border-top:1px solid #e0dff5;"><code>dataset_name</code></td>
+<td style="color:#2d2d3f; font-size:14px; padding:8px 0 6px; border-top:1px solid #e0dff5;">Name of your uploaded dataset (images for Z-Image, CSV time series for Chronos-2)</td>
+</tr>
+<tr>
+<td style="color:#6c5ce7; font-size:13px; font-weight:700; padding:8px 0 0; border-top:1px solid #e0dff5;"><code>train_steps</code></td>
+<td style="color:#2d2d3f; font-size:14px; padding:8px 0 0; border-top:1px solid #e0dff5;">Number of training steps (default: 1000, max: 5000). More steps = stronger adaptation.</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Use Cases</h2>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td style="padding:6px 0;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<tr>
+<td style="color:#6c5ce7; font-size:14px; font-weight:700; padding:0 0 8px;">Brand-Specific Image Generation</td>
+</tr>
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.5;">Fine-tune Z-Image on your product photos, brand assets, or art style. Generate on-brand marketing images, product mockups, and social media content that match your visual identity.</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td style="padding:6px 0;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<tr>
+<td style="color:#6c5ce7; font-size:14px; font-weight:700; padding:0 0 8px;">Domain-Specific Forecasting</td>
+</tr>
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.5;">Fine-tune Chronos-2 on your historical data — sales, sensor readings, financial metrics. The model learns your domain's patterns and seasonality, producing more accurate forecasts than the general-purpose model.</td>
+</tr>
+</table>
+</td>
+</tr>
+<tr>
+<td style="padding:6px 0;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<tr>
+<td style="color:#6c5ce7; font-size:14px; font-weight:700; padding:0 0 8px;">Custom Art Styles</td>
+</tr>
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.5;">Train on 20-50 images in a specific artistic style and generate unlimited variations. Game studios, illustrators, and design agencies use this to scale creative output.</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">Training costs are deducted in $CUTEDSL at the current market rate. Once training completes, you receive a LoRA adapter ID that you can pass to any subsequent generation request.</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+<tr>
+<td align="center">
+<a href="https://cutedsl.com/api" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">View API Docs</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;·&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL · by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

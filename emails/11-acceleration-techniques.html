@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Latent Teleportation & TurboQuant — Cutting-Edge Acceleration</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">Latent Teleportation & TurboQuant</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">Two cutting-edge acceleration techniques powering CuteDSL</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">Speed matters for inference. Every millisecond saved translates directly into lower costs and better user experience. Today we are sharing two techniques that CuteDSL uses in production to push inference speed further.</p>
+
+<!-- Latent Teleportation -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h2 style="margin:0 0 12px; color:#6c5ce7; font-size:18px; font-weight:700;">Latent Teleportation</h2>
+
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:14px; line-height:1.6;">Diffusion models work by iteratively denoising a latent representation over many steps. Most of these steps produce only small, predictable changes to the latent tensor. Latent Teleportation identifies which denoising steps can be skipped entirely by computing a trajectory through latent space and "teleporting" the representation forward.</p>
+
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:14px; line-height:1.6;"><strong>How it works:</strong></p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.8; padding-left:8px;">
+<strong style="color:#6c5ce7;">1.</strong> Run the first few denoising steps normally to establish trajectory<br>
+<strong style="color:#6c5ce7;">2.</strong> Compute the velocity vector in latent space<br>
+<strong style="color:#6c5ce7;">3.</strong> Extrapolate forward, skipping intermediate steps<br>
+<strong style="color:#6c5ce7;">4.</strong> Resume normal denoising for the final refinement steps
+</td>
+</tr>
+</table>
+
+<p style="margin:12px 0 0; color:#2d2d3f; font-size:14px; line-height:1.6;"><strong>Result:</strong> 30-50% fewer denoising steps with negligible quality loss. On Z-Image Turbo, this shaves another 40% off wall-clock time on top of the fused kernel gains.</p>
+</td>
+</tr>
+</table>
+
+<!-- TurboQuant -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h2 style="margin:0 0 12px; color:#00b894; font-size:18px; font-weight:700;">TurboQuant</h2>
+
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:14px; line-height:1.6;">Quantization reduces model precision to use less memory and compute, but naive quantization often degrades output quality. TurboQuant is an aggressive mixed-precision quantization scheme that preserves quality by being selective about which layers get quantized and how.</p>
+
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:14px; line-height:1.6;"><strong>Key ideas:</strong></p>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="color:#2d2d3f; font-size:14px; line-height:1.8; padding-left:8px;">
+<strong style="color:#00b894;">Sensitivity analysis</strong> — Profile each layer's impact on output quality and only quantize layers below a sensitivity threshold<br>
+<strong style="color:#00b894;">Adaptive precision</strong> — Attention layers stay at FP16, while feed-forward layers drop to INT8 or INT4<br>
+<strong style="color:#00b894;">Calibration-free</strong> — No calibration dataset needed; sensitivity is estimated from weight statistics alone
+</td>
+</tr>
+</table>
+
+<p style="margin:12px 0 0; color:#2d2d3f; font-size:14px; line-height:1.6;"><strong>Result:</strong> 2-3x memory reduction with less than 1% quality degradation on standard benchmarks. This lets CuteDSL serve larger models on the same hardware, or run more concurrent requests.</p>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">How CuteDSL Uses These in Production</h2>
+
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Both techniques are applied automatically when you call the CuteDSL API. Z-Image uses Latent Teleportation to reduce step count, and TurboQuant keeps memory usage low enough to serve multiple requests concurrently on a single GPU. You get the speed benefits without any configuration on your end.</p>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">These techniques, combined with the fused Triton kernels and torch.compile optimizations covered in previous emails, are what allow CuteDSL to offer competitive pricing while running on efficient hardware.</p>
+
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
+<tr>
+<td align="center" style="padding-right:12px;">
+<a href="https://cutedsl.com/blog" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Read More on the Blog</a>
+</td>
+<td align="center">
+<a href="https://cutedsl.com/evals" style="display:inline-block; background:#ffffff; color:#6c5ce7; text-decoration:none; padding:12px 36px; border-radius:8px; font-size:16px; font-weight:600; border:2px solid #6c5ce7;">View Benchmarks</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;·&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;·&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL · by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

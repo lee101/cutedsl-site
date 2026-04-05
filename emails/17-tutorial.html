@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Build a Full App With CuteDSL API — Tutorial</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">Build a Full App With the CuteDSL API</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">5 steps from API key to a working multi-model pipeline</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">This tutorial walks you through building a pipeline that generates an image, captions it, converts the caption to speech, and forecasts usage &mdash; all with the CuteDSL API.</p>
+
+<!-- Step 1 -->
+<h2 style="margin:0 0 10px; color:#6c5ce7; font-size:16px; font-weight:700;">Step 1 &mdash; Get Your API Key</h2>
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">Connect your wallet and grab your API key from the dashboard. All requests use it as a Bearer token.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">import requests
+
+API = "https://cutedsl.com/api"
+HEADERS = {"Authorization": "Bearer {{.APIKey}}"}</pre>
+
+<!-- Step 2 -->
+<h2 style="margin:24px 0 10px; color:#6c5ce7; font-size:16px; font-weight:700;">Step 2 &mdash; Generate an Image With Z-Image</h2>
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">Call the <code style="background:#f8f7ff; padding:2px 6px; border-radius:4px; font-size:13px;">zimage</code> service to create an image from a text prompt.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">resp = requests.post(f"{API}/service", json={
+    "service": "zimage",
+    "prompt": "a futuristic city at sunset, cyberpunk",
+    "wallet": "{{.WalletAddress}}"
+}, headers=HEADERS)
+
+image_url = resp.json()["result"]["url"]
+print(f"Image: {image_url}")</pre>
+
+<!-- Step 3 -->
+<h2 style="margin:24px 0 10px; color:#6c5ce7; font-size:16px; font-weight:700;">Step 3 &mdash; Caption the Image</h2>
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">Pass the generated image URL to the <code style="background:#f8f7ff; padding:2px 6px; border-radius:4px; font-size:13px;">caption</code> service.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">resp = requests.post(f"{API}/service", json={
+    "service": "caption",
+    "image_url": image_url,
+    "wallet": "{{.WalletAddress}}"
+}, headers=HEADERS)
+
+caption = resp.json()["result"]["caption"]
+print(f"Caption: {caption}")</pre>
+
+<!-- Step 4 -->
+<h2 style="margin:24px 0 10px; color:#6c5ce7; font-size:16px; font-weight:700;">Step 4 &mdash; Generate Audio With TTS</h2>
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">Convert the caption to spoken audio using Kokoro TTS.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">resp = requests.post(f"{API}/service", json={
+    "service": "tts",
+    "text": caption,
+    "voice": "af_heart",
+    "wallet": "{{.WalletAddress}}"
+}, headers=HEADERS)
+
+audio_url = resp.json()["result"]["url"]
+print(f"Audio: {audio_url}")</pre>
+
+<!-- Step 5 -->
+<h2 style="margin:24px 0 10px; color:#6c5ce7; font-size:16px; font-weight:700;">Step 5 &mdash; Forecast Usage With Chronos-2</h2>
+<p style="margin:0 0 12px; color:#2d2d3f; font-size:15px; line-height:1.6;">Feed your daily API call counts into Chronos-2 to forecast future usage.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">resp = requests.post(f"{API}/service", json={
+    "service": "chronos2",
+    "values": [12, 18, 25, 30, 28, 35, 42],
+    "horizon": 7,
+    "wallet": "{{.WalletAddress}}"
+}, headers=HEADERS)
+
+forecast = resp.json()["result"]["forecast"]
+print(f"Next 7 days: {forecast}")</pre>
+
+<p style="margin:24px 0 8px; color:#2d2d3f; font-size:15px; line-height:1.6;">That's the full pipeline &mdash; image generation, captioning, text-to-speech, and forecasting in under 30 lines of Python. Read the extended version on the blog for error handling, async patterns, and batch processing.</p>
+
+<p style="margin:0 0 8px; text-align:center;">
+<a href="https://cutedsl.com/blog" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Read Full Tutorial on Blog</a>
+</p>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

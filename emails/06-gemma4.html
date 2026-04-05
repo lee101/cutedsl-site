@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gemma4 26B — Multimodal Chat & Vision at $0.05/Request</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">Gemma4 26B</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">Multimodal chat and vision at $0.05 per request</p>
+</td>
+</tr>
+
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 16px; color:#333; font-size:15px; line-height:1.6;">Hi {{.WalletShort}},</p>
+<p style="margin:0 0 16px; color:#333; font-size:15px; line-height:1.6;">Gemma4 26B is Google's latest multimodal model -- it handles text chat, image understanding, and vision tasks in a single API call. At $0.05 per request, it is one of the most cost-effective ways to add AI reasoning to your application.</p>
+
+<!-- Stats Cards -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+<tr>
+<td width="33%" style="padding:0 4px 0 0; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">26B</p>
+<p style="margin:0; color:#666; font-size:12px;">Parameters</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">$0.05</p>
+<p style="margin:0; color:#666; font-size:12px;">Per Request</p>
+</td>
+</tr>
+</table>
+</td>
+<td width="33%" style="padding:0 0 0 4px; vertical-align:top;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; text-align:center;">
+<tr>
+<td style="padding:16px 8px;">
+<p style="margin:0 0 4px; color:#6c5ce7; font-size:22px; font-weight:700;">Multi</p>
+<p style="margin:0; color:#666; font-size:12px;">Modal</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<!-- Capabilities -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">What Gemma4 Can Do</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8f7ff; border:1px solid #e0dff5; border-radius:8px; margin-bottom:24px;">
+<tr>
+<td style="padding:20px;">
+<p style="margin:0 0 8px; color:#333; font-size:14px; line-height:1.5;"><strong>Text Chat</strong> -- conversational AI with strong reasoning, summarization, and code generation abilities.</p>
+<p style="margin:0 0 8px; color:#333; font-size:14px; line-height:1.5;"><strong>Image Understanding</strong> -- describe images, answer questions about visual content, extract text from screenshots.</p>
+<p style="margin:0; color:#333; font-size:14px; line-height:1.5;"><strong>Vision + Chat</strong> -- combine images and text in a single conversation for multimodal workflows.</p>
+</td>
+</tr>
+</table>
+
+<!-- Text Chat Example -->
+<h2 style="margin:0 0 12px; color:#333; font-size:17px; font-weight:700;">Text Chat Example</h2>
+<p style="margin:0 0 12px; color:#666; font-size:14px; line-height:1.5;">Send a messages array just like OpenAI-style chat APIs:</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl -X POST https://cutedsl.com/api/service \
+  -H "Authorization: Bearer {{.APIKey}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "gemma4",
+    "messages": [
+      {"role": "user", "content": "Explain how Triton fused kernels reduce memory bandwidth in transformer attention."}
+    ]
+  }'</pre>
+
+<!-- Vision Example -->
+<h2 style="margin:28px 0 12px; color:#333; font-size:17px; font-weight:700;">Vision Example</h2>
+<p style="margin:0 0 12px; color:#666; font-size:14px; line-height:1.5;">Include an image URL alongside your text prompt:</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl -X POST https://cutedsl.com/api/service \
+  -H "Authorization: Bearer {{.APIKey}}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "gemma4",
+    "messages": [
+      {"role": "user", "content": "What is shown in this image?", "image_url": "https://example.com/photo.jpg"}
+    ]
+  }'</pre>
+<p style="margin:12px 0 0; color:#666; font-size:13px; line-height:1.5;">Returns a JSON response with the model's <code style="background:#f8f7ff; padding:2px 6px; border-radius:4px; font-size:12px; color:#6c5ce7;">reply</code> text.</p>
+
+<!-- CTA -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td align="center" style="padding:28px 0 8px;">
+<a href="https://cutedsl.com" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Try Gemma4 Now</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

@@ -44,11 +44,19 @@ func (db *DB) migrate() error {
 	CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
 		wallet_address TEXT UNIQUE NOT NULL,
+		email TEXT DEFAULT '',
+		api_key TEXT UNIQUE NOT NULL,
 		credits DOUBLE PRECISION DEFAULT 0,
 		total_deposited DOUBLE PRECISION DEFAULT 0,
+		drip_step INTEGER DEFAULT 0,
+		drip_started_at TIMESTAMPTZ DEFAULT '1970-01-01',
 		created_at TIMESTAMPTZ DEFAULT NOW(),
 		updated_at TIMESTAMPTZ DEFAULT NOW()
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email != '';
+
+	CREATE INDEX IF NOT EXISTS idx_users_api_key ON users(api_key);
 
 	CREATE INDEX IF NOT EXISTS idx_users_wallet ON users(wallet_address);
 
@@ -98,6 +106,35 @@ func (db *DB) migrate() error {
 	);
 
 	INSERT INTO deposit_index_counter (id, next_index) VALUES (1, 1) ON CONFLICT DO NOTHING;
+
+	CREATE TABLE IF NOT EXISTS generated_images (
+		id TEXT PRIMARY KEY,
+		prompt TEXT NOT NULL,
+		width INTEGER NOT NULL DEFAULT 1024,
+		height INTEGER NOT NULL DEFAULT 1024,
+		file_path TEXT NOT NULL,
+		thumb_path TEXT DEFAULT '',
+		med_path TEXT DEFAULT '',
+		file_size BIGINT DEFAULT 0,
+		model TEXT DEFAULT 'zimage',
+		seed BIGINT DEFAULT 0,
+		steps INTEGER DEFAULT 9,
+		created_at TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_images_created ON generated_images(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_images_model ON generated_images(model);
+
+	-- NSFW detection
+	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS is_nsfw BOOLEAN DEFAULT NULL;
+	CREATE INDEX IF NOT EXISTS idx_images_nsfw ON generated_images(is_nsfw) WHERE is_nsfw IS NOT NULL;
+
+	-- Latent storage reference
+	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS latent_path TEXT DEFAULT '';
+
+	-- Full-text search via pg_trgm (fast ILIKE with GIN index)
+	CREATE EXTENSION IF NOT EXISTS pg_trgm;
+	CREATE INDEX IF NOT EXISTS idx_images_prompt_trgm ON generated_images USING GIN (prompt gin_trgm_ops);
 	`
 
 	_, err := db.conn.Exec(schema)
@@ -111,21 +148,22 @@ func (db *DB) GetOrCreateUser(walletAddress string) (*User, bool, error) {
 
 	var user User
 	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, credits, total_deposited, created_at, updated_at FROM users WHERE wallet_address = $1",
+		"SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
 		walletAddress,
-	).Scan(&user.ID, &user.WalletAddress, &user.Credits, &user.TotalDeposited, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		user = User{
 			ID:            newUUID(),
 			WalletAddress: walletAddress,
+			APIKey:        "cutedsl_" + newUUID()[:24],
 			Credits:       0,
 			CreatedAt:     time.Now(),
 			UpdatedAt:     time.Now(),
 		}
 		_, err = db.conn.Exec(
-			"INSERT INTO users (id, wallet_address, credits, total_deposited, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
-			user.ID, user.WalletAddress, user.Credits, user.TotalDeposited, user.CreatedAt, user.UpdatedAt,
+			"INSERT INTO users (id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+			user.ID, user.WalletAddress, user.Email, user.APIKey, user.Credits, user.TotalDeposited, user.DripStep, user.DripStartedAt, user.CreatedAt, user.UpdatedAt,
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf("create user: %w", err)
@@ -146,9 +184,25 @@ func (db *DB) GetUserByWallet(walletAddress string) (*User, error) {
 
 	var user User
 	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, credits, total_deposited, created_at, updated_at FROM users WHERE wallet_address = $1",
+		"SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
 		walletAddress,
-	).Scan(&user.ID, &user.WalletAddress, &user.Credits, &user.TotalDeposited, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// GetUserByAPIKey returns a user by their API key
+func (db *DB) GetUserByAPIKey(apiKey string) (*User, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var user User
+	err := db.conn.QueryRow(
+		"SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE api_key = $1",
+		apiKey,
+	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -394,6 +448,212 @@ func (db *DB) ExpirePendingCheckouts() (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// UpdateUserEmail sets the user's email and starts the drip campaign
+func (db *DB) UpdateUserEmail(userID, email string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		"UPDATE users SET email = $1, drip_started_at = CASE WHEN email = '' THEN NOW() ELSE drip_started_at END, updated_at = NOW() WHERE id = $2",
+		email, userID,
+	)
+	return err
+}
+
+// UpdateDripStep updates the drip step for a user
+func (db *DB) UpdateDripStep(userID string, step int) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		"UPDATE users SET drip_step = $1, updated_at = NOW() WHERE id = $2",
+		step, userID,
+	)
+	return err
+}
+
+// ListDripEligibleUsers returns users with email who haven't finished the drip campaign
+func (db *DB) ListDripEligibleUsers() ([]User, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.conn.Query(
+		`SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at
+		 FROM users WHERE email != '' AND drip_step < 20 AND drip_started_at > '1970-01-01'`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+// ListLowCreditUsers returns users with email whose credits are zero or near-zero
+func (db *DB) ListLowCreditUsers() ([]User, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.conn.Query(
+		`SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at
+		 FROM users WHERE email != '' AND credits <= 0 AND total_deposited > 0`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+// InsertGeneratedImage stores a generated image record
+func (db *DB) InsertGeneratedImage(img *GeneratedImage) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if img.ID == "" {
+		img.ID = newUUID()
+	}
+	if img.CreatedAt.IsZero() {
+		img.CreatedAt = time.Now()
+	}
+
+	_, err := db.conn.Exec(
+		`INSERT INTO generated_images (id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 ON CONFLICT (id) DO NOTHING`,
+		img.ID, img.Prompt, img.Width, img.Height, img.FilePath, img.ThumbPath, img.MedPath,
+		img.FileSize, img.Model, img.Seed, img.Steps, img.CreatedAt,
+	)
+	return err
+}
+
+// SearchImages searches generated images by prompt text with optional NSFW filtering
+func (db *DB) SearchImages(query string, page, perPage int, allowNSFW bool) (*ImageSearchResult, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	offset := (page - 1) * perPage
+
+	// Build NSFW filter clause
+	nsfwFilter := ""
+	if !allowNSFW {
+		nsfwFilter = " AND (is_nsfw = FALSE OR is_nsfw IS NULL)"
+	}
+
+	var total int
+	var rows *sql.Rows
+	var err error
+
+	if query == "" {
+		err = db.conn.QueryRow("SELECT COUNT(*) FROM generated_images WHERE 1=1" + nsfwFilter).Scan(&total)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = db.conn.Query(
+			`SELECT id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, is_nsfw, latent_path, created_at
+			 FROM generated_images WHERE 1=1`+nsfwFilter+` ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+			perPage, offset,
+		)
+	} else {
+		like := "%" + query + "%"
+		err = db.conn.QueryRow("SELECT COUNT(*) FROM generated_images WHERE prompt ILIKE $1"+nsfwFilter, like).Scan(&total)
+		if err != nil {
+			return nil, err
+		}
+		rows, err = db.conn.Query(
+			`SELECT id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, is_nsfw, latent_path, created_at
+			 FROM generated_images WHERE prompt ILIKE $1`+nsfwFilter+` ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+			like, perPage, offset,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var images []GeneratedImage
+	for rows.Next() {
+		var img GeneratedImage
+		if err := rows.Scan(&img.ID, &img.Prompt, &img.Width, &img.Height, &img.FilePath,
+			&img.ThumbPath, &img.MedPath, &img.FileSize, &img.Model, &img.Seed, &img.Steps,
+			&img.IsNSFW, &img.LatentPath, &img.CreatedAt); err != nil {
+			return nil, err
+		}
+		images = append(images, img)
+	}
+
+	return &ImageSearchResult{
+		Images:  images,
+		Total:   total,
+		Page:    page,
+		PerPage: perPage,
+		Query:   query,
+	}, nil
+}
+
+// UpdateImageNSFW updates the NSFW flag for an image
+func (db *DB) UpdateImageNSFW(id string, isNSFW bool) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec("UPDATE generated_images SET is_nsfw = $1 WHERE id = $2", isNSFW, id)
+	return err
+}
+
+// ListUnclassifiedImages returns images without NSFW classification
+func (db *DB) ListUnclassifiedImages(limit int) ([]GeneratedImage, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	rows, err := db.conn.Query(
+		`SELECT id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, is_nsfw, latent_path, created_at
+		 FROM generated_images WHERE is_nsfw IS NULL ORDER BY created_at DESC LIMIT $1`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var images []GeneratedImage
+	for rows.Next() {
+		var img GeneratedImage
+		if err := rows.Scan(&img.ID, &img.Prompt, &img.Width, &img.Height, &img.FilePath,
+			&img.ThumbPath, &img.MedPath, &img.FileSize, &img.Model, &img.Seed, &img.Steps,
+			&img.IsNSFW, &img.LatentPath, &img.CreatedAt); err != nil {
+			return nil, err
+		}
+		images = append(images, img)
+	}
+	return images, nil
+}
+
+// GetImageCount returns total number of generated images
+func (db *DB) GetImageCount() (int, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var count int
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM generated_images").Scan(&count)
+	return count, err
 }
 
 func newUUID() string {

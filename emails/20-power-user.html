@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>You're a CuteDSL Power User — Tips, Tricks & What's Ahead</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">You're a CuteDSL Power User</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">Tips, tricks, and what's coming next for you</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">Thanks for being an early CuteDSL user. You've been putting the platform through its paces, so here are some tips to get even more out of it.</p>
+
+<h2 style="margin:0 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">Power User Tips</h2>
+
+<!-- Tip 1 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h3 style="margin:0 0 8px; color:#6c5ce7; font-size:15px; font-weight:700;">Use Batch Requests for Throughput</h3>
+<p style="margin:0; color:#5a5a6e; font-size:14px; line-height:1.5;">If you're generating multiple images or forecasts, send requests concurrently. The API handles parallel requests per user &mdash; don't serialize what can run in parallel.</p>
+</td>
+</tr>
+</table>
+
+<!-- Tip 2 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h3 style="margin:0 0 8px; color:#6c5ce7; font-size:15px; font-weight:700;">Set a Seed for Reproducible Images</h3>
+<p style="margin:0 0 10px; color:#5a5a6e; font-size:14px; line-height:1.5;">Pass a <code style="background:#eeedf5; padding:2px 6px; border-radius:4px; font-size:13px;">seed</code> parameter to Z-Image to get the same output for the same prompt. Useful for iteration and A/B testing.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">{"service": "zimage", "prompt": "...", "seed": 42}</pre>
+</td>
+</tr>
+</table>
+
+<!-- Tip 3 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h3 style="margin:0 0 8px; color:#6c5ce7; font-size:15px; font-weight:700;">Monitor Your Credits</h3>
+<p style="margin:0 0 10px; color:#5a5a6e; font-size:14px; line-height:1.5;">Check your balance programmatically so you can alert yourself before credits run out.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl "https://cutedsl.com/api/balance?wallet={{.WalletAddress}}"</pre>
+</td>
+</tr>
+</table>
+
+<!-- Tip 4 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h3 style="margin:0 0 8px; color:#6c5ce7; font-size:15px; font-weight:700;">Review Billing History</h3>
+<p style="margin:0 0 10px; color:#5a5a6e; font-size:14px; line-height:1.5;">See every charge and deposit with timestamps and service details.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl "https://cutedsl.com/api/billing-history?wallet={{.WalletAddress}}"</pre>
+</td>
+</tr>
+</table>
+
+<!-- Tip 5 -->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<h3 style="margin:0 0 8px; color:#6c5ce7; font-size:15px; font-weight:700;">Optimize Chronos-2 With Quantile Levels</h3>
+<p style="margin:0 0 10px; color:#5a5a6e; font-size:14px; line-height:1.5;">By default Chronos-2 returns median forecasts. Pass <code style="background:#eeedf5; padding:2px 6px; border-radius:4px; font-size:13px;">quantile_levels</code> to get confidence intervals for risk-aware forecasting.</p>
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">{"service": "chronos2", "values": [...],
+ "quantile_levels": [0.1, 0.5, 0.9]}</pre>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:0 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">Thank You</h2>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">Early users shape what CuteDSL becomes. If you have feedback, feature requests, or ran into something that could be better &mdash; reply to this email. We want to hear it.</p>
+
+<p style="margin:0 0 8px; text-align:center;">
+<a href="https://cutedsl.com" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Go to Dashboard</a>
+</p>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>

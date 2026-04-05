@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>$CUTEDSL Token — How Credits Work on Solana</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
+<tr>
+<td align="center" style="padding:24px 16px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px; width:100%; background-color:#ffffff; border:1px solid #e0dff5; border-radius:12px; overflow:hidden;">
+<!-- Header -->
+<tr>
+<td style="background:linear-gradient(135deg, #6c5ce7, #00b894); padding:40px 40px 32px; text-align:center;">
+<h1 style="margin:0; color:#ffffff; font-size:26px; font-weight:700; line-height:1.3;">$CUTEDSL Token &mdash; How Credits Work</h1>
+<p style="margin:8px 0 0; color:#e0f7f0; font-size:15px;">Pay for AI inference with $CUTEDSL on Solana</p>
+</td>
+</tr>
+<!-- Body -->
+<tr>
+<td style="padding:36px 40px;">
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
+
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">CuteDSL runs entirely on the <strong>$CUTEDSL</strong> SPL token on Solana. No credit cards, no subscriptions &mdash; just deposit tokens and use AI services. Here's how it all works.</p>
+
+<h2 style="margin:28px 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">What Is $CUTEDSL?</h2>
+
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">$CUTEDSL is an SPL token on the Solana blockchain. When you deposit tokens to your CuteDSL account, they are converted to credits based on the current market price. Credits are deducted each time you call an AI service.</p>
+
+<h2 style="margin:28px 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">The Deposit Flow</h2>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;">
+<tr>
+<td style="background-color:#f8f7ff; border:1px solid #e0dff5; border-radius:10px; padding:20px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="padding:8px 0; color:#6c5ce7; font-size:14px; font-weight:700;">Step 1</td>
+<td style="padding:8px 0 8px 12px; color:#2d2d3f; font-size:14px; line-height:1.5;">Connect your Solana wallet (Phantom or enter address manually)</td>
+</tr>
+<tr>
+<td style="padding:8px 0; color:#6c5ce7; font-size:14px; font-weight:700;">Step 2</td>
+<td style="padding:8px 0 8px 12px; color:#2d2d3f; font-size:14px; line-height:1.5;">Choose a deposit amount and create a checkout intent</td>
+</tr>
+<tr>
+<td style="padding:8px 0; color:#6c5ce7; font-size:14px; font-weight:700;">Step 3</td>
+<td style="padding:8px 0 8px 12px; color:#2d2d3f; font-size:14px; line-height:1.5;">Send $CUTEDSL to your unique deposit address (generated via HD wallet)</td>
+</tr>
+<tr>
+<td style="padding:8px 0; color:#6c5ce7; font-size:14px; font-weight:700;">Step 4</td>
+<td style="padding:8px 0 8px 12px; color:#2d2d3f; font-size:14px; line-height:1.5;">Credits are added automatically once the transaction confirms</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+
+<h2 style="margin:28px 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">Live Pricing</h2>
+
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">Service prices are set in USD and converted to $CUTEDSL at the time of use. We pull live pricing from <strong>CoinGecko</strong> (for SOL) and the <strong>Bags API</strong> (for $CUTEDSL) so your credits always reflect real market value.</p>
+
+<p style="margin:0 0 18px; color:#2d2d3f; font-size:15px; line-height:1.6;">Check the current rate any time:</p>
+
+<pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">curl https://cutedsl.com/api/cute-price</pre>
+
+<h2 style="margin:28px 0 14px; color:#2d2d3f; font-size:18px; font-weight:700;">No Auto-Topup</h2>
+
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">CuteDSL uses <strong>manual deposits only</strong>. We will never pull tokens from your wallet without explicit action. When your credits run low, you'll need to create a new deposit. This keeps you in full control of your spending.</p>
+
+<p style="margin:0 0 8px; text-align:center;">
+<a href="https://cutedsl.com" style="display:inline-block; background:linear-gradient(135deg, #6c5ce7, #00b894); color:#ffffff; text-decoration:none; padding:14px 36px; border-radius:8px; font-size:16px; font-weight:600;">Deposit $CUTEDSL</a>
+</p>
+</td>
+</tr>
+<!-- Footer -->
+<tr>
+<td style="padding:28px 40px; border-top:1px solid #e0dff5; text-align:center;">
+<p style="margin:0 0 10px; font-size:13px;">
+<a href="https://cutedsl.com/blog" style="color:#a0a0b0; text-decoration:none;">Blog</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/evals" style="color:#a0a0b0; text-decoration:none;">Benchmarks</a> &nbsp;&middot;&nbsp;
+<a href="https://cutedsl.com/api" style="color:#a0a0b0; text-decoration:none;">API Docs</a> &nbsp;&middot;&nbsp;
+<a href="{{.UnsubscribeURL}}" style="color:#a0a0b0; text-decoration:none;">Unsubscribe</a>
+</p>
+<p style="margin:0; color:#a0a0b0; font-size:12px;">CuteDSL &middot; by <a href="https://app.nz" style="color:#a0a0b0; text-decoration:underline;">Applied Science</a></p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>
