@@ -155,7 +155,13 @@ def _psnr(t1: torch.Tensor, t2: torch.Tensor) -> float:
 # ---------------------------------------------------------------------------
 
 def _load_baseline_pipeline(cpu_offload: bool = True):
-    """Load Z-Image with CuteZImage (our standard accelerated path)."""
+    """Load Z-Image with CuteZImage (our standard accelerated path).
+
+    Uses compile_mode="default" (kernel fusion, no CUDA graphs) for the
+    standalone benchmark — CUDA graphs require the exact same call signature
+    every iteration and can fail during recording when the pipeline scheduler
+    returns Python lists as intermediate outputs.
+    """
     from cutezimage.pipeline import get_zimage_pipelines
     print("[load] Loading CuteZImage baseline pipeline...")
     t0 = time.time()
@@ -163,13 +169,13 @@ def _load_baseline_pipeline(cpu_offload: bool = True):
         model_path=ZIMAGE_MODEL_PATH,
         torch_dtype=DTYPE,
         use_cute=True,
-        compile_mode="reduce-overhead",
+        compile_mode="default",   # avoid reduce-overhead CUDA graph crash
         device=DEVICE,
         enable_cpu_offload=cpu_offload,
     )
     print(f"[load] Pipeline ready in {time.time() - t0:.1f}s")
 
-    # Warmup (triggers torch.compile)
+    # Warmup (triggers torch.compile graph capture)
     print("[load] Warmup...")
     t0 = time.time()
     text2img(
