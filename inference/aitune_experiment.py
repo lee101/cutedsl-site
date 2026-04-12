@@ -154,19 +154,18 @@ def _psnr(t1: torch.Tensor, t2: torch.Tensor) -> float:
 # Pipeline loading
 # ---------------------------------------------------------------------------
 
-def _load_baseline_pipeline():
+def _load_baseline_pipeline(cpu_offload: bool = True):
     """Load Z-Image with CuteZImage (our standard accelerated path)."""
     from cutezimage.pipeline import get_zimage_pipelines
     print("[load] Loading CuteZImage baseline pipeline...")
     t0 = time.time()
-    # Disable cpu_offload for profiling (AITune needs modules on GPU)
     text2img, _ = get_zimage_pipelines(
         model_path=ZIMAGE_MODEL_PATH,
         torch_dtype=DTYPE,
         use_cute=True,
         compile_mode="reduce-overhead",
         device=DEVICE,
-        enable_cpu_offload=False,
+        enable_cpu_offload=cpu_offload,
     )
     print(f"[load] Pipeline ready in {time.time() - t0:.1f}s")
 
@@ -184,13 +183,16 @@ def _load_baseline_pipeline():
     return text2img
 
 
-def _load_vanilla_pipeline():
+def _load_vanilla_pipeline(cpu_offload: bool = True):
     """Load vanilla diffusers ZImagePipeline (no CuteZImage) for AITune inspection."""
     from diffusers import ZImagePipeline
     print("[load] Loading vanilla diffusers pipeline (for AITune inspection)...")
     t0 = time.time()
     pipe = ZImagePipeline.from_pretrained(ZIMAGE_MODEL_PATH, torch_dtype=DTYPE)
-    pipe.to(DEVICE)
+    if cpu_offload and torch.cuda.is_available():
+        pipe.enable_model_cpu_offload()
+    else:
+        pipe.to(DEVICE)
     print(f"[load] Vanilla pipeline ready in {time.time() - t0:.1f}s")
     return pipe
 
@@ -242,7 +244,8 @@ def run_tune(args):
     AITUNE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # Use vanilla pipeline for AITune (no custom Triton ops → traceable)
-    pipe = _load_vanilla_pipeline()
+    # Disable cpu_offload so AITune can profile on-GPU (requires full VRAM)
+    pipe = _load_vanilla_pipeline(cpu_offload=False)
 
     # Prepare input data for profiling
     input_data = [{"prompt": p} for p, _ in BENCH_PROMPTS[:2]]
