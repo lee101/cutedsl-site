@@ -422,6 +422,7 @@ def run_quality_check(args):
 # ---------------------------------------------------------------------------
 
 def main():
+    global ZIMAGE_MODEL_PATH, AITUNE_CACHE_DIR  # noqa: PLW0603
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tune", action="store_true", help="Profile pipeline and tune with AITune/TRT")
     parser.add_argument("--benchmark", action="store_true", help="Latency benchmark: baseline vs AITune")
@@ -432,7 +433,6 @@ def main():
     parser.add_argument("--steps", type=int, default=4, help="Denoising steps for benchmark")
     args = parser.parse_args()
 
-    global ZIMAGE_MODEL_PATH, AITUNE_CACHE_DIR
     ZIMAGE_MODEL_PATH = args.model_path
     AITUNE_CACHE_DIR = Path(args.output_dir)
 

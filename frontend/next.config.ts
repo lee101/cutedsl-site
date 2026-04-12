@@ -34,7 +34,15 @@ const nextConfig: NextConfig = {
       return [
         {
           source: '/api/:path*',
-          destination: 'http://localhost:8090/api/:path*',
+          destination: 'http://localhost:8095/api/:path*',
+        },
+        {
+          source: '/images/:path*',
+          destination: 'http://localhost:8095/images/:path*',
+        },
+        {
+          source: '/prompt/:path*',
+          destination: 'http://localhost:8095/prompt/:path*',
         },
       ];
     },
