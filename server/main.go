@@ -233,6 +233,11 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/search/stats" && method == "GET":
 		handleSearchStats(ctx)
 
+	// Trigger a full search index rebuild (picks up images added directly to DB)
+	case path == "/api/search/reindex" && method == "POST":
+		go promptSearch.loadAndIndex()
+		jsonResponse(ctx, 202, map[string]string{"status": "reindexing"})
+
 	// Semantic IMAGE search (gobed) — returns hydrated GeneratedImage rows
 	case path == "/api/images/semantic" && method == "GET":
 		handleSemanticImageSearch(ctx)

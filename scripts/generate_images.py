@@ -384,6 +384,18 @@ def main():
     print(f"Time: {elapsed:.0f}s ({rate:.1f} img/s)")
     print(f"Remaining: {len(pending) - success - failed:,}")
 
+    # Trigger search index rebuild so new images become searchable immediately
+    if success > 0:
+        server_url = os.getenv("GO_SERVER_URL", "http://localhost:8095")
+        try:
+            resp = requests.post(f"{server_url}/api/search/reindex", timeout=10)
+            if resp.status_code == 202:
+                print(f"[reindex] Triggered search index rebuild on {server_url}")
+            else:
+                print(f"[reindex] Reindex returned {resp.status_code} (manual restart may be needed)")
+        except Exception as e:
+            print(f"[reindex] Could not trigger reindex: {e}")
+
     conn.close()
 
 
