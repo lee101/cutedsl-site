@@ -5,6 +5,7 @@ frontend/out/
 
 # Go
 server/cutedsl-server
+server/cutedsl-site
 *.db
 
 # Environment
@@ -22,3 +23,19 @@ server/cutedsl-server
 Thumbs.db
 *.zip
 images/
+
+# Inference runtime data
+inference/.lora_cache/
+inference/lora_datasets/
+inference/trained_loras/
+inference/.aitune_cache/
+inference.log
+
+# Compiled kernel caches
+.triton_cache/
+
+# Screenshots / benchmarks output
+screenshots/
+
+# Temp files
+swap_test.py

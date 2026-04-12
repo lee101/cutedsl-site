@@ -715,11 +715,12 @@ export default function Home() {
           </div>
 
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/zimage">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-pink-100 w-14 h-14 rounded-2xl flex items-center justify-center text-pink-500 mb-4 shadow-inner">
                 <ImageIcon size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">zimage</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-pink-600 transition-colors">zimage</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 CuteDSL-accelerated Z-Image Turbo with fused QK-norm+RoPE kernel and custom Triton kernels. 2x faster transformer blocks via kernel fusion and NVFP4 quantization on RTX 5090.
               </p>
@@ -727,12 +728,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '1000 $CUTEDSL'} / gen
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/chronos2">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-cyan-100 w-14 h-14 rounded-2xl flex items-center justify-center text-cyan-500 mb-4 shadow-inner">
                 <LineChart size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">chronos2</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-cyan-600 transition-colors">chronos2</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 SOTA time series forecasting. CuteDSL-accelerated Chronos-2 with 27x faster inference via 8 custom Triton kernels, fused preprocessing, and torch.compile. Quantile predictions for uncertainty estimation.
               </p>
@@ -740,12 +743,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '500 $CUTEDSL'} / forecast
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/tts">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-purple-100 w-14 h-14 rounded-2xl flex items-center justify-center text-purple-500 mb-4 shadow-inner">
                 <Volume2 size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Kokoro TTS</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-purple-600 transition-colors">Kokoro TTS</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Text-to-Speech with 20+ cute voices and languages. Beautiful, natural voices for your applications.
               </p>
@@ -753,12 +758,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '100 $CUTEDSL'} / 100 chars
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/stt">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-blue-100 w-14 h-14 rounded-2xl flex items-center justify-center text-blue-500 mb-4 shadow-inner">
                 <Mic size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Speech-to-Text</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors">Speech-to-Text</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Gemma4-powered audio transcription. High-accuracy speech recognition for your applications.
               </p>
@@ -766,12 +773,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '200 $CUTEDSL'} / minute
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/gemma4">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-emerald-100 w-14 h-14 rounded-2xl flex items-center justify-center text-emerald-500 mb-4 shadow-inner">
                 <Cpu size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Gemma4 Chat</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-emerald-600 transition-colors">Gemma4 Chat</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Google Gemma4 26B multimodal LLM. Text and vision understanding with OpenAI-compatible API. Powered by text-generator.io.
               </p>
@@ -779,12 +788,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('gemma4') > 0 ? `${formatCute(getServicePrice('gemma4'))} $CUTEDSL` : '50 $CUTEDSL'} / request
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/caption">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-orange-100 w-14 h-14 rounded-2xl flex items-center justify-center text-orange-500 mb-4 shadow-inner">
                 <Search size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Image Caption</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-orange-600 transition-colors">Image Caption</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 GitBase-powered image captioning. Generate accurate descriptions of any image for accessibility, search, or AI pipelines.
               </p>
@@ -792,12 +803,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('caption') > 0 ? `${formatCute(getServicePrice('caption'))} $CUTEDSL` : '50 $CUTEDSL'} / image
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/ltx_video">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-red-100 w-14 h-14 rounded-2xl flex items-center justify-center text-red-500 mb-4 shadow-inner">
                 <Gamepad2 size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">LTX 2.3 Video</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-red-600 transition-colors">LTX 2.3 Video</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Text-to-video generation via LTX 2.3. Generate 6-second 1080p videos from text prompts. Powered by fal.ai.
               </p>
@@ -805,12 +818,14 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('ltx_video') > 0 ? `${formatCute(getServicePrice('ltx_video'))} $CUTEDSL` : '300 $CUTEDSL'} / video
               </div>
             </motion.div>
+            </Link>
 
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70">
+            <Link href="/docs/flux_image">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-indigo-100 w-14 h-14 rounded-2xl flex items-center justify-center text-indigo-500 mb-4 shadow-inner">
                 <Globe size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2">Flux Image</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Image</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Fast image generation via Flux Schnell. 4-step inference for quick 1024x1024 images. Also available on <a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 underline">eBank.nz</a>.
               </p>
@@ -818,6 +833,7 @@ export default function Home() {
                 <Zap size={16} /> {getServicePrice('flux_image') > 0 ? `${formatCute(getServicePrice('flux_image'))} $CUTEDSL` : '40 $CUTEDSL'} / image
               </div>
             </motion.div>
+            </Link>
           </div>
         </div>
       </section>
@@ -1157,7 +1173,7 @@ export default function Home() {
 
           {/* Quick example */}
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-8">
-            <pre className="text-xs text-slate-600 bg-slate-50 p-4 rounded-lg overflow-x-auto">{`curl -X POST https://cutedsl.com/api/service \\
+            <pre className="text-xs text-slate-600 bg-slate-50 p-4 rounded-lg overflow-x-auto">{`curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Authorization: Bearer ${apiKey || 'YOUR_API_KEY'}" \\
   -H "Content-Type: application/json" \\
   -d '{"service": "zimage", "prompt": "a cute fairy in a forest", "width": 1024}'`}</pre>
@@ -1315,7 +1331,7 @@ export default function Home() {
               <p className="text-slate-600 text-sm">Secure, multilingual text and code generation powered by massive neural networks.</p>
             </div>
             <div className="bg-slate-100/50 p-6 rounded-2xl border border-slate-200">
-              <a href="https://stackhack.netwrck.com" target="_blank" rel="noopener noreferrer" className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2 hover:text-indigo-600 transition-colors"><Cpu size={16}/> StackHack</a>
+              <a href="https://netwrck.com" target="_blank" rel="noopener noreferrer" className="font-bold text-lg text-slate-800 mb-2 flex items-center gap-2 hover:text-indigo-600 transition-colors"><Cpu size={16}/> StackHack</a>
               <p className="text-slate-600 text-sm">Analyze and breakdown any technology stack instantly using Large Language Models.</p>
             </div>
             <div className="bg-slate-100/50 p-6 rounded-2xl border border-slate-200">
@@ -1330,10 +1346,6 @@ export default function Home() {
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
               <a href="https://bigmultiplayerchess.com" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">BigMultiplayerChess</a>
               <p className="text-xs text-slate-500 mt-1">Large-scale AI chess game</p>
-            </div>
-            <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
-              <a href="https://rung.nz" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">Rung.nz</a>
-              <p className="text-xs text-slate-500 mt-1">Voice chat with AI</p>
             </div>
             <div className="bg-white p-4 rounded-xl text-center border border-slate-100 shadow-sm">
               <a href="https://evangeler.com" target="_blank" rel="noopener noreferrer" className="font-bold text-slate-800 text-sm hover:text-indigo-600 transition-colors">Evangeler.com</a>
@@ -1396,7 +1408,7 @@ export default function Home() {
             <p className="text-slate-400 font-medium text-sm">© 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Applied Science Company</a>. All rights reserved.</p>
             <div className="flex gap-4">
               <a href="https://x.com/leeleepenkman" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-pink-500 transition-colors">X</a>
-              <a href="#" className="text-slate-400 hover:text-cyan-500 transition-colors">GitHub</a>
+              <a href="https://codex-infinity.com" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-cyan-500 transition-colors">Codex Infinity</a>
             </div>
           </div>
         </div>

@@ -61,15 +61,37 @@ function ParamInput({ param, value, onChange }: { param: ModelParam; value: stri
 }
 
 function ResponseRenderer({ config, result }: { config: ModelConfig; result: Record<string, unknown> }) {
+  // Helper: extract first image URL from many possible shapes
+  const findImageSrc = (r: Record<string, unknown>): string | undefined => {
+    if (typeof r.image_base64 === 'string') return `data:image/webp;base64,${r.image_base64}`;
+    if (typeof r.image_url === 'string') return r.image_url as string;
+    if (typeof r.url === 'string') return r.url as string;
+    const images = r.images as Array<{ url?: string }> | undefined;
+    if (Array.isArray(images) && images[0]?.url) return images[0].url;
+    return undefined;
+  };
+  const findAudioSrc = (r: Record<string, unknown>): string | undefined => {
+    if (typeof r.audio_base64 === 'string') return `data:audio/wav;base64,${r.audio_base64}`;
+    if (typeof r.audio_url === 'string') return r.audio_url as string;
+    const audio = r.audio as { url?: string } | undefined;
+    if (audio?.url) return audio.url;
+    return undefined;
+  };
+  const findVideoSrc = (r: Record<string, unknown>): string | undefined => {
+    if (typeof r.video_url === 'string') return r.video_url as string;
+    const video = r.video as { url?: string } | undefined;
+    if (video?.url) return video.url;
+    return undefined;
+  };
+
   if (config.responseType === 'image') {
-    const base64 = result.image_base64 as string | undefined;
-    const url = result.image_url as string | undefined;
-    const src = base64 ? `data:image/webp;base64,${base64}` : url;
-    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>;
+    const src = findImageSrc(result);
+    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
     return (
       <div className="space-y-3">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={src} alt="Generated" className="rounded-xl max-w-full shadow-lg" />
-        <a href={src} download="generated.webp" className="inline-flex items-center gap-1 text-sm text-pink-500 hover:text-pink-700">
+        <a href={src} target="_blank" rel="noopener noreferrer" download="generated.webp" className="inline-flex items-center gap-1 text-sm text-pink-500 hover:text-pink-700">
           <Download size={14} /> Download
         </a>
       </div>
@@ -77,14 +99,12 @@ function ResponseRenderer({ config, result }: { config: ModelConfig; result: Rec
   }
 
   if (config.responseType === 'audio') {
-    const base64 = result.audio_base64 as string | undefined;
-    const url = result.audio_url as string | undefined;
-    const src = base64 ? `data:audio/wav;base64,${base64}` : url;
-    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>;
+    const src = findAudioSrc(result);
+    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
     return (
       <div className="space-y-3">
         <audio controls src={src} className="w-full" />
-        <a href={src} download="audio.wav" className="inline-flex items-center gap-1 text-sm text-pink-500 hover:text-pink-700">
+        <a href={src} target="_blank" rel="noopener noreferrer" download="audio.wav" className="inline-flex items-center gap-1 text-sm text-pink-500 hover:text-pink-700">
           <Download size={14} /> Download
         </a>
       </div>
@@ -92,12 +112,12 @@ function ResponseRenderer({ config, result }: { config: ModelConfig; result: Rec
   }
 
   if (config.responseType === 'video') {
-    const url = result.video_url as string | undefined;
-    if (!url) return <pre className="text-sm text-slate-300 overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>;
+    const src = findVideoSrc(result);
+    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
     return (
       <div className="space-y-3">
-        <video controls src={url} className="rounded-xl max-w-full shadow-lg" />
-        <a href={url} download className="inline-flex items-center gap-1 text-sm text-pink-500 hover:text-pink-700">
+        <video controls src={src} className="rounded-xl max-w-full shadow-lg" />
+        <a href={src} target="_blank" rel="noopener noreferrer" download className="inline-flex items-center gap-1 text-sm text-pink-500 hover:text-pink-700">
           <Download size={14} /> Download
         </a>
       </div>

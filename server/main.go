@@ -55,6 +55,7 @@ func main() {
 	// Initialize subsystems
 	initCrypto()
 	initServices()
+	initUploads()
 	initEmail()
 	initPromptSearch() // Background: loads gobed model + indexes 1.7M prompts
 
@@ -87,6 +88,27 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	// Serve generated images from /sdb-disk/cutedsl-images
 	if strings.HasPrefix(path, "/images/") {
 		serveImage(ctx, path)
+		return
+	}
+
+	// Dynamic sitemap served from the DB for SEO crawling
+	if path == "/sitemap.xml" && method == "GET" {
+		handleSitemapIndex(ctx)
+		return
+	}
+	if path == "/sitemap-pages.xml" && method == "GET" {
+		handleSitemapPages(ctx)
+		return
+	}
+	if strings.HasPrefix(path, "/sitemap-images-") && strings.HasSuffix(path, ".xml") && method == "GET" {
+		pageStr := strings.TrimSuffix(strings.TrimPrefix(path, "/sitemap-images-"), ".xml")
+		handleSitemapImages(ctx, pageStr)
+		return
+	}
+
+	// Server-rendered prompt detail page (SEO). /prompt/<image_id>
+	if strings.HasPrefix(path, "/prompt/") && method == "GET" {
+		handlePromptHTML(ctx, strings.TrimPrefix(path, "/prompt/"))
 		return
 	}
 
@@ -162,6 +184,22 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/service" && method == "POST":
 		handleServiceRequest(ctx)
 
+	// LoRA training datasets (list)
+	case path == "/api/train/datasets" && method == "GET":
+		handleListTrainingDatasets(ctx)
+
+	// LoRA training dataset upload (multipart, server-side proxy)
+	case path == "/api/train/upload_dataset" && method == "POST":
+		handleUploadTrainingDataset(ctx)
+
+	// Presigned R2 PUT URL for direct browser upload
+	case path == "/api/uploads/presign" && method == "GET":
+		handlePresignUpload(ctx)
+
+	// Start a LoRA training job from a list of public R2 URLs
+	case path == "/api/train/start" && method == "POST":
+		handleStartLoraTraining(ctx)
+
 	// Training job status (proxy to inference)
 	case strings.HasPrefix(path, "/api/train/") && method == "GET":
 		handleTrainStatus(ctx, strings.TrimPrefix(path, "/api/train/"))
@@ -188,12 +226,20 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/swap/transaction" && method == "POST":
 		handleSwapTransaction(ctx)
 
-	// Semantic prompt search (gobed)
+	// Semantic prompt search (gobed) — returns prompts + similarity scores
 	case path == "/api/search" && method == "GET":
 		handleSemanticSearch(ctx)
 
 	case path == "/api/search/stats" && method == "GET":
 		handleSearchStats(ctx)
+
+	// Semantic IMAGE search (gobed) — returns hydrated GeneratedImage rows
+	case path == "/api/images/semantic" && method == "GET":
+		handleSemanticImageSearch(ctx)
+
+	// Single prompt API: image + related
+	case strings.HasPrefix(path, "/api/prompt/") && method == "GET":
+		handlePromptAPI(ctx, strings.TrimPrefix(path, "/api/prompt/"))
 
 	default:
 		jsonError(ctx, 404, "not found")
@@ -335,6 +381,14 @@ func serveStatic(ctx *fasthttp.RequestCtx, path string) {
 	}
 
 	filePath := filepath.Join(distDir, path)
+
+	// If path has no extension, also try .html (Next.js static export)
+	if filepath.Ext(filePath) == "" {
+		htmlPath := filePath + ".html"
+		if _, err := os.Stat(htmlPath); err == nil {
+			filePath = htmlPath
+		}
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(filePath); err == nil {

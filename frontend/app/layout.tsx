@@ -16,7 +16,7 @@ const nunito = Nunito({
   display: 'swap',
 });
 
-const siteUrl = 'https://cutedsl.com';
+const siteUrl = 'https://cutedsl.app.nz';
 const imgBase = 'https://appstatic.app.nz/cutedsl/images';
 
 export const metadata: Metadata = {

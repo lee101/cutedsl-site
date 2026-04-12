@@ -543,7 +543,92 @@ func (db *DB) InsertGeneratedImage(img *GeneratedImage) error {
 		img.ID, img.Prompt, img.Width, img.Height, img.FilePath, img.ThumbPath, img.MedPath,
 		img.FileSize, img.Model, img.Seed, img.Steps, img.CreatedAt,
 	)
+	if err == nil && promptSearch != nil && img.Prompt != "" {
+		// Best-effort incremental update to the semantic index
+		promptSearch.IndexIncremental(img.ID, img.Prompt)
+	}
 	return err
+}
+
+// StreamAllImagePrompts scans every row in generated_images and feeds (id, prompt)
+// into the callback. Used by the semantic indexer at startup. Keeps memory low
+// by using a streaming cursor — no LIMIT, no ORDER BY, no cache.
+func (db *DB) StreamAllImagePrompts(allowNSFW bool, cb func(id, prompt string) error) error {
+	nsfwFilter := ""
+	if !allowNSFW {
+		nsfwFilter = " AND (is_nsfw = FALSE OR is_nsfw IS NULL)"
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, prompt FROM generated_images WHERE prompt <> ''` + nsfwFilter,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, prompt string
+		if err := rows.Scan(&id, &prompt); err != nil {
+			return err
+		}
+		if err := cb(id, prompt); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// GetImagesByIDs fetches generated_images rows for a set of IDs, preserving
+// the order of the input slice. Used to hydrate semantic search results.
+func (db *DB) GetImagesByIDs(ids []string, allowNSFW bool) ([]GeneratedImage, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Build $1,$2,... placeholders
+	placeholders := make([]byte, 0, len(ids)*4)
+	args := make([]interface{}, 0, len(ids))
+	for i, id := range ids {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '$')
+		placeholders = append(placeholders, fmt.Sprintf("%d", i+1)...)
+		args = append(args, id)
+	}
+
+	nsfwFilter := ""
+	if !allowNSFW {
+		nsfwFilter = " AND (is_nsfw = FALSE OR is_nsfw IS NULL)"
+	}
+
+	query := `SELECT id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, is_nsfw, latent_path, created_at
+			   FROM generated_images WHERE id IN (` + string(placeholders) + `)` + nsfwFilter
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byID := make(map[string]GeneratedImage, len(ids))
+	for rows.Next() {
+		var img GeneratedImage
+		if err := rows.Scan(&img.ID, &img.Prompt, &img.Width, &img.Height, &img.FilePath,
+			&img.ThumbPath, &img.MedPath, &img.FileSize, &img.Model, &img.Seed, &img.Steps,
+			&img.IsNSFW, &img.LatentPath, &img.CreatedAt); err != nil {
+			return nil, err
+		}
+		byID[img.ID] = img
+	}
+
+	// Return in original order, drop any filtered out by NSFW clause
+	out := make([]GeneratedImage, 0, len(ids))
+	for _, id := range ids {
+		if img, ok := byID[id]; ok {
+			out = append(out, img)
+		}
+	}
+	return out, nil
 }
 
 // SearchImages searches generated images by prompt text with optional NSFW filtering

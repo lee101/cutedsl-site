@@ -1,10 +1,7 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"log"
-	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -12,14 +9,19 @@ import (
 	"github.com/lee101/gobed"
 )
 
-// PromptSearchEngine wraps gobed for semantic search over image prompts
+// PromptSearchEngine wraps gobed for semantic search over generated-image
+// prompts. The gobed engine uses int IDs internally; we keep a parallel slice
+// that maps gobed int ID → (image UUID, prompt text) so we can hydrate search
+// results back into full GeneratedImage rows.
 type PromptSearchEngine struct {
-	engine   *gobed.SearchEngine
-	model    *gobed.EmbeddingModel
-	prompts  []string // indexed prompts for ID → prompt lookup
-	mu       sync.RWMutex
-	ready    bool
-	indexing bool
+	engine    *gobed.SearchEngine
+	model     *gobed.EmbeddingModel
+	imageIDs  []string // gobed int ID → image UUID
+	prompts   []string // gobed int ID → prompt text (for debug / suggestions)
+	mu        sync.RWMutex
+	ready     bool
+	indexing  bool
+	indexedAt time.Time
 }
 
 var promptSearch *PromptSearchEngine
@@ -29,6 +31,8 @@ func initPromptSearch() {
 	go promptSearch.loadAndIndex()
 }
 
+// loadAndIndex streams every generated_images row into gobed at startup.
+// Re-runs periodically to pick up newly inserted rows (cheap for DBs < 1M).
 func (ps *PromptSearchEngine) loadAndIndex() {
 	ps.mu.Lock()
 	ps.indexing = true
@@ -42,7 +46,6 @@ func (ps *PromptSearchEngine) loadAndIndex() {
 
 	t0 := time.Now()
 
-	// Load gobed model
 	log.Println("[search] Loading gobed embedding model...")
 	model, err := gobed.LoadModel()
 	if err != nil {
@@ -52,38 +55,35 @@ func (ps *PromptSearchEngine) loadAndIndex() {
 	ps.model = model
 	log.Printf("[search] Model loaded in %v", time.Since(t0))
 
-	// Configure search engine for large dataset
 	config := gobed.AsyncSearchConfig()
 	config.MaxExactSearchSize = 500000
 	config.AsyncWorkers = runtime.NumCPU() * 2
 	config.AsyncQueueSize = 100000
-
 	ps.engine = gobed.NewSearchEngineWithConfig(model, config)
 
-	// Load prompts from JSONL
-	promptsFile := getEnv("PROMPTS_FILE", "/sdb-disk/cutedsl-images/prompts.jsonl")
-	log.Printf("[search] Loading prompts from %s...", promptsFile)
-
-	f, err := os.Open(promptsFile)
+	// Stream rows from the DB. Skip NSFW by default so the public index stays clean.
+	var (
+		imageIDs []string
+		prompts  []string
+	)
+	err = dbConn.StreamAllImagePrompts(false, func(id, prompt string) error {
+		imageIDs = append(imageIDs, id)
+		prompts = append(prompts, prompt)
+		return nil
+	})
 	if err != nil {
-		log.Printf("[search] Failed to open prompts file: %v", err)
+		log.Printf("[search] Failed to stream image prompts: %v", err)
 		return
 	}
-	defer f.Close()
+	log.Printf("[search] Loaded %d image prompts from DB in %v", len(prompts), time.Since(t0))
 
-	var prompts []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		var row struct {
-			Prompt string `json:"prompt"`
-		}
-		if err := json.Unmarshal(scanner.Bytes(), &row); err == nil && row.Prompt != "" {
-			prompts = append(prompts, row.Prompt)
-		}
+	if len(prompts) == 0 {
+		ps.mu.Lock()
+		ps.ready = true
+		ps.indexedAt = time.Now()
+		ps.mu.Unlock()
+		return
 	}
-	log.Printf("[search] Loaded %d prompts in %v", len(prompts), time.Since(t0))
 
 	// Index in batches
 	batchSize := 10000
@@ -95,13 +95,11 @@ func (ps *PromptSearchEngine) loadAndIndex() {
 		if end > len(prompts) {
 			end = len(prompts)
 		}
-
 		batch := prompts[i:end]
 		ids := make([]int, len(batch))
 		for j := range batch {
 			ids[j] = i + j
 		}
-
 		ps.engine.IndexBatchWithIDs(ids, batch)
 
 		if (i/batchSize)%10 == 0 {
@@ -112,15 +110,44 @@ func (ps *PromptSearchEngine) loadAndIndex() {
 
 	ps.mu.Lock()
 	ps.prompts = prompts
+	ps.imageIDs = imageIDs
 	ps.ready = true
+	ps.indexedAt = time.Now()
 	ps.mu.Unlock()
 
 	log.Printf("[search] Index built: %d prompts in %v (total %v)",
 		len(prompts), time.Since(indexStart), time.Since(t0))
 }
 
-// Search performs semantic search over prompts
-func (ps *PromptSearchEngine) Search(query string, topK int) ([]PromptSearchResult, error) {
+// IndexIncremental adds a single newly-generated image into the live index.
+// Called from InsertGeneratedImage after a successful DB insert.
+func (ps *PromptSearchEngine) IndexIncremental(imageID, prompt string) {
+	if ps == nil || prompt == "" {
+		return
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.engine == nil || !ps.ready {
+		return // still indexing the bulk load; this will be picked up on next full rebuild
+	}
+	intID := len(ps.prompts)
+	if err := ps.engine.IndexWithID(intID, prompt); err != nil {
+		log.Printf("[search] IndexIncremental failed: %v", err)
+		return
+	}
+	ps.prompts = append(ps.prompts, prompt)
+	ps.imageIDs = append(ps.imageIDs, imageID)
+}
+
+// SearchResult is a single semantic match with the mapped image UUID.
+type SearchResult struct {
+	ImageID    string  `json:"image_id"`
+	Prompt     string  `json:"prompt"`
+	Similarity float32 `json:"similarity"`
+}
+
+// Search returns topK semantic matches for query, as (imageID, prompt, sim).
+func (ps *PromptSearchEngine) Search(query string, topK int) ([]SearchResult, error) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
@@ -134,22 +161,39 @@ func (ps *PromptSearchEngine) Search(query string, topK int) ([]PromptSearchResu
 		return nil, err
 	}
 
-	elapsed := time.Since(t0)
-
-	var out []PromptSearchResult
+	out := make([]SearchResult, 0, len(results))
 	for _, r := range results {
-		prompt := ""
-		if r.ID >= 0 && r.ID < len(ps.prompts) {
-			prompt = ps.prompts[r.ID]
+		if r.ID < 0 || r.ID >= len(ps.prompts) {
+			continue
 		}
-		out = append(out, PromptSearchResult{
-			ID:         r.ID,
-			Prompt:     prompt,
+		out = append(out, SearchResult{
+			ImageID:    ps.imageIDs[r.ID],
+			Prompt:     ps.prompts[r.ID],
 			Similarity: r.Similarity,
 		})
 	}
 
-	log.Printf("[search] query=%q top_k=%d results=%d time=%v", query, topK, len(out), elapsed)
+	log.Printf("[search] query=%q top_k=%d results=%d time=%v", query, topK, len(out), time.Since(t0))
+	return out, nil
+}
+
+// SearchRelated finds the topK most-similar image prompts to a given prompt,
+// excluding the exact source image. Used by the /prompt/<id> page.
+func (ps *PromptSearchEngine) SearchRelated(prompt, excludeImageID string, topK int) ([]SearchResult, error) {
+	results, err := ps.Search(prompt, topK+1)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SearchResult, 0, len(results))
+	for _, r := range results {
+		if r.ImageID == excludeImageID {
+			continue
+		}
+		out = append(out, r)
+		if len(out) >= topK {
+			break
+		}
+	}
 	return out, nil
 }
 
@@ -166,22 +210,15 @@ func (ps *PromptSearchEngine) Stats() map[string]interface{} {
 	defer ps.mu.RUnlock()
 
 	stats := map[string]interface{}{
-		"ready":        ps.ready,
-		"indexing":     ps.indexing,
+		"ready":         ps.ready,
+		"indexing":      ps.indexing,
 		"total_prompts": len(ps.prompts),
 	}
-
-	if ps.engine != nil {
-		s := ps.engine.Stats()
-		stats["engine_stats"] = s
+	if !ps.indexedAt.IsZero() {
+		stats["indexed_at"] = ps.indexedAt.Format(time.RFC3339)
 	}
-
+	if ps.engine != nil {
+		stats["engine_stats"] = ps.engine.Stats()
+	}
 	return stats
-}
-
-// PromptSearchResult is a single search result
-type PromptSearchResult struct {
-	ID         int     `json:"id"`
-	Prompt     string  `json:"prompt"`
-	Similarity float32 `json:"similarity"`
 }

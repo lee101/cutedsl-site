@@ -227,18 +227,21 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Log billing event
+	// Log billing event (for lora_training we log only in settle to avoid
+	// double-booking — the deduction above is a hold).
 	cutePrice := getCUTEPriceUSD()
 	usdEquiv := cuteCost * cutePrice
-	go dbConn.CreateBillingEvent(&BillingEvent{
-		UserID:       user.ID,
-		EventType:    req.Service,
-		Amount:       -cuteCost,
-		CuteAmount:   cuteCost,
-		USDAmount:    usdEquiv,
-		Description:  fmt.Sprintf("%s usage (%.2f $CUTEDSL @ $%.6f)", req.Service, cuteCost, cutePrice),
-		CreditsAfter: newBalance,
-	})
+	if req.Service != "lora_training" {
+		go dbConn.CreateBillingEvent(&BillingEvent{
+			UserID:       user.ID,
+			EventType:    req.Service,
+			Amount:       -cuteCost,
+			CuteAmount:   cuteCost,
+			USDAmount:    usdEquiv,
+			Description:  fmt.Sprintf("%s usage (%.2f $CUTEDSL @ $%.6f)", req.Service, cuteCost, cutePrice),
+			CreditsAfter: newBalance,
+		})
+	}
 
 	log.Printf("Service %s: user=%s cost=%.2f CUTEDSL ($%.4f) balance=%.2f",
 		req.Service, req.WalletAddress, cuteCost, usdEquiv, newBalance)
@@ -270,6 +273,18 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	// LoRA training is async — deduction above is a HOLD. A background
+	// watcher polls the inference job and either finalizes (keep deducted +
+	// log billing event) or refunds on training failure.
+	if req.Service == "lora_training" {
+		var r struct {
+			JobID string `json:"job_id"`
+		}
+		if jerr := json.Unmarshal(result, &r); jerr == nil && r.JobID != "" {
+			go settleLoraTrainingJob(user.ID, r.JobID, cuteCost, cutePrice)
+		}
+	}
+
 	// Return backend response with billing info
 	jsonResponse(ctx, 200, map[string]interface{}{
 		"result":         json.RawMessage(result),
@@ -277,6 +292,84 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		"credits_remain": newBalance,
 		"usd_equivalent": usdEquiv,
 	})
+}
+
+// settleLoraTrainingJob polls the inference server for a training job and
+// finalizes billing: if the job completes we log a permanent billing event;
+// if it fails, we refund the credits and log a refund event.
+// Runs as a goroutine; blocks up to ~2 hours before giving up (keeping charge).
+func settleLoraTrainingJob(userID, jobID string, cuteCost, cutePrice float64) {
+	backendURL := serviceBackends["lora_training"]
+	endpoint := fmt.Sprintf("%s/train/%s", backendURL, jobID)
+	usdEquiv := cuteCost * cutePrice
+
+	start := time.Now()
+	for time.Since(start) < 2*time.Hour {
+		time.Sleep(5 * time.Second)
+		resp, err := backendClient.Get(endpoint)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			continue
+		}
+
+		var job struct {
+			Status     string  `json:"status"`
+			OutputPath string  `json:"output_path"`
+			ErrorMsg   string  `json:"error"`
+			Loss       float64 `json:"loss"`
+		}
+		if err := json.Unmarshal(body, &job); err != nil {
+			continue
+		}
+
+		switch job.Status {
+		case "completed":
+			// Finalize: the credits were already held. Log the billing event now.
+			// Use a no-op add of 0 to fetch current balance.
+			balAfter, _ := dbConn.AddUserCredits(userID, 0)
+			dbConn.CreateBillingEvent(&BillingEvent{
+				UserID:       userID,
+				EventType:    "lora_training",
+				Amount:       -cuteCost,
+				CuteAmount:   cuteCost,
+				USDAmount:    usdEquiv,
+				Description:  fmt.Sprintf("LoRA training completed (job=%s, loss=%.4f, output=%s)", jobID, job.Loss, job.OutputPath),
+				CreditsAfter: balAfter,
+			})
+			log.Printf("Lora job %s settled: completed, charged %.2f CUTEDSL ($%.4f)", jobID, cuteCost, usdEquiv)
+			return
+
+		case "failed":
+			// Refund the hold
+			refundBalance, rerr := dbConn.AddUserCredits(userID, cuteCost)
+			if rerr == nil {
+				dbConn.CreateBillingEvent(&BillingEvent{
+					UserID:       userID,
+					EventType:    "refund",
+					Amount:       cuteCost,
+					CuteAmount:   cuteCost,
+					USDAmount:    usdEquiv,
+					Description:  fmt.Sprintf("Refund: LoRA training failed (job=%s): %s", jobID, truncateString(job.ErrorMsg, 200)),
+					CreditsAfter: refundBalance,
+				})
+			}
+			log.Printf("Lora job %s settled: failed, refunded %.2f CUTEDSL. Error: %s", jobID, cuteCost, job.ErrorMsg)
+			return
+		}
+	}
+
+	log.Printf("Lora job %s: gave up polling after 2h, charge stands", jobID)
+}
+
+func truncateString(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }
 
 // proxyToBackend forwards the request to the appropriate AI service backend
@@ -419,10 +512,9 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	case "flux_image":
 		endpoint = "https://fal.run/fal-ai/flux/schnell"
 		payload := map[string]interface{}{
-			"prompt":               req.Prompt,
-			"image_size":           "1024x1024",
-			"num_inference_steps":  4,
-			"guidance_scale":       3.5,
+			"prompt":              req.Prompt,
+			"image_size":          "square_hd",
+			"num_inference_steps": 4,
 		}
 		jsonBody, _ := json.Marshal(payload)
 		body = strings.NewReader(string(jsonBody))
@@ -507,6 +599,58 @@ func handleTrainStatus(ctx *fasthttp.RequestCtx, jobID string) {
 
 	ctx.SetStatusCode(resp.StatusCode)
 	ctx.SetBody(respBody)
+}
+
+// handleListTrainingDatasets proxies the dataset listing from inference server.
+func handleListTrainingDatasets(ctx *fasthttp.RequestCtx) {
+	backendURL := serviceBackends["lora_training"]
+	resp, err := backendClient.Get(backendURL + "/train/datasets")
+	if err != nil {
+		jsonError(ctx, 502, "training backend unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	ctx.SetStatusCode(resp.StatusCode)
+	ctx.SetBody(body)
+}
+
+// handleUploadTrainingDataset accepts multipart upload and forwards to inference.
+// Auth: Bearer API key. Does not deduct credits — that happens at /api/service POST when training starts.
+func handleUploadTrainingDataset(ctx *fasthttp.RequestCtx) {
+	authHeader := string(ctx.Request.Header.Peek("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		jsonError(ctx, 401, "API key required (Authorization: Bearer ...)")
+		return
+	}
+	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+	if _, err := dbConn.GetUserByAPIKey(apiKey); err != nil {
+		jsonError(ctx, 401, "invalid API key")
+		return
+	}
+
+	// Forward multipart body verbatim to inference /train/upload_dataset
+	backendURL := serviceBackends["lora_training"]
+	endpoint := backendURL + "/train/upload_dataset"
+
+	httpReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(ctx.PostBody())))
+	if err != nil {
+		jsonError(ctx, 500, "failed to build upload request")
+		return
+	}
+	contentType := string(ctx.Request.Header.ContentType())
+	httpReq.Header.Set("Content-Type", contentType)
+	httpReq.ContentLength = int64(len(ctx.PostBody()))
+
+	resp, err := backendClient.Do(httpReq)
+	if err != nil {
+		jsonError(ctx, 502, "upload backend unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	ctx.SetStatusCode(resp.StatusCode)
+	ctx.SetBody(body)
 }
 
 // handleGetBalance returns wallet balance and credit info

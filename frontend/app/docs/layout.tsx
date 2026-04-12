@@ -4,12 +4,12 @@ export const metadata: Metadata = {
   title: 'API Documentation — CuteDSL',
   description:
     'Complete API reference for CuteDSL inference services. Text-to-image, time series forecasting, TTS, STT, chat, video generation, and more.',
-  alternates: { canonical: 'https://cutedsl.com/docs' },
+  alternates: { canonical: 'https://cutedsl.app.nz/docs' },
   openGraph: {
     title: 'CuteDSL API Documentation',
     description:
       'Complete API reference for CuteDSL inference services with interactive playgrounds.',
-    url: 'https://cutedsl.com/docs',
+    url: 'https://cutedsl.app.nz/docs',
     images: [
       {
         url: 'https://appstatic.app.nz/cutedsl/images/og-docs.webp',

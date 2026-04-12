@@ -38,7 +38,7 @@ export const MODELS: ModelConfig[] = [
       { name: 'guidance', type: 'float', required: false, default: 3.5, description: 'Guidance scale — how closely to follow the prompt' },
       { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -69,7 +69,7 @@ export const MODELS: ModelConfig[] = [
       { name: 'prediction_length', type: 'int', required: false, default: 12, description: 'Number of future time steps to forecast' },
       { name: 'quantile_levels', type: 'float[]', required: false, description: 'Quantile levels for prediction intervals', placeholder: '[0.1, 0.5, 0.9]' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -97,7 +97,7 @@ export const MODELS: ModelConfig[] = [
       { name: 'voice', type: 'string', required: false, description: 'Voice ID to use', options: ['af_nicole', 'af_sarah', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bf_isabella', 'bm_george', 'bm_lewis'] },
       { name: 'speed', type: 'float', required: false, default: 1.0, description: 'Speech speed multiplier (0.5 = half speed, 2.0 = double speed)' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -124,7 +124,7 @@ export const MODELS: ModelConfig[] = [
     params: [
       { name: 'audio_url', type: 'string', required: true, description: 'URL of the audio file to transcribe', placeholder: 'https://example.com/audio.mp3' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -151,7 +151,7 @@ export const MODELS: ModelConfig[] = [
       { name: 'max_tokens', type: 'int', required: false, default: 1024, description: 'Maximum tokens to generate' },
       { name: 'temperature', type: 'float', required: false, default: 0.7, description: 'Sampling temperature (0 = deterministic, 1 = creative)' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -178,7 +178,7 @@ export const MODELS: ModelConfig[] = [
     params: [
       { name: 'image_url', type: 'string', required: true, description: 'URL of the image to caption', placeholder: 'https://example.com/photo.jpg' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -203,7 +203,7 @@ export const MODELS: ModelConfig[] = [
     params: [
       { name: 'prompt', type: 'string', required: true, description: 'Text description of the video to generate', placeholder: 'a timelapse of clouds rolling over mountains at sunset' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -228,7 +228,7 @@ export const MODELS: ModelConfig[] = [
     params: [
       { name: 'prompt', type: 'string', required: true, description: 'Text description of the image to generate', placeholder: 'a futuristic cityscape at night with neon lights' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -260,7 +260,7 @@ export const MODELS: ModelConfig[] = [
       { name: 'train_steps', type: 'int', required: false, default: 1000, description: 'Number of training steps' },
       { name: 'train_batch', type: 'int', required: false, default: 4, description: 'Training batch size' },
     ],
-    curlExample: `curl -X POST https://cutedsl.com/api/service \\
+    curlExample: `curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
@@ -273,7 +273,7 @@ export const MODELS: ModelConfig[] = [
   }'
 
 # Check training status:
-curl https://cutedsl.com/api/train/JOB_ID \\
+curl https://cutedsl.app.nz/api/train/JOB_ID \\
   -H "Authorization: Bearer YOUR_API_KEY"`,
     responseExample: {
       result: { job_id: 'train_abc123', status: 'queued', model: 'chronos2', dataset_name: 'my-timeseries', estimated_time_minutes: 15 },

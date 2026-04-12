@@ -89,7 +89,7 @@ export default function DocsPage() {
               All services share a single endpoint: <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">POST /api/service</code>
             </p>
             <pre className="bg-slate-900 text-slate-100 rounded-xl p-5 text-sm overflow-x-auto leading-relaxed">
-{replaceApiKey(`curl -X POST https://cutedsl.com/api/service \\
+{replaceApiKey(`curl -X POST https://cutedsl.app.nz/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{

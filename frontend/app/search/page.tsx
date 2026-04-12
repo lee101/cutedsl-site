@@ -57,20 +57,35 @@ export default function SearchPage() {
       .catch(() => {});
   }, []);
 
-  // Fetch images
+  // Fetch images. Semantic (gobed) for queries, trigram browse for no-query.
   const fetchImages = useCallback(async (q: string, p: number, append: boolean = false) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(p), per_page: String(PER_PAGE) });
-      if (q) params.set('q', q);
-      if (allowNSFW) params.set('allow_nsfw', 'true');
+      let newImages: GeneratedImage[] = [];
+      let newTotal = 0;
 
-      const res = await fetch(`${API_BASE}/images?${params}`);
-      const data: SearchResult = await res.json();
+      if (q) {
+        // Semantic: fetch a large top_k once — gobed returns ranked results,
+        // pagination is handled client-side via slicing.
+        const params = new URLSearchParams({ q, top_k: '240' });
+        if (allowNSFW) params.set('allow_nsfw', 'true');
+        const res = await fetch(`${API_BASE}/images/semantic?${params}`);
+        const data = await res.json();
+        const all: GeneratedImage[] = data.images || [];
+        newTotal = all.length;
+        newImages = all.slice((p - 1) * PER_PAGE, p * PER_PAGE);
+      } else {
+        // Browse (no query): paginated trigram / recent
+        const params = new URLSearchParams({ page: String(p), per_page: String(PER_PAGE) });
+        if (allowNSFW) params.set('allow_nsfw', 'true');
+        const res = await fetch(`${API_BASE}/images?${params}`);
+        const data: SearchResult = await res.json();
+        newImages = data.images || [];
+        newTotal = data.total;
+      }
 
-      const newImages = data.images || [];
       setResults(prev => append ? [...prev, ...newImages] : newImages);
-      setTotal(data.total);
+      setTotal(newTotal);
       setPage(p);
       setInitialLoad(false);
     } catch {
@@ -78,7 +93,8 @@ export default function SearchPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allowNSFW]);
 
   // Initial load
   useEffect(() => {
@@ -357,7 +373,13 @@ export default function SearchPage() {
                   {(selectedImage.file_size / 1024).toFixed(0)} KB
                 </span>
               </div>
-              <div className="mt-4 flex gap-3">
+              <div className="mt-4 flex flex-wrap gap-3">
+                <a
+                  href={`/prompt/${selectedImage.id}`}
+                  className="px-4 py-2 bg-gradient-to-r from-pink-400 to-purple-400 text-white rounded-xl font-bold hover:shadow-lg hover:shadow-pink-300/50 transition-all text-sm"
+                >
+                  View page &amp; related →
+                </a>
                 <a
                   href={`${IMG_BASE}/${selectedImage.file_path}`}
                   target="_blank"
