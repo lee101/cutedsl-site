@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -10,6 +12,41 @@ import (
 
 	"github.com/valyala/fasthttp"
 )
+
+// stopwords filtered out of keyword tag extraction.
+var stopwords = map[string]bool{
+	"the": true, "a": true, "an": true, "of": true, "in": true,
+	"with": true, "and": true, "for": true, "to": true, "at": true,
+	"by": true, "on": true, "as": true, "is": true, "are": true,
+	"was": true, "be": true, "has": true, "from": true, "that": true,
+	"this": true, "it": true, "its": true, "or": true, "not": true,
+	"but": true, "so": true, "if": true, "into": true, "over": true,
+	"under": true, "very": true, "just": true, "than": true, "then": true,
+	"through": true, "upon": true, "about": true, "against": true,
+	"after": true, "before": true, "between": true, "while": true,
+	"style": true, "art": true, "image": true, "photo": true,
+}
+
+// extractTags pulls meaningful keywords from a prompt for SEO tag pills.
+func extractTags(prompt string) []string {
+	seen := map[string]bool{}
+	var tags []string
+	words := strings.FieldsFunc(strings.ToLower(prompt), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for _, w := range words {
+		if len(w) < 4 || stopwords[w] || seen[w] {
+			continue
+		}
+		seen[w] = true
+		// Capitalise for display
+		tags = append(tags, strings.ToUpper(w[:1])+w[1:])
+		if len(tags) >= 14 {
+			break
+		}
+	}
+	return tags
+}
 
 // slugify converts a string to a URL-safe slug (lowercase, hyphens only).
 func slugify(s string) string {
@@ -157,81 +194,181 @@ func handlePromptAPI(ctx *fasthttp.RequestCtx, imageID string) {
 	})
 }
 
-// promptPageTemplate is a lightweight, SEO-friendly HTML page served at
-// /prompt/<id>. Server-side rendered so crawlers get full content without JS.
-var promptPageTemplate = template.Must(template.New("prompt").Parse(`<!DOCTYPE html>
+// promptPageTemplate is a rich, SEO-optimised HTML page served at /image/<slug>
+// and /prompt/<id>. Server-side rendered so crawlers get full content without JS.
+var promptPageTemplate = template.Must(template.New("prompt").Funcs(template.FuncMap{
+	"urlquery": url.QueryEscape,
+}).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>{{.TitlePrompt}} | CuteDSL AI Art</title>
 <meta name="description" content="{{.MetaPrompt}}">
+<meta name="keywords" content="{{.Keywords}}">
+<meta name="robots" content="index, follow, max-image-preview:large">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Open Graph -->
 <meta property="og:title" content="{{.TitlePrompt}}">
 <meta property="og:description" content="{{.MetaPrompt}}">
 <meta property="og:image" content="{{.OGImage}}">
+<meta property="og:image:width" content="{{.Image.Width}}">
+<meta property="og:image:height" content="{{.Image.Height}}">
+<meta property="og:image:type" content="image/webp">
+<meta property="og:image:alt" content="{{.AltText}}">
 <meta property="og:type" content="article">
 <meta property="og:url" content="{{.CanonicalURL}}">
-<link rel="canonical" href="{{.CanonicalURL}}">
+<meta property="og:site_name" content="CuteDSL AI Art">
+<meta property="article:published_time" content="{{.Published}}">
+<meta property="article:section" content="AI Art">
+<!-- Twitter / X -->
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{.TitlePrompt}}">
+<meta name="twitter:description" content="{{.MetaPrompt}}">
+<meta name="twitter:image" content="{{.OGImage}}">
+<meta name="twitter:image:alt" content="{{.AltText}}">
+<meta name="twitter:site" content="@cutedsl">
+<!-- Canonical + preload -->
+<link rel="canonical" href="{{.CanonicalURL}}">
+<link rel="preload" as="image" href="{{.ImageURL}}">
 <link rel="icon" href="https://appstatic.app.nz/cutedsl/images/favicon.ico">
+<!-- JSON-LD structured data -->
+<script type="application/ld+json">{{.JSONLD}}</script>
 <style>
-  body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:#fef6fb;color:#1e293b}
-  .nav{padding:1.5rem 2rem;display:flex;justify-content:space-between;align-items:center;max-width:72rem;margin:0 auto}
-  .nav a{color:#db2777;text-decoration:none;font-weight:700;margin-left:1.5rem}
-  .nav .logo{font-size:1.6rem}
-  main{max-width:72rem;margin:0 auto;padding:1rem 2rem 4rem}
-  h1{font-size:1.4rem;font-weight:700;color:#0f172a;line-height:1.4;margin:1rem 0}
-  .hero{background:#fff;border:1px solid #fbcfe8;border-radius:1.25rem;padding:1.5rem;box-shadow:0 4px 20px rgba(244,114,182,.1)}
-  .hero img{width:100%;max-height:80vh;object-fit:contain;border-radius:.75rem;background:#f1f5f9}
-  .meta{display:flex;flex-wrap:wrap;gap:1rem;font-size:.85rem;color:#64748b;margin-top:1rem}
-  .meta span{background:#f1f5f9;padding:.25rem .75rem;border-radius:9999px}
-  h2{font-size:1.1rem;font-weight:700;color:#0f172a;margin:2.5rem 0 1rem}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem}
-  .card{background:#fff;border:1px solid #f1f5f9;border-radius:.75rem;overflow:hidden;transition:transform .15s}
-  .card:hover{transform:translateY(-2px);border-color:#fbcfe8}
-  .card a{display:block;color:inherit;text-decoration:none}
-  .card img{width:100%;aspect-ratio:1;object-fit:cover;display:block;background:#f1f5f9}
-  .card p{font-size:.75rem;color:#64748b;padding:.5rem;line-height:1.4;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-  footer{text-align:center;color:#94a3b8;font-size:.85rem;padding:2rem 0;margin-top:3rem;border-top:1px solid #f1f5f9}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#fef6fb;color:#1e293b;line-height:1.6}
+a{color:inherit;text-decoration:none}
+.nav{padding:1.25rem 2rem;display:flex;justify-content:space-between;align-items:center;max-width:80rem;margin:0 auto}
+.nav-logo{font-size:1.5rem;font-weight:800;color:#db2777;display:flex;align-items:center;gap:.5rem}
+.nav-links a{color:#475569;font-weight:600;margin-left:1.5rem;font-size:.9rem;transition:color .15s}
+.nav-links a:hover{color:#db2777}
+.breadcrumb{max-width:80rem;margin:0 auto;padding:.5rem 2rem 0;font-size:.8rem;color:#94a3b8;display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
+.breadcrumb a{color:#94a3b8;transition:color .15s}.breadcrumb a:hover{color:#db2777}
+.breadcrumb span{color:#cbd5e1}
+main{max-width:80rem;margin:0 auto;padding:1.25rem 2rem 5rem;display:grid;grid-template-columns:1fr 340px;gap:2rem}
+@media(max-width:900px){main{grid-template-columns:1fr;padding:1rem 1rem 4rem}}
+.hero-col{}
+.hero-img-wrap{background:#fff;border:1px solid #fbcfe8;border-radius:1.25rem;overflow:hidden;box-shadow:0 4px 24px rgba(219,39,119,.08)}
+.hero-img-wrap img{width:100%;display:block;max-height:75vh;object-fit:contain;background:#f8fafc}
+.info-col{}
+.info-card{background:#fff;border:1px solid #fce7f3;border-radius:1.25rem;padding:1.5rem;box-shadow:0 2px 12px rgba(219,39,119,.06);position:sticky;top:1.5rem}
+h1{font-size:1.1rem;font-weight:700;color:#0f172a;line-height:1.5;margin:0 0 1.25rem}
+.meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:1.25rem}
+.meta-item{background:#f8fafc;border:1px solid #e2e8f0;border-radius:.6rem;padding:.4rem .7rem}
+.meta-label{font-size:.68rem;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.meta-value{font-size:.85rem;font-weight:700;color:#334155}
+.actions{display:flex;flex-direction:column;gap:.6rem;margin-bottom:1.25rem}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;padding:.6rem 1rem;border-radius:.75rem;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .15s;border:none;text-align:center}
+.btn-primary{background:linear-gradient(135deg,#ec4899,#a855f7);color:#fff;box-shadow:0 2px 12px rgba(236,72,153,.3)}
+.btn-primary:hover{box-shadow:0 4px 20px rgba(236,72,153,.45);transform:translateY(-1px)}
+.btn-secondary{background:#f1f5f9;color:#334155;border:1px solid #e2e8f0}
+.btn-secondary:hover{background:#e2e8f0}
+.btn-download{background:#fff;color:#0f172a;border:1px solid #e2e8f0}
+.btn-download:hover{border-color:#db2777;color:#db2777}
+.section-title{font-size:.85rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin:1.25rem 0 .6rem}
+.tags{display:flex;flex-wrap:wrap;gap:.4rem}
+.tag{font-size:.75rem;font-weight:600;padding:.25rem .65rem;border-radius:9999px;background:linear-gradient(135deg,#fdf2f8,#faf5ff);border:1px solid #f0abfc;color:#86198f;transition:all .15s}
+.tag:hover{background:linear-gradient(135deg,#f9a8d4,#d8b4fe);color:#fff;border-color:transparent}
+.prompt-box{background:#fdf2f8;border:1px solid #fce7f3;border-radius:.75rem;padding:.85rem 1rem;font-size:.82rem;color:#475569;line-height:1.6;font-style:italic;margin-bottom:1.25rem}
+/* Related section spans full width below */
+.related-section{grid-column:1/-1;margin-top:.5rem}
+h2{font-size:1.2rem;font-weight:800;color:#0f172a;margin:0 0 1rem;display:flex;align-items:center;gap:.5rem}
+.related-grid{columns:2;column-gap:.75rem}
+@media(min-width:480px){.related-grid{columns:3}}
+@media(min-width:700px){.related-grid{columns:4}}
+@media(min-width:1000px){.related-grid{columns:5}}
+@media(min-width:1280px){.related-grid{columns:6}}
+.card{break-inside:avoid;margin-bottom:.75rem;background:#fff;border:1px solid #f1f5f9;border-radius:.875rem;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s}
+.card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(219,39,119,.12);border-color:#fbcfe8}
+.card a{display:block;color:inherit}
+.card img{width:100%;display:block;background:#f1f5f9}
+.card p{font-size:.72rem;color:#64748b;padding:.45rem .6rem .5rem;line-height:1.4;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+footer{text-align:center;color:#94a3b8;font-size:.82rem;padding:2rem 0 3rem;border-top:1px solid #fce7f3}
+footer a{color:#db2777}
 </style>
 </head>
 <body>
 <nav class="nav">
-  <a href="/" class="logo">🦋 CuteDSL</a>
-  <div>
+  <a href="/" class="nav-logo">🦋 CuteDSL</a>
+  <div class="nav-links">
     <a href="/gallery">Gallery</a>
     <a href="/search">Search</a>
-    <a href="/docs">Docs</a>
+    <a href="/docs">API Docs</a>
+    <a href="/">Generate</a>
   </div>
 </nav>
+
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="/">Home</a>
+  <span>›</span>
+  <a href="/gallery">Gallery</a>
+  <span>›</span>
+  <span style="color:#475569;max-width:40ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{.TitlePrompt}}</span>
+</nav>
+
 <main>
-  <div class="hero">
-    <img src="{{.ImageURL}}" alt="{{.AltText}}" loading="eager">
-    <h1>{{.TitlePrompt}}</h1>
-    <div class="meta">
-      <span>{{.Image.Width}}×{{.Image.Height}}</span>
-      <span>Model: {{.Image.Model}}</span>
-      <span>Steps: {{.Image.Steps}}</span>
-      {{if .Image.Seed}}<span>Seed: {{.Image.Seed}}</span>{{end}}
+  <!-- Hero image -->
+  <div class="hero-col">
+    <div class="hero-img-wrap">
+      <img src="{{.ImageURL}}" alt="{{.AltText}}" loading="eager" width="{{.Image.Width}}" height="{{.Image.Height}}">
+    </div>
+  </div>
+
+  <!-- Info sidebar -->
+  <div class="info-col">
+    <div class="info-card">
+      <h1>{{.TitlePrompt}}</h1>
+
+      <div class="prompt-box">{{.Image.Prompt}}</div>
+
+      <div class="actions">
+        <a href="/" class="btn btn-primary">✨ Generate similar image</a>
+        <a href="{{.FullImageURL}}" download class="btn btn-download">⬇ Download full resolution</a>
+        <button onclick="navigator.clipboard.writeText(this.dataset.p);this.textContent='✓ Copied!';setTimeout(()=>this.textContent='📋 Copy prompt',2000)" data-p="{{.CopyPrompt}}" class="btn btn-secondary">📋 Copy prompt</button>
+      </div>
+
+      <div class="section-title">Details</div>
+      <div class="meta-grid">
+        <div class="meta-item"><div class="meta-label">Dimensions</div><div class="meta-value">{{.Image.Width}}×{{.Image.Height}}</div></div>
+        <div class="meta-item"><div class="meta-label">Model</div><div class="meta-value">{{.Image.Model}}</div></div>
+        <div class="meta-item"><div class="meta-label">Steps</div><div class="meta-value">{{.Image.Steps}}</div></div>
+        {{if .Image.Seed}}<div class="meta-item"><div class="meta-label">Seed</div><div class="meta-value">{{.Image.Seed}}</div></div>{{end}}
+        <div class="meta-item"><div class="meta-label">Published</div><div class="meta-value">{{.PublishedShort}}</div></div>
+        {{if .Image.FileSize}}<div class="meta-item"><div class="meta-label">File size</div><div class="meta-value">{{.FileSizeKB}} KB</div></div>{{end}}
+      </div>
+
+      {{if .Tags}}
+      <div class="section-title">Tags</div>
+      <div class="tags">
+        {{range .Tags}}<a href="/search?q={{. | urlquery}}" class="tag">{{.}}</a>{{end}}
+      </div>
+      {{end}}
     </div>
   </div>
 
   {{if .Related}}
-  <h2>Related images</h2>
-  <div class="grid">
-    {{range .Related}}
-    <article class="card">
-      <a href="/image/{{.Slug}}">
-        <img src="/images/{{if .ThumbPath}}{{.ThumbPath}}{{else}}{{.FilePath}}{{end}}" alt="{{.Prompt}}" loading="lazy">
-        <p>{{.Prompt}}</p>
-      </a>
-    </article>
-    {{end}}
-  </div>
+  <section class="related-section">
+    <h2>🎨 Related images <span style="font-size:.85rem;color:#94a3b8;font-weight:500">({{len .Related}})</span></h2>
+    <div class="related-grid">
+      {{range .Related}}
+      <article class="card" itemscope itemtype="https://schema.org/ImageObject">
+        <a href="/image/{{.Slug}}" itemprop="url">
+          <img src="/images/{{if .ThumbPath}}{{.ThumbPath}}{{else}}{{.FilePath}}{{end}}"
+               alt="{{.Prompt}}" loading="lazy" itemprop="thumbnailUrl"
+               style="aspect-ratio:{{.Width}}/{{.Height}}">
+          <p itemprop="description">{{.Prompt}}</p>
+        </a>
+      </article>
+      {{end}}
+    </div>
+  </section>
   {{end}}
 </main>
+
 <footer>
-  © {{.Year}} <a href="https://cutedsl.app.nz" style="color:#db2777">CuteDSL</a> — AI-generated
+  <p>© {{.Year}} <a href="https://cutedsl.app.nz">CuteDSL</a> — AI-generated art powered by Z-Image Turbo on Solana</p>
+  <p style="margin-top:.5rem;font-size:.75rem">
+    <a href="/gallery">Gallery</a> · <a href="/search">Search</a> · <a href="/docs">API</a> · <a href="/evals">Evals</a>
+  </p>
 </footer>
 </body>
 </html>`))
@@ -249,15 +386,15 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 	if err != nil || len(images) == 0 {
 		ctx.SetStatusCode(404)
 		ctx.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
-		ctx.SetBodyString(`<!DOCTYPE html><html><body style="font-family:system-ui;text-align:center;padding:4rem"><h1>Prompt not found</h1><a href="/search">Browse gallery</a></body></html>`)
+		ctx.SetBodyString(`<!DOCTYPE html><html><body style="font-family:system-ui;text-align:center;padding:4rem"><h1>Prompt not found</h1><a href="/gallery">Browse gallery</a></body></html>`)
 		return
 	}
 	img := images[0]
 
-	// Related images via semantic search
+	// Related images via semantic search — fetch 24
 	var related []GeneratedImage
 	if promptSearch != nil && promptSearch.IsReady() {
-		sims, _ := promptSearch.SearchRelated(img.Prompt, img.ID, 12)
+		sims, _ := promptSearch.SearchRelated(img.Prompt, img.ID, 24)
 		if len(sims) > 0 {
 			relIDs := make([]string, 0, len(sims))
 			for _, r := range sims {
@@ -297,27 +434,131 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 	}
 
 	host := "https://cutedsl.app.nz"
-	data := struct {
-		Image        GeneratedImage
-		Related      []RelatedEntry
-		TitlePrompt  string
-		MetaPrompt   string
-		AltText      string
-		ImageURL     string
-		OGImage      string
-		CanonicalURL string
-		Year         int
-	}{
-		Image:        img,
-		Related:      relEntries,
-		TitlePrompt:  titlePrompt,
-		MetaPrompt:   metaPrompt,
-		AltText:      altText,
-		ImageURL:     "/images/" + imgPath,
-		OGImage:      host + "/images/" + imgPath,
-		CanonicalURL: imagePageURL(host, img.ID, img.Prompt),
-		Year:         time.Now().Year(),
+	canonicalURL := imagePageURL(host, img.ID, img.Prompt)
+	tags := extractTags(img.Prompt)
+
+	// Build keywords meta string
+	kwLower := make([]string, len(tags))
+	for i, t := range tags {
+		kwLower[i] = strings.ToLower(t)
 	}
+	keywords := strings.Join(kwLower, ", ") + ", ai art, ai generated, cutedsl, z-image turbo, stable diffusion"
+
+	// JSON-LD structured data
+	thumbURL := host + "/images/" + img.FilePath
+	if img.ThumbPath != "" {
+		thumbURL = host + "/images/" + img.ThumbPath
+	}
+	relatedURLs := make([]map[string]interface{}, 0, len(relEntries))
+	for _, r := range relEntries {
+		relatedURLs = append(relatedURLs, map[string]interface{}{
+			"@type": "ImageObject",
+			"url":   host + "/image/" + r.Slug,
+			"thumbnailUrl": func() string {
+				if r.ThumbPath != "" {
+					return host + "/images/" + r.ThumbPath
+				}
+				return host + "/images/" + r.FilePath
+			}(),
+			"description": func() string {
+				p := r.Prompt
+				if len(p) > 120 {
+					p = p[:117] + "..."
+				}
+				return p
+			}(),
+		})
+	}
+
+	jsonLDData := map[string]interface{}{
+		"@context": "https://schema.org",
+		"@graph": []interface{}{
+			map[string]interface{}{
+				"@type":          "ImageObject",
+				"@id":            canonicalURL + "#image",
+				"contentUrl":     host + "/images/" + img.FilePath,
+				"url":            canonicalURL,
+				"thumbnailUrl":   thumbURL,
+				"description":    img.Prompt,
+				"name":           titlePrompt,
+				"width":          img.Width,
+				"height":         img.Height,
+				"encodingFormat": "image/webp",
+				"datePublished":  img.CreatedAt.Format(time.RFC3339),
+				"author": map[string]interface{}{
+					"@type": "Organization",
+					"name":  "CuteDSL",
+					"url":   "https://cutedsl.app.nz",
+				},
+				"license":         "https://creativecommons.org/licenses/by/4.0/",
+				"acquireLicensePage": "https://cutedsl.app.nz",
+				"keywords":        keywords,
+				"relatedLink":     canonicalURL,
+			},
+			map[string]interface{}{
+				"@type": "BreadcrumbList",
+				"itemListElement": []interface{}{
+					map[string]interface{}{"@type": "ListItem", "position": 1, "name": "Home", "item": "https://cutedsl.app.nz"},
+					map[string]interface{}{"@type": "ListItem", "position": 2, "name": "Gallery", "item": "https://cutedsl.app.nz/gallery"},
+					map[string]interface{}{"@type": "ListItem", "position": 3, "name": titlePrompt, "item": canonicalURL},
+				},
+			},
+			map[string]interface{}{
+				"@type":            "WebPage",
+				"@id":              canonicalURL,
+				"url":              canonicalURL,
+				"name":             titlePrompt + " | CuteDSL AI Art",
+				"description":      metaPrompt,
+				"datePublished":    img.CreatedAt.Format(time.RFC3339),
+				"inLanguage":       "en",
+				"isPartOf":         map[string]interface{}{"@type": "WebSite", "name": "CuteDSL", "url": "https://cutedsl.app.nz"},
+				"primaryImageOfPage": map[string]interface{}{"@id": canonicalURL + "#image"},
+			},
+		},
+	}
+	jsonLDBytes, _ := json.Marshal(jsonLDData)
+
+	year := time.Now().Year()
+	fileSizeKB := img.FileSize / 1024
+
+	data := struct {
+		Image          GeneratedImage
+		Related        []RelatedEntry
+		Tags           []string
+		TitlePrompt    string
+		MetaPrompt     string
+		AltText        string
+		Keywords       string
+		ImageURL       string
+		FullImageURL   string
+		OGImage        string
+		CanonicalURL   string
+		CopyPrompt     string
+		JSONLD         template.HTML
+		Published      string
+		PublishedShort string
+		FileSizeKB     int64
+		Year           int
+	}{
+		Image:          img,
+		Related:        relEntries,
+		Tags:           tags,
+		TitlePrompt:    titlePrompt,
+		MetaPrompt:     metaPrompt,
+		AltText:        altText,
+		Keywords:       keywords,
+		ImageURL:       "/images/" + imgPath,
+		FullImageURL:   "/images/" + img.FilePath,
+		OGImage:        host + "/images/" + imgPath,
+		CanonicalURL:   canonicalURL,
+		CopyPrompt:     img.Prompt,
+		JSONLD:         template.HTML(jsonLDBytes),
+		Published:      img.CreatedAt.Format(time.RFC3339),
+		PublishedShort: img.CreatedAt.Format("Jan 2006"),
+		FileSizeKB:     fileSizeKB,
+		Year:           year,
+	}
+	_ = relatedURLs // included in JSON-LD above
 
 	ctx.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
 	ctx.Response.Header.Set("Cache-Control", "public, max-age=3600")
