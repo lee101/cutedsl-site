@@ -11,6 +11,16 @@ const IMG_BASE = '/images';
 const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
 const PER_PAGE = 48;
 
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 72);
+}
+
+function imageSlug(id: string, prompt: string): string {
+  const shortID = id.split('-')[0] ?? id.slice(0, 8);
+  const slug = slugify(prompt);
+  return slug ? `${slug}-${shortID}` : shortID;
+}
+
 interface GeneratedImage {
   id: string;
   prompt: string;
@@ -170,6 +180,7 @@ export default function SearchPage() {
         </Link>
         <div className="flex gap-6 font-bold text-slate-700">
           <Link href="/" className="hover:text-pink-500 transition-colors flex items-center gap-1"><ArrowLeft size={16} /> Home</Link>
+          <Link href="/gallery" className="hover:text-pink-500 transition-colors">Gallery</Link>
           <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
           <Link href="/blog" className="hover:text-purple-500 transition-colors">Blog</Link>
         </div>
@@ -375,7 +386,7 @@ export default function SearchPage() {
               </div>
               <div className="mt-4 flex flex-wrap gap-3">
                 <a
-                  href={`/prompt/${selectedImage.id}`}
+                  href={`/image/${imageSlug(selectedImage.id, selectedImage.prompt)}`}
                   className="px-4 py-2 bg-gradient-to-r from-pink-400 to-purple-400 text-white rounded-xl font-bold hover:shadow-lg hover:shadow-pink-300/50 transition-all text-sm"
                 >
                   View page &amp; related →

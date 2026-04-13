@@ -6,9 +6,64 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/valyala/fasthttp"
 )
+
+// slugify converts a string to a URL-safe slug (lowercase, hyphens only).
+func slugify(s string) string {
+	s = strings.ToLower(s)
+	var b strings.Builder
+	prevHyphen := true // start true so we don't lead with a hyphen
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevHyphen = false
+		} else if unicode.IsSpace(r) || r == '-' || r == '_' || r == ',' || r == '.' {
+			if !prevHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+				prevHyphen = true
+			}
+		}
+		if b.Len() >= 80 {
+			break
+		}
+	}
+	result := strings.TrimRight(b.String(), "-")
+	// Trim at last word boundary if over 72 chars
+	if len(result) > 72 {
+		idx := strings.LastIndex(result[:72], "-")
+		if idx > 40 {
+			result = result[:idx]
+		} else {
+			result = result[:72]
+		}
+	}
+	return result
+}
+
+// imageSlug returns the SEO slug for an image: {prompt-slug}-{shortID}
+// shortID is the first 8 chars of the UUID (before the first dash).
+func imageSlug(id, prompt string) string {
+	shortID := id
+	if dashIdx := strings.Index(id, "-"); dashIdx > 0 {
+		shortID = id[:dashIdx]
+	}
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	slug := slugify(prompt)
+	if slug == "" {
+		return shortID
+	}
+	return slug + "-" + shortID
+}
+
+// imagePageURL returns the canonical SEO URL for an image.
+func imagePageURL(host, id, prompt string) string {
+	return host + "/image/" + imageSlug(id, prompt)
+}
 
 // handleSemanticImageSearch is the NEW primary image search endpoint.
 // GET /api/images/semantic?q=<query>&top_k=24
@@ -144,7 +199,8 @@ var promptPageTemplate = template.Must(template.New("prompt").Parse(`<!DOCTYPE h
 <nav class="nav">
   <a href="/" class="logo">🦋 CuteDSL</a>
   <div>
-    <a href="/search">Gallery</a>
+    <a href="/gallery">Gallery</a>
+    <a href="/search">Search</a>
     <a href="/docs">Docs</a>
   </div>
 </nav>
@@ -165,7 +221,7 @@ var promptPageTemplate = template.Must(template.New("prompt").Parse(`<!DOCTYPE h
   <div class="grid">
     {{range .Related}}
     <article class="card">
-      <a href="/prompt/{{.ID}}">
+      <a href="/image/{{.Slug}}">
         <img src="/images/{{if .ThumbPath}}{{.ThumbPath}}{{else}}{{.FilePath}}{{end}}" alt="{{.Prompt}}" loading="lazy">
         <p>{{.Prompt}}</p>
       </a>
@@ -231,9 +287,19 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 		altText = altText[:197] + "..."
 	}
 
+	type RelatedEntry struct {
+		GeneratedImage
+		Slug string
+	}
+	relEntries := make([]RelatedEntry, len(related))
+	for i, r := range related {
+		relEntries[i] = RelatedEntry{GeneratedImage: r, Slug: imageSlug(r.ID, r.Prompt)}
+	}
+
+	host := "https://cutedsl.app.nz"
 	data := struct {
 		Image        GeneratedImage
-		Related      []GeneratedImage
+		Related      []RelatedEntry
 		TitlePrompt  string
 		MetaPrompt   string
 		AltText      string
@@ -243,13 +309,13 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 		Year         int
 	}{
 		Image:        img,
-		Related:      related,
+		Related:      relEntries,
 		TitlePrompt:  titlePrompt,
 		MetaPrompt:   metaPrompt,
 		AltText:      altText,
 		ImageURL:     "/images/" + imgPath,
-		OGImage:      "https://cutedsl.app.nz/images/" + imgPath,
-		CanonicalURL: "https://cutedsl.app.nz/prompt/" + img.ID,
+		OGImage:      host + "/images/" + imgPath,
+		CanonicalURL: imagePageURL(host, img.ID, img.Prompt),
 		Year:         time.Now().Year(),
 	}
 
@@ -297,7 +363,7 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 func handleSitemapPages(ctx *fasthttp.RequestCtx) {
 	host := "https://cutedsl.app.nz"
 	pages := []string{
-		"/", "/search", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
+		"/", "/search", "/gallery", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
 		"/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
 		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/lora_training",
 	}
@@ -356,16 +422,22 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 		if len(caption) > 300 {
 			caption = caption[:297] + "..."
 		}
+		slug := imageSlug(id, prompt)
+		title := xmlEscape(prompt)
+		if len(title) > 100 {
+			title = title[:97] + "..."
+		}
 		fmt.Fprintf(&sb,
 			`  <url>
-    <loc>%s/prompt/%s</loc>
+    <loc>%s/image/%s</loc>
     <changefreq>monthly</changefreq>
     <image:image>
       <image:loc>%s/images/%s</image:loc>
       <image:caption>%s</image:caption>
+      <image:title>%s</image:title>
     </image:image>
   </url>
-`, host, id, host, imgPath, caption)
+`, host, slug, host, imgPath, caption, title)
 		n++
 	}
 	sb.WriteString(`</urlset>` + "\n")
@@ -389,4 +461,43 @@ func xmlEscape(s string) string {
 		"'", "&apos;",
 	)
 	return replacer.Replace(s)
+}
+
+// handleImageBySlug serves /image/<slug> where slug ends in -{shortID}.
+// shortID is the first 8 chars of the UUID. We look up by id LIKE shortID||'-%'.
+func handleImageBySlug(ctx *fasthttp.RequestCtx, slug string) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		ctx.SetStatusCode(404)
+		ctx.SetBodyString("not found")
+		return
+	}
+
+	// Extract shortID: last token after the final '-'
+	shortID := slug
+	if idx := strings.LastIndex(slug, "-"); idx >= 0 {
+		shortID = slug[idx+1:]
+	}
+	if len(shortID) == 0 {
+		ctx.SetStatusCode(404)
+		ctx.SetBodyString("not found")
+		return
+	}
+
+	// Look up the image by the shortID prefix. UUID format: xxxxxxxx-xxxx-...
+	// so shortID matches the first segment of the UUID.
+	row := dbConn.conn.QueryRow(
+		`SELECT id FROM generated_images WHERE id LIKE $1 || '-%' OR id = $1 LIMIT 1`,
+		shortID,
+	)
+	var imageID string
+	if err := row.Scan(&imageID); err != nil {
+		ctx.SetStatusCode(404)
+		ctx.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
+		ctx.SetBodyString(`<!DOCTYPE html><html><body style="font-family:system-ui;text-align:center;padding:4rem"><h1>Image not found</h1><a href="/gallery">Browse gallery</a></body></html>`)
+		return
+	}
+
+	// Render using the shared prompt HTML handler but with the canonical /image/ URL
+	handlePromptHTML(ctx, imageID)
 }

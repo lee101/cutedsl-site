@@ -44,6 +44,10 @@ const nextConfig: NextConfig = {
           source: '/prompt/:path*',
           destination: 'http://localhost:8095/prompt/:path*',
         },
+        {
+          source: '/image/:path*',
+          destination: 'http://localhost:8095/image/:path*',
+        },
       ];
     },
     async headers() {

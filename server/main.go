@@ -112,6 +112,12 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	// SEO-friendly image pages. /image/<prompt-slug>-<shortID>
+	if strings.HasPrefix(path, "/image/") && method == "GET" {
+		handleImageBySlug(ctx, strings.TrimPrefix(path, "/image/"))
+		return
+	}
+
 	// Static files / frontend
 	serveStatic(ctx, path)
 }
