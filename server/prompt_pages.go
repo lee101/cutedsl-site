@@ -198,6 +198,9 @@ func handlePromptAPI(ctx *fasthttp.RequestCtx, imageID string) {
 // and /prompt/<id>. Server-side rendered so crawlers get full content without JS.
 var promptPageTemplate = template.Must(template.New("prompt").Funcs(template.FuncMap{
 	"urlquery": url.QueryEscape,
+	"linkify":  linkifyPrompt,
+	"lower":    strings.ToLower,
+	"tagslug":  slugify,
 }).Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -268,7 +271,9 @@ h1{font-size:1.1rem;font-weight:700;color:#0f172a;line-height:1.5;margin:0 0 1.2
 .tags{display:flex;flex-wrap:wrap;gap:.4rem}
 .tag{font-size:.75rem;font-weight:600;padding:.25rem .65rem;border-radius:9999px;background:linear-gradient(135deg,#fdf2f8,#faf5ff);border:1px solid #f0abfc;color:#86198f;transition:all .15s}
 .tag:hover{background:linear-gradient(135deg,#f9a8d4,#d8b4fe);color:#fff;border-color:transparent}
-.prompt-box{background:#fdf2f8;border:1px solid #fce7f3;border-radius:.75rem;padding:.85rem 1rem;font-size:.82rem;color:#475569;line-height:1.6;font-style:italic;margin-bottom:1.25rem}
+.prompt-box{background:#fdf2f8;border:1px solid #fce7f3;border-radius:.75rem;padding:.85rem 1rem;font-size:.82rem;color:#475569;line-height:1.7;margin-bottom:1.25rem}
+.prompt-box a.prompt-word{color:#86198f;font-weight:600;border-bottom:1px dotted #f0abfc;transition:all .15s;padding:0 1px;border-radius:3px}
+.prompt-box a.prompt-word:hover{background:#fce7f3;color:#db2777;border-bottom-color:transparent}
 /* Related section spans full width below */
 .related-section{grid-column:1/-1;margin-top:.5rem}
 h2{font-size:1.2rem;font-weight:800;color:#0f172a;margin:0 0 1rem;display:flex;align-items:center;gap:.5rem}
@@ -318,7 +323,7 @@ footer a{color:#db2777}
     <div class="info-card">
       <h1>{{.TitlePrompt}}</h1>
 
-      <div class="prompt-box">{{.Image.Prompt}}</div>
+      <div class="prompt-box" aria-label="Prompt (click any word to search)">{{linkify .Image.Prompt}}</div>
 
       <div class="actions">
         <a href="/" class="btn btn-primary">✨ Generate similar image</a>
@@ -339,7 +344,7 @@ footer a{color:#db2777}
       {{if .Tags}}
       <div class="section-title">Tags</div>
       <div class="tags">
-        {{range .Tags}}<a href="/search?q={{. | urlquery}}" class="tag">{{.}}</a>{{end}}
+        {{range .Tags}}<a href="/tag/{{. | tagslug}}" class="tag" rel="tag">{{.}}</a>{{end}}
       </div>
       {{end}}
     </div>
@@ -365,7 +370,7 @@ footer a{color:#db2777}
 </main>
 
 <footer>
-  <p>© {{.Year}} <a href="https://cutedsl.app.nz">CuteDSL</a> — AI-generated art powered by Z-Image Turbo on Solana</p>
+  <p>© {{.Year}} <a href="https://cutedsl.cc">CuteDSL</a> — AI-generated art powered by Z-Image Turbo on Solana</p>
   <p style="margin-top:.5rem;font-size:.75rem">
     <a href="/gallery">Gallery</a> · <a href="/search">Search</a> · <a href="/docs">API</a> · <a href="/evals">Evals</a>
   </p>
@@ -433,7 +438,7 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 		relEntries[i] = RelatedEntry{GeneratedImage: r, Slug: imageSlug(r.ID, r.Prompt)}
 	}
 
-	host := "https://cutedsl.app.nz"
+	host := "https://cutedsl.cc"
 	canonicalURL := imagePageURL(host, img.ID, img.Prompt)
 	tags := extractTags(img.Prompt)
 
@@ -488,18 +493,18 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 				"author": map[string]interface{}{
 					"@type": "Organization",
 					"name":  "CuteDSL",
-					"url":   "https://cutedsl.app.nz",
+					"url":   "https://cutedsl.cc",
 				},
 				"license":         "https://creativecommons.org/licenses/by/4.0/",
-				"acquireLicensePage": "https://cutedsl.app.nz",
+				"acquireLicensePage": "https://cutedsl.cc",
 				"keywords":        keywords,
 				"relatedLink":     canonicalURL,
 			},
 			map[string]interface{}{
 				"@type": "BreadcrumbList",
 				"itemListElement": []interface{}{
-					map[string]interface{}{"@type": "ListItem", "position": 1, "name": "Home", "item": "https://cutedsl.app.nz"},
-					map[string]interface{}{"@type": "ListItem", "position": 2, "name": "Gallery", "item": "https://cutedsl.app.nz/gallery"},
+					map[string]interface{}{"@type": "ListItem", "position": 1, "name": "Home", "item": "https://cutedsl.cc"},
+					map[string]interface{}{"@type": "ListItem", "position": 2, "name": "Gallery", "item": "https://cutedsl.cc/gallery"},
 					map[string]interface{}{"@type": "ListItem", "position": 3, "name": titlePrompt, "item": canonicalURL},
 				},
 			},
@@ -511,7 +516,7 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 				"description":      metaPrompt,
 				"datePublished":    img.CreatedAt.Format(time.RFC3339),
 				"inLanguage":       "en",
-				"isPartOf":         map[string]interface{}{"@type": "WebSite", "name": "CuteDSL", "url": "https://cutedsl.app.nz"},
+				"isPartOf":         map[string]interface{}{"@type": "WebSite", "name": "CuteDSL", "url": "https://cutedsl.cc"},
 				"primaryImageOfPage": map[string]interface{}{"@id": canonicalURL + "#image"},
 			},
 		},
@@ -581,13 +586,16 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 	}
 	numImgMaps := (count + sitemapPageSize - 1) / sitemapPageSize
 
-	host := "https://cutedsl.app.nz"
+	host := "https://cutedsl.cc"
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	sb.WriteString(`<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` + "\n")
 
 	// Static site pages sitemap
 	sb.WriteString("  <sitemap><loc>" + host + "/sitemap-pages.xml</loc></sitemap>\n")
+
+	// Curated tag sitemap (SEO-rich landing pages per tag)
+	sb.WriteString("  <sitemap><loc>" + host + "/sitemap-tags.xml</loc></sitemap>\n")
 
 	// Paginated image sitemaps
 	for i := 1; i <= numImgMaps; i++ {
@@ -602,9 +610,9 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 
 // handleSitemapPages serves the list of static site pages
 func handleSitemapPages(ctx *fasthttp.RequestCtx) {
-	host := "https://cutedsl.app.nz"
+	host := "https://cutedsl.cc"
 	pages := []string{
-		"/", "/search", "/gallery", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
+		"/", "/search", "/gallery", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
 		"/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
 		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/lora_training",
 	}
@@ -642,7 +650,7 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 	}
 	defer rows.Close()
 
-	host := "https://cutedsl.app.nz"
+	host := "https://cutedsl.cc"
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	sb.WriteString(`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
@@ -659,15 +667,12 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 			imgPath = med
 		}
 		_ = thumb
-		caption := xmlEscape(prompt)
-		if len(caption) > 300 {
-			caption = caption[:297] + "..."
-		}
+		// Truncate BEFORE escaping, on rune boundaries — otherwise we can
+		// split a multi-byte UTF-8 char or an XML entity like &apos; in half,
+		// producing invalid XML that Google refuses to parse.
+		caption := xmlEscape(truncateRunes(prompt, 300))
 		slug := imageSlug(id, prompt)
-		title := xmlEscape(prompt)
-		if len(title) > 100 {
-			title = title[:97] + "..."
-		}
+		title := xmlEscape(truncateRunes(prompt, 100))
 		fmt.Fprintf(&sb,
 			`  <url>
     <loc>%s/image/%s</loc>
@@ -692,16 +697,45 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 	ctx.SetBodyString(sb.String())
 }
 
-// xmlEscape escapes the minimum characters needed for XML text content.
+// xmlEscape escapes the minimum characters needed for XML text content,
+// and strips ASCII control chars (0x00-0x1F except \t \n \r) that are
+// illegal in XML 1.0 and would make the whole document unparseable.
 func xmlEscape(s string) string {
-	replacer := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		"\"", "&quot;",
-		"'", "&apos;",
-	)
-	return replacer.Replace(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			continue
+		}
+		switch r {
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		case '"':
+			b.WriteString("&quot;")
+		case '\'':
+			b.WriteString("&apos;")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// truncateRunes returns s truncated to at most maxRunes runes (plus "..." if
+// truncated). Operates on runes so multi-byte UTF-8 chars aren't split.
+func truncateRunes(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 // handleImageBySlug serves /image/<slug> where slug ends in -{shortID}.

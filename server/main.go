@@ -91,18 +91,27 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Dynamic sitemap served from the DB for SEO crawling
-	if path == "/sitemap.xml" && method == "GET" {
+	// Dynamic sitemap served from the DB for SEO crawling.
+	// Accept GET and HEAD so validators that probe with HEAD still see
+	// the correct Content-Type (Google Search Console flags a fetch
+	// failure otherwise, since HEAD would fall through to the SPA
+	// index.html and return text/html).
+	isSitemapMethod := method == "GET" || method == "HEAD"
+	if path == "/sitemap.xml" && isSitemapMethod {
 		handleSitemapIndex(ctx)
 		return
 	}
-	if path == "/sitemap-pages.xml" && method == "GET" {
+	if path == "/sitemap-pages.xml" && isSitemapMethod {
 		handleSitemapPages(ctx)
 		return
 	}
-	if strings.HasPrefix(path, "/sitemap-images-") && strings.HasSuffix(path, ".xml") && method == "GET" {
+	if strings.HasPrefix(path, "/sitemap-images-") && strings.HasSuffix(path, ".xml") && isSitemapMethod {
 		pageStr := strings.TrimSuffix(strings.TrimPrefix(path, "/sitemap-images-"), ".xml")
 		handleSitemapImages(ctx, pageStr)
+		return
+	}
+	if path == "/sitemap-tags.xml" && isSitemapMethod {
+		handleSitemapTags(ctx)
 		return
 	}
 
@@ -115,6 +124,18 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	// SEO-friendly image pages. /image/<prompt-slug>-<shortID>
 	if strings.HasPrefix(path, "/image/") && method == "GET" {
 		handleImageBySlug(ctx, strings.TrimPrefix(path, "/image/"))
+		return
+	}
+
+	// SEO tag landing pages. /tag/<slug> — server-rendered with semantic-matched images.
+	if strings.HasPrefix(path, "/tag/") && method == "GET" {
+		handleTagPage(ctx, strings.TrimPrefix(path, "/tag/"))
+		return
+	}
+
+	// /tags — category index listing every curated tag (one-page SEO hub).
+	if path == "/tags" && method == "GET" {
+		handleTagsIndex(ctx)
 		return
 	}
 
