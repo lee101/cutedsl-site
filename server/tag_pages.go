@@ -493,7 +493,5 @@ func handleSitemapTags(ctx *fasthttp.RequestCtx) {
 		)
 	}
 	sb.WriteString(`</urlset>` + "\n")
-	ctx.Response.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	ctx.Response.Header.Set("Cache-Control", "public, max-age=3600")
-	ctx.SetBodyString(sb.String())
+	writeSitemap(ctx, sb.String())
 }

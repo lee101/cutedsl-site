@@ -577,6 +577,25 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 
 const sitemapPageSize = 40000 // URLs per sitemap file
 
+// writeSitemap writes an XML sitemap body with the correct Content-Type and
+// transparently gzips the response when the client advertises Accept-Encoding:
+// gzip. Image sitemaps can be 20MB+ uncompressed — without this, Google's
+// crawler often times out fetching them.
+func writeSitemap(ctx *fasthttp.RequestCtx, body string) {
+	ctx.Response.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	ctx.Response.Header.Set("Cache-Control", "public, max-age=3600")
+	ctx.Response.Header.Set("Vary", "Accept-Encoding")
+
+	ae := string(ctx.Request.Header.Peek("Accept-Encoding"))
+	if strings.Contains(ae, "gzip") {
+		gzipped := fasthttp.AppendGzipBytesLevel(nil, []byte(body), fasthttp.CompressDefaultCompression)
+		ctx.Response.Header.Set("Content-Encoding", "gzip")
+		ctx.SetBody(gzipped)
+		return
+	}
+	ctx.SetBodyString(body)
+}
+
 // handleSitemapIndex serves /sitemap.xml as a sitemap-index pointing to
 // the static site pages + one image sitemap per chunk of 40k images.
 func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
@@ -603,9 +622,7 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 	}
 	sb.WriteString(`</sitemapindex>` + "\n")
 
-	ctx.Response.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	ctx.Response.Header.Set("Cache-Control", "public, max-age=3600")
-	ctx.SetBodyString(sb.String())
+	writeSitemap(ctx, sb.String())
 }
 
 // handleSitemapPages serves the list of static site pages
@@ -623,9 +640,7 @@ func handleSitemapPages(ctx *fasthttp.RequestCtx) {
 		fmt.Fprintf(&sb, "  <url><loc>%s%s</loc><changefreq>weekly</changefreq></url>\n", host, p)
 	}
 	sb.WriteString(`</urlset>` + "\n")
-	ctx.Response.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	ctx.Response.Header.Set("Cache-Control", "public, max-age=3600")
-	ctx.SetBodyString(sb.String())
+	writeSitemap(ctx, sb.String())
 }
 
 // handleSitemapImages serves one page (N) of the image sitemap with Image
@@ -692,9 +707,7 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 		ctx.SetStatusCode(404)
 		return
 	}
-	ctx.Response.Header.Set("Content-Type", "application/xml; charset=utf-8")
-	ctx.Response.Header.Set("Cache-Control", "public, max-age=3600")
-	ctx.SetBodyString(sb.String())
+	writeSitemap(ctx, sb.String())
 }
 
 // xmlEscape escapes the minimum characters needed for XML text content,
