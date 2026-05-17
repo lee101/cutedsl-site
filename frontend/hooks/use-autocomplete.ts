@@ -90,14 +90,14 @@ export function useAutocomplete(input: string) {
 
   // Update suggestions when input changes
   useEffect(() => {
-    if (!input || input.length < 1) {
-      setSuggestions([]);
-      setIsOpen(false);
-      return;
-    }
-
     // Small debounce for typing performance
     const timer = setTimeout(() => {
+      if (!input || input.length < 1) {
+        setSuggestions([]);
+        setIsOpen(false);
+        return;
+      }
+
       const results = getSuggestions(input);
       setSuggestions(results);
       setIsOpen(results.length > 0);

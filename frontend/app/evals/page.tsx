@@ -533,7 +533,7 @@ export default function EvalsPage() {
       {/* Footer */}
       <footer className="bg-white/90 border-t border-pink-200 py-8">
         <div className="max-w-7xl mx-auto px-6 flex justify-between items-center">
-          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied Science Company</a></p>
+          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied AI NZ</a></p>
           <div className="flex gap-4 text-sm font-bold">
             <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
             <Link href="/blog" className="text-slate-500 hover:text-purple-500">Blog</Link>

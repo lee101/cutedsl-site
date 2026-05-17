@@ -116,7 +116,7 @@ h1{font-size:2.5rem;font-weight:800;color:#0f172a;margin:0 0 .5rem;background:li
 .card{break-inside:avoid;margin-bottom:.75rem;background:#fff;border:1px solid #fce7f3;border-radius:.875rem;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s}
 .card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(219,39,119,.12);border-color:#f9a8d4}
 .card a{display:block;color:inherit}
-.card img{width:100%;display:block;background:#f1f5f9}
+.card img{width:100%;height:auto;display:block;background:#f1f5f9}
 .card .cap{font-size:.72rem;color:#64748b;padding:.5rem .6rem .6rem;line-height:1.4;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .empty{text-align:center;padding:4rem 1rem;color:#94a3b8}
 .about{max-width:48rem;margin:3rem auto 0;background:rgba(255,255,255,.7);backdrop-filter:blur(8px);border:1px solid #fce7f3;border-radius:1.25rem;padding:1.75rem}

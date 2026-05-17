@@ -151,10 +151,10 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	}
 
 	jsonResponse(ctx, 200, map[string]interface{}{
-		"pricing":          pricing,
-		"cute_price_usd":   cutePrice,
-		"cute_price_ath":   getCUTEPriceATH(),
-		"sol_price_usd":    getSOLPriceUSD(),
+		"pricing":        pricing,
+		"cute_price_usd": cutePrice,
+		"cute_price_ath": getCUTEPriceATH(),
+		"sol_price_usd":  getSOLPriceUSD(),
 	})
 }
 
@@ -167,8 +167,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	if req.Service == "" {
-		jsonError(ctx, 400, "service required (zimage, chronos2, tts, stt, gemma4, caption)")
-		return
+		req.Service = "zimage"
 	}
 
 	// Validate service exists
@@ -216,22 +215,28 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	// Deduct credits
-	newBalance, err := dbConn.DeductUserCredits(user.ID, cuteCost)
-	if err != nil {
-		if strings.Contains(err.Error(), "insufficient") {
-			jsonError(ctx, 402, fmt.Sprintf("insufficient credits: need %.2f $CUTEDSL, have %.2f", cuteCost, user.Credits))
+	newBalance := user.Credits
+	billableCost := cuteCost
+	if user.UnlimitedAPI {
+		billableCost = 0
+	} else {
+		// Deduct credits
+		newBalance, err = dbConn.DeductUserCredits(user.ID, cuteCost)
+		if err != nil {
+			if strings.Contains(err.Error(), "insufficient") {
+				jsonError(ctx, 402, fmt.Sprintf("insufficient credits: need %.2f $CUTEDSL, have %.2f", cuteCost, user.Credits))
+				return
+			}
+			jsonError(ctx, 500, "failed to deduct credits")
 			return
 		}
-		jsonError(ctx, 500, "failed to deduct credits")
-		return
 	}
 
 	// Log billing event (for lora_training we log only in settle to avoid
 	// double-booking — the deduction above is a hold).
 	cutePrice := getCUTEPriceUSD()
 	usdEquiv := cuteCost * cutePrice
-	if req.Service != "lora_training" {
+	if req.Service != "lora_training" && !user.UnlimitedAPI {
 		go dbConn.CreateBillingEvent(&BillingEvent{
 			UserID:       user.ID,
 			EventType:    req.Service,
@@ -244,7 +249,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	log.Printf("Service %s: user=%s cost=%.2f CUTEDSL ($%.4f) balance=%.2f",
-		req.Service, req.WalletAddress, cuteCost, usdEquiv, newBalance)
+		req.Service, user.WalletAddress, billableCost, billableCost*cutePrice, newBalance)
 
 	// Proxy to backend service
 	backendURL, ok := serviceBackends[req.Service]
@@ -257,17 +262,19 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	if err != nil {
 		log.Printf("Backend proxy error for %s: %v", req.Service, err)
 		// Refund on backend failure
-		refundBalance, refundErr := dbConn.AddUserCredits(user.ID, cuteCost)
-		if refundErr == nil {
-			go dbConn.CreateBillingEvent(&BillingEvent{
-				UserID:       user.ID,
-				EventType:    "refund",
-				Amount:       cuteCost,
-				CuteAmount:   cuteCost,
-				USDAmount:    usdEquiv,
-				Description:  fmt.Sprintf("Refund: %s backend error", req.Service),
-				CreditsAfter: refundBalance,
-			})
+		if !user.UnlimitedAPI {
+			refundBalance, refundErr := dbConn.AddUserCredits(user.ID, cuteCost)
+			if refundErr == nil {
+				go dbConn.CreateBillingEvent(&BillingEvent{
+					UserID:       user.ID,
+					EventType:    "refund",
+					Amount:       cuteCost,
+					CuteAmount:   cuteCost,
+					USDAmount:    usdEquiv,
+					Description:  fmt.Sprintf("Refund: %s backend error", req.Service),
+					CreditsAfter: refundBalance,
+				})
+			}
 		}
 		jsonError(ctx, 502, "service temporarily unavailable")
 		return
@@ -276,7 +283,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	// LoRA training is async — deduction above is a HOLD. A background
 	// watcher polls the inference job and either finalizes (keep deducted +
 	// log billing event) or refunds on training failure.
-	if req.Service == "lora_training" {
+	if req.Service == "lora_training" && !user.UnlimitedAPI {
 		var r struct {
 			JobID string `json:"job_id"`
 		}
@@ -287,10 +294,12 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 
 	// Return backend response with billing info
 	jsonResponse(ctx, 200, map[string]interface{}{
-		"result":         json.RawMessage(result),
-		"credits_used":   cuteCost,
-		"credits_remain": newBalance,
-		"usd_equivalent": usdEquiv,
+		"result":          json.RawMessage(result),
+		"credits_used":    billableCost,
+		"credits_remain":  newBalance,
+		"usd_equivalent":  billableCost * cutePrice,
+		"unlimited_api":   user.UnlimitedAPI,
+		"metered_credits": cuteCost,
 	})
 }
 

@@ -10,20 +10,29 @@ interface AuthState {
 }
 
 export function useAuth(): AuthState {
-  const [walletAddress, setWalletAddress] = useState<string | null>(null);
-  const [apiKey, setApiKey] = useState<string | null>(null);
-  const [email, setEmail] = useState<string | null>(null);
+  const [auth, setAuth] = useState<AuthState>({
+    walletAddress: null,
+    apiKey: null,
+    email: null,
+    isLoggedIn: false,
+  });
 
   useEffect(() => {
-    const saved = localStorage.getItem('cutedsl_wallet');
-    if (saved) setWalletAddress(saved);
-    const savedKey = localStorage.getItem('cutedsl_api_key');
-    if (savedKey) setApiKey(savedKey);
-    const savedEmail = localStorage.getItem('cutedsl_email');
-    if (savedEmail) setEmail(savedEmail);
+    const walletAddress = localStorage.getItem('cutedsl_wallet');
+    const apiKey = localStorage.getItem('cutedsl_api_key');
+    const email = localStorage.getItem('cutedsl_email');
+
+    queueMicrotask(() => {
+      setAuth({
+        walletAddress,
+        apiKey,
+        email,
+        isLoggedIn: !!apiKey,
+      });
+    });
   }, []);
 
-  return { walletAddress, apiKey, email, isLoggedIn: !!apiKey };
+  return auth;
 }
 
 export function replaceApiKey(template: string, apiKey: string | null): string {

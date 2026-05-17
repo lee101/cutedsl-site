@@ -5,7 +5,7 @@ CuteDSL Site - AI model acceleration and inference platform powered exclusively 
 
 ### Frontend (Next.js)
 - `frontend/` - Next.js 15 + React 19 + Tailwind CSS 4
-- `/` - Home page: wallet connect, models, pricing, API docs, Applied Science section
+- `/` - Home page: wallet connect, models, pricing, API docs, Applied AI NZ section
 - `/evals` - Benchmarks and acceleration technique breakdowns (CuteChronos2, CuteZImage, Latent Teleportation, TurboQuant, NVFP4, stable-diffusion.cpp)
 - `/blog` - Blog posts about each acceleration effort with deep dives
 - Wallet connect (Phantom or manual address entry)

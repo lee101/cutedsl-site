@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { Wand2, ArrowLeft, ArrowRight, Calendar, Tag } from 'lucide-react';
+import { CodeBlock } from '@/lib/code-block';
 
 const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
 const BAGS_CTA = `
@@ -15,7 +16,7 @@ All CuteDSL services are powered by the **$CUTEDSL** token on Solana. Connect yo
 
 **Need $CUTEDSL tokens?** [Buy $CUTEDSL on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS) — the fastest way to get tokens and start using accelerated AI inference.
 
-[Connect Wallet & Get Started](https://cutedsl.app.nz) · [API Docs](https://cutedsl.app.nz/#api-docs) · [Buy $CUTEDSL](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS)`;
+[Connect Wallet & Get Started](https://cutedsl.cc) · [API Docs](https://cutedsl.cc/#api-docs) · [Buy $CUTEDSL](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS)`;
 
 interface BlogPost {
   slug: string;
@@ -372,7 +373,7 @@ The mint address is \`D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS\` — you can
 The flow is straightforward:
 
 1. **Buy $CUTEDSL** on [bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS) by swapping SOL
-2. **Connect wallet** on cutedsl.app.nz (Phantom or manual address entry)
+2. **Connect wallet** on cutedsl.cc (Phantom or manual address entry)
 3. **Deposit** — we generate a unique HD-derived deposit address per payment. Send $CUTEDSL or SOL to it.
 4. **Credits appear** — our payment poller detects the on-chain transaction within 30 seconds and credits your account
 5. **Use services** — every API call deducts credits at the current token rate
@@ -424,7 +425,7 @@ The $CUTEDSL amount per call floats with the token price. As the token appreciat
 
 Ready to try accelerated AI inference paid with crypto?
 
-[Buy $CUTEDSL on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS) and start making API calls in under a minute. Connect your wallet at [cutedsl.app.nz](https://cutedsl.app.nz), deposit tokens, and call any of our 7+ AI services.`,
+[Buy $CUTEDSL on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS) and start making API calls in under a minute. Connect your wallet at [cutedsl.cc](https://cutedsl.cc), deposit tokens, and call any of our 7+ AI services.`,
   },
   {
     slug: 'generate-ai-images-with-solana',
@@ -453,7 +454,7 @@ If you don't have SOL, you can buy it on any major exchange and send it to your 
 
 ## Step 2: Connect your wallet
 
-Visit [cutedsl.app.nz](https://cutedsl.app.nz) and click **Connect Wallet** in the top right. If you have Phantom installed, it'll connect automatically. Otherwise, you can paste your wallet address manually.
+Visit [cutedsl.cc](https://cutedsl.cc) and click **Connect Wallet** in the top right. If you have Phantom installed, it'll connect automatically. Otherwise, you can paste your wallet address manually.
 
 ## Step 3: Deposit
 
@@ -467,7 +468,7 @@ Call the service endpoint with your wallet address and prompt:
 
 \`\`\`bash
 # Flux Schnell — fast and cheap ($0.04)
-curl -X POST https://cutedsl.app.nz/api/service \\
+curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
   -d '{
     "service": "flux_image",
@@ -476,7 +477,7 @@ curl -X POST https://cutedsl.app.nz/api/service \\
   }'
 
 # Z-Image Turbo — CuteDSL accelerated ($1.00)
-curl -X POST https://cutedsl.app.nz/api/service \\
+curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
   -d '{
     "service": "zimage",
@@ -518,7 +519,7 @@ Read more about this in our [LoRA hosting deep dive](/blog#team-of-loras-hosting
 ## Get started
 
 1. [Buy $CUTEDSL on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS)
-2. Connect wallet at [cutedsl.app.nz](https://cutedsl.app.nz)
+2. Connect wallet at [cutedsl.cc](https://cutedsl.cc)
 3. Deposit and start generating
 
 No signup. No API key. No waiting. Just wallet, tokens, images.`,
@@ -530,7 +531,7 @@ No signup. No API key. No waiting. Just wallet, tokens, images.`,
     tags: ['gallery', 'search', 'images', 'nsfw', 'infrastructure'],
     image: `${IMG_BASE}/blog-image-gallery.webp`,
     excerpt: 'How we built CuteDSL\'s searchable AI image gallery — 100k+ Z-Image generations with keyword search, embedding-based semantic search, three image sizes, and on-demand NSFW classification.',
-    content: `CuteDSL now hosts a searchable gallery of 100k+ AI-generated images at [cutedsl.app.nz/search](/search). Every image was generated through our Z-Image Turbo engine, and every one is searchable by prompt text, semantic similarity, or both. Here's how we built it.
+    content: `CuteDSL now hosts a searchable gallery of 100k+ AI-generated images at [cutedsl.cc/search](/search). Every image was generated through our Z-Image Turbo engine, and every one is searchable by prompt text, semantic similarity, or both. Here's how we built it.
 
 ## The generation pipeline
 
@@ -601,7 +602,7 @@ We're working on:
 - **Latent space visualization** — t-SNE/UMAP projections of the latent tensor library
 - **Community uploads** — let users contribute their own Z-Image generations to the gallery
 
-The gallery is live at [cutedsl.app.nz/search](/search). Browse, search, and get inspired. And if you want to generate your own images for as little as $0.04, [grab some $CUTEDSL tokens on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS) and start creating.`,
+The gallery is live at [cutedsl.cc/search](/search). Browse, search, and get inspired. And if you want to generate your own images for as little as $0.04, [grab some $CUTEDSL tokens on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS) and start creating.`,
   },
   {
     slug: 'generative-agents-cloud-infrastructure',
@@ -1548,7 +1549,7 @@ The transformer savings come from fused SiLU-gate FFN (eliminates 10240-wide int
 
 ## Sample outputs
 
-Visit the [CuteDSL Image Gallery](https://cutedsl.app.nz) to see thousands of Z-Image Turbo outputs generated through the API. Every image in the gallery was generated using the CuteZImage pipeline with the exact acceleration techniques described in this ablation.`,
+Visit the [CuteDSL Image Gallery](https://cutedsl.cc) to see thousands of Z-Image Turbo outputs generated through the API. Every image in the gallery was generated using the CuteZImage pipeline with the exact acceleration techniques described in this ablation.`,
   },
   {
     slug: 'fused-qkv-zimageaccelerated',
@@ -1614,7 +1615,7 @@ The implementation gracefully falls back to separate projections when n_heads !=
 
 ## Try it
 
-Generate images via the CuteDSL API at [$1.00 per generation](https://cutedsl.app.nz/#api-docs). All generations use the full acceleration stack including fused QKV.`,
+Generate images via the CuteDSL API at [$1.00 per generation](https://cutedsl.cc/#api-docs). All generations use the full acceleration stack including fused QKV.`,
   },
   {
     slug: 'latent-teleportation-visual-results',
@@ -1674,7 +1675,7 @@ We're also experimenting with confidence gating: a small network that predicts w
 
 ## The gallery
 
-Browse real outputs from the CuteZImage pipeline (including Latent Teleportation experiments) in the [CuteDSL Gallery](https://cutedsl.app.nz). We're continuously generating and publishing images as we test new acceleration techniques.`,
+Browse real outputs from the CuteZImage pipeline (including Latent Teleportation experiments) in the [CuteDSL Gallery](https://cutedsl.cc). We're continuously generating and publishing images as we test new acceleration techniques.`,
   },
   {
     slug: 'cuteparakeet-asr-acceleration',
@@ -1775,7 +1776,7 @@ You can also trade $CUTEDSL on any Solana DEX (Jupiter, Raydium) using the token
 
 Once you have $CUTEDSL in your wallet:
 
-1. **Connect your wallet** at [cutedsl.app.nz](https://cutedsl.app.nz) (Phantom auto-detected, or enter address manually)
+1. **Connect your wallet** at [cutedsl.cc](https://cutedsl.cc) (Phantom auto-detected, or enter address manually)
 2. **Enter deposit amount** in USD equivalent
 3. **Send $CUTEDSL** to the generated deposit address (one-time address per deposit)
 4. **Credits added automatically** — we poll the blockchain every 10 seconds
@@ -1805,7 +1806,7 @@ CuteDSL uses a dual pricing system:
 Every account gets an API key on wallet connect. Use it with Bearer auth:
 
 \`\`\`
-curl -X POST https://cutedsl.app.nz/api/service \\
+curl -X POST https://cutedsl.cc/api/service \\
   -H "Authorization: Bearer cutedsl_your_api_key" \\
   -H "Content-Type: application/json" \\
   -d '{"service": "zimage", "prompt": "a cute robot"}'
@@ -1828,7 +1829,7 @@ This is intentional — we believe users should have full control over their spe
 ## Get started
 
 1. [Buy $CUTEDSL on bags.fm](https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS)
-2. [Connect your wallet](https://cutedsl.app.nz)
+2. [Connect your wallet](https://cutedsl.cc)
 3. Deposit credits
 4. Start making API calls
 
@@ -1867,7 +1868,7 @@ The simplest API call — forecast close prices 7 days out:
 
 \`\`\`python
 API_KEY = "cutedsl_your_key_here"
-BASE = "https://cutedsl.app.nz/api"
+BASE = "https://cutedsl.cc/api"
 
 resp = requests.post(f"{BASE}/service", json={
     "service": "chronos2",
@@ -2144,8 +2145,10 @@ export default function BlogPage() {
                     return <p key={i} className="font-bold text-slate-700 my-4">{paragraph.replace(/\*\*/g, '')}</p>;
                   }
                   if (paragraph.startsWith('```')) {
-                    const code = paragraph.replace(/```\w*\n?/, '').replace(/```$/, '');
-                    return <pre key={i} className="bg-slate-900 text-slate-100 p-4 rounded-lg overflow-x-auto text-sm my-4"><code>{code}</code></pre>;
+                    const fenceMatch = paragraph.match(/^```(\w+)?\n?([\s\S]*?)```$/);
+                    const language = fenceMatch?.[1] || 'plaintext';
+                    const code = fenceMatch?.[2] || paragraph.replace(/```\w*\n?/, '').replace(/```$/, '');
+                    return <CodeBlock key={i} language={language} code={code} className="my-4 rounded-lg p-4" />;
                   }
                   if (paragraph.startsWith('- ')) {
                     return (
@@ -2199,7 +2202,7 @@ export default function BlogPage() {
       {/* Footer */}
       <footer className="bg-white/90 border-t border-pink-200 py-8">
         <div className="max-w-7xl mx-auto px-6 flex justify-between items-center">
-          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied Science Company</a></p>
+          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied AI NZ</a></p>
           <div className="flex gap-4 text-sm font-bold">
             <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
             <Link href="/evals" className="text-slate-500 hover:text-cyan-500">Evals</Link>

@@ -10,6 +10,6 @@ export default function robots(): MetadataRoute.Robots {
         allow: '/',
       },
     ],
-    sitemap: 'https://cutedsl.app.nz/sitemap.xml',
+    sitemap: 'https://cutedsl.cc/sitemap.xml',
   };
 }

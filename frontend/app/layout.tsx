@@ -1,6 +1,8 @@
 import type {Metadata} from 'next';
 import { Fredoka, Nunito } from 'next/font/google';
+import 'highlight.js/styles/github-dark.css';
 import './globals.css';
+import { FrontendErrorReporter } from './frontend-error-reporter';
 
 const fredoka = Fredoka({
   subsets: ['latin'],
@@ -16,7 +18,7 @@ const nunito = Nunito({
   display: 'swap',
 });
 
-const siteUrl = 'https://cutedsl.app.nz';
+const siteUrl = 'https://cutedsl.cc';
 const imgBase = 'https://appstatic.app.nz/cutedsl/images';
 
 export const metadata: Metadata = {
@@ -42,8 +44,8 @@ export const metadata: Metadata = {
     'Z-Image',
     'Chronos-2',
   ],
-  authors: [{ name: 'Applied Science Company', url: 'https://app.nz' }],
-  creator: 'Applied Science Company',
+  authors: [{ name: 'Applied AI NZ', url: 'https://app.nz' }],
+  creator: 'Applied AI NZ',
   icons: {
     icon: [
       { url: `${imgBase}/favicon.ico`, sizes: '32x32', type: 'image/x-icon' },
@@ -99,9 +101,10 @@ const jsonLd = {
   description:
     'AI model acceleration and inference platform using custom Triton kernels and fused pipelines. Powered by $CUTEDSL on Solana.',
   url: siteUrl,
+  codeRepository: 'https://github.com/lee101/cutedsl',
   creator: {
     '@type': 'Organization',
-    name: 'Applied Science Company',
+    name: 'Applied AI NZ',
     url: 'https://app.nz',
   },
   offers: {
@@ -109,6 +112,7 @@ const jsonLd = {
     priceCurrency: 'USD',
     description: 'Pay-per-use AI inference with $CUTEDSL tokens',
   },
+  sameAs: ['https://github.com/lee101/cutedsl'],
 };
 
 export default function RootLayout({children}: {children: React.ReactNode}) {
@@ -123,6 +127,7 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
         />
       </head>
       <body className="font-nunito antialiased bg-pink-50 text-slate-800 selection:bg-pink-300 selection:text-pink-900" suppressHydrationWarning>
+        <FrontendErrorReporter />
         {children}
       </body>
     </html>

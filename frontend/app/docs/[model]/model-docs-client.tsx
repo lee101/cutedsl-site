@@ -6,6 +6,7 @@ import Image from 'next/image';
 import { ArrowLeft, Copy, Check, Play, Loader2, Download, ChevronRight, Lock } from 'lucide-react';
 import { useAuth, replaceApiKey } from '@/hooks/use-auth';
 import { MODEL_MAP, CATEGORY_LABELS, CATEGORY_COLORS, type ModelConfig, type ModelParam } from '@/lib/models';
+import { CodeBlock } from '@/lib/code-block';
 
 const API_BASE = '/api';
 const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
@@ -60,7 +61,18 @@ function ParamInput({ param, value, onChange }: { param: ModelParam; value: stri
   );
 }
 
-function ResponseRenderer({ config, result }: { config: ModelConfig; result: Record<string, unknown> }) {
+function ResponseRenderer({ config, result }: { config: ModelConfig; result: unknown }) {
+  const responseObject =
+    result && typeof result === 'object' && !Array.isArray(result)
+      ? (result as Record<string, unknown>)
+      : null;
+
+  const jsonFallback = (
+    <CodeBlock language="json" code={JSON.stringify(result, null, 2)} className="shadow-none" />
+  );
+
+  if (!responseObject) return jsonFallback;
+
   // Helper: extract first image URL from many possible shapes
   const findImageSrc = (r: Record<string, unknown>): string | undefined => {
     if (typeof r.image_base64 === 'string') return `data:image/webp;base64,${r.image_base64}`;
@@ -85,8 +97,8 @@ function ResponseRenderer({ config, result }: { config: ModelConfig; result: Rec
   };
 
   if (config.responseType === 'image') {
-    const src = findImageSrc(result);
-    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
+    const src = findImageSrc(responseObject);
+    if (!src) return jsonFallback;
     return (
       <div className="space-y-3">
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -99,8 +111,8 @@ function ResponseRenderer({ config, result }: { config: ModelConfig; result: Rec
   }
 
   if (config.responseType === 'audio') {
-    const src = findAudioSrc(result);
-    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
+    const src = findAudioSrc(responseObject);
+    if (!src) return jsonFallback;
     return (
       <div className="space-y-3">
         <audio controls src={src} className="w-full" />
@@ -112,8 +124,8 @@ function ResponseRenderer({ config, result }: { config: ModelConfig; result: Rec
   }
 
   if (config.responseType === 'video') {
-    const src = findVideoSrc(result);
-    if (!src) return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
+    const src = findVideoSrc(responseObject);
+    if (!src) return jsonFallback;
     return (
       <div className="space-y-3">
         <video controls src={src} className="rounded-xl max-w-full shadow-lg" />
@@ -124,7 +136,7 @@ function ResponseRenderer({ config, result }: { config: ModelConfig; result: Rec
     );
   }
 
-  return <pre className="text-sm text-slate-300 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(result, null, 2)}</pre>;
+  return jsonFallback;
 }
 
 export default function ModelDocsClient({ slug }: { slug: string }) {
@@ -298,9 +310,7 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
               {copiedCurl ? <><Check size={14} className="text-green-500" /> Copied</> : <><Copy size={14} /> Copy</>}
             </button>
           </div>
-          <pre className="bg-slate-900 text-slate-100 rounded-2xl p-6 text-sm overflow-x-auto leading-relaxed shadow-sm">
-            {replaceApiKey(config.curlExample, apiKey)}
-          </pre>
+          <CodeBlock language="bash" code={replaceApiKey(config.curlExample, apiKey)} className="rounded-2xl p-6" />
           {isLoggedIn && (
             <p className="text-xs text-green-600 mt-2 flex items-center gap-1">
               <Check size={12} /> Using your real API key
@@ -311,9 +321,7 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
         {/* Example Response */}
         <section className="mb-12">
           <h2 className="text-xl font-bold text-slate-800 mb-4">Example Response</h2>
-          <pre className="bg-slate-900 text-slate-100 rounded-2xl p-6 text-sm overflow-x-auto leading-relaxed shadow-sm">
-            {JSON.stringify(config.responseExample, null, 2)}
-          </pre>
+          <CodeBlock language="json" code={JSON.stringify(config.responseExample, null, 2)} className="rounded-2xl p-6" />
         </section>
 
         {/* Playground */}
@@ -373,7 +381,7 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
 
                   {/* Render service result */}
                   <div className="bg-slate-900 rounded-xl p-5 mb-4">
-                    <ResponseRenderer config={config} result={response.result as Record<string, unknown>} />
+                    <ResponseRenderer config={config} result={response.result ?? response} />
                   </div>
 
                   {/* Credits info */}

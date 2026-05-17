@@ -3,12 +3,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { ArrowLeft, Loader2, ImageIcon, X, ExternalLink, Copy, Check } from 'lucide-react';
+import {
+  ArrowLeft, Loader2, ImageIcon, X, ExternalLink, Copy, Check,
+  Sparkles, Star, Heart, Search as SearchIcon,
+} from 'lucide-react';
+import { linkifyPrompt } from '@/lib/prompt-linkify';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
 const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
-const PER_PAGE = 60;
+const PER_PAGE = 96;
 
 interface GeneratedImage {
   id: string;
@@ -24,6 +28,23 @@ interface GeneratedImage {
   steps: number;
   created_at: string;
 }
+
+// Curated themes — link to /tag/<slug> SSR landing pages for SEO.
+// Keep slugs aligned with server/curated_tags.go so pills route to rich pages.
+const THEMES: { label: string; slug: string; emoji: string; color: string }[] = [
+  { label: 'Fairies',      slug: 'fairy',      emoji: '🧚',   color: 'from-pink-300 to-purple-300' },
+  { label: 'Dragons',      slug: 'dragon',     emoji: '🐉',   color: 'from-red-300 to-orange-300' },
+  { label: 'Anime',        slug: 'anime',      emoji: '🎀',   color: 'from-pink-300 to-rose-300' },
+  { label: 'Unicorns',     slug: 'unicorn',    emoji: '🦄',   color: 'from-fuchsia-300 to-pink-300' },
+  { label: 'Landscapes',   slug: 'landscape',  emoji: '🌄',   color: 'from-cyan-300 to-blue-300' },
+  { label: 'Galaxy',       slug: 'galaxy',     emoji: '🌌',   color: 'from-indigo-400 to-purple-500' },
+  { label: 'Cyberpunk',    slug: 'cyberpunk',  emoji: '🌃',   color: 'from-fuchsia-400 to-cyan-400' },
+  { label: 'Mermaids',     slug: 'mermaid',    emoji: '🧜‍♀️',  color: 'from-teal-300 to-cyan-400' },
+  { label: 'Castles',      slug: 'castle',     emoji: '🏰',   color: 'from-stone-300 to-amber-300' },
+  { label: 'Cherry Blossom', slug: 'cherry-blossom', emoji: '🌸', color: 'from-pink-200 to-rose-300' },
+  { label: 'Witches',      slug: 'witch',      emoji: '🧙‍♀️',  color: 'from-purple-500 to-indigo-500' },
+  { label: 'Robots',       slug: 'robot',      emoji: '🤖',   color: 'from-slate-300 to-cyan-300' },
+];
 
 function slugify(s: string): string {
   return s
@@ -79,6 +100,16 @@ export default function GalleryPage() {
     fetchImages(1);
   }, [fetchImages]);
 
+  // Close lightbox with Escape
+  useEffect(() => {
+    if (!selectedImage) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedImage(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedImage]);
+
   // Infinite scroll
   useEffect(() => {
     if (!loaderRef.current) return;
@@ -88,7 +119,7 @@ export default function GalleryPage() {
           fetchImages(page + 1, true);
         }
       },
-      { threshold: 0.1 }
+      { threshold: 0.1, rootMargin: '400px' }
     );
     observer.observe(loaderRef.current);
     return () => observer.disconnect();
@@ -101,81 +132,143 @@ export default function GalleryPage() {
   };
 
   return (
-    <div className="min-h-screen bg-pink-50">
+    <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-cyan-50 relative">
+      {/* Floating sparkles (decorative, aria-hidden) */}
+      <div aria-hidden className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-16 left-8 text-pink-300 animate-sparkle" style={{ animationDelay: '0s' }}><Sparkles size={22} /></div>
+        <div className="absolute top-48 right-12 text-purple-300 animate-sparkle" style={{ animationDelay: '1s' }}><Star size={26} /></div>
+        <div className="absolute top-1/3 left-1/4 text-cyan-300 animate-sparkle" style={{ animationDelay: '2s' }}><Sparkles size={18} /></div>
+        <div className="absolute bottom-32 right-1/4 text-pink-300 animate-sparkle" style={{ animationDelay: '0.5s' }}><Heart size={20} /></div>
+        <div className="absolute bottom-48 left-12 text-yellow-300 animate-sparkle" style={{ animationDelay: '1.5s' }}><Star size={24} /></div>
+      </div>
+
       {/* Nav */}
-      <nav className="w-full px-6 py-5 flex justify-between items-center max-w-screen-2xl mx-auto">
+      <nav aria-label="Main navigation" className="w-full px-6 py-5 flex justify-between items-center max-w-screen-2xl mx-auto relative z-10">
         <Link href="/" className="flex items-center gap-2">
-          <Image src={LOGO_IMG} alt="CuteDSL" width={40} height={40} className="rounded-lg" />
+          <Image src={LOGO_IMG} alt="CuteDSL home" width={40} height={40} className="rounded-lg" priority />
           <span className="font-fredoka text-3xl font-bold text-pink-600">CuteDSL</span>
         </Link>
-        <div className="flex gap-6 font-bold text-slate-700">
+        <div className="hidden sm:flex gap-5 font-bold text-slate-700">
           <Link href="/" className="hover:text-pink-500 transition-colors flex items-center gap-1">
             <ArrowLeft size={16} /> Home
           </Link>
           <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
           <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
           <Link href="/blog" className="hover:text-purple-500 transition-colors">Blog</Link>
+          <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
         </div>
       </nav>
 
-      <main className="max-w-screen-2xl mx-auto px-4 pb-24">
-        {/* Hero */}
-        <div className="text-center py-10">
-          <h1 className="font-fredoka text-5xl lg:text-7xl font-bold text-slate-800 mb-3">
-            AI Art Gallery
-          </h1>
-          <p className="text-lg text-slate-500 max-w-xl mx-auto">
-            {imageCount > 0 ? imageCount.toLocaleString() : '...'} images generated with{' '}
-            <span className="text-pink-500 font-semibold">CuteDSL Z-Image Turbo</span>
-          </p>
-        </div>
+      {/* Breadcrumb (SEO-friendly) */}
+      <nav aria-label="Breadcrumb" className="max-w-screen-2xl mx-auto px-6 pt-2 pb-1 text-sm text-slate-500 relative z-10">
+        <ol className="flex items-center gap-2">
+          <li><Link href="/" className="hover:text-pink-500">Home</Link></li>
+          <li aria-hidden>›</li>
+          <li className="text-slate-700 font-semibold">Gallery</li>
+        </ol>
+      </nav>
 
-        {/* Pinterest masonry grid */}
+      <main className="w-full max-w-none mx-auto px-2 sm:px-3 lg:px-4 pb-16 relative z-10">
+        {/* Hero */}
+        <section className="text-center py-5 sm:py-6">
+          <h1 className="font-fredoka text-4xl sm:text-5xl lg:text-6xl font-bold text-slate-800 mb-2">
+            AI Art <span className="text-gradient-cute">Gallery</span>
+          </h1>
+          <p className="text-base sm:text-lg text-slate-600 max-w-3xl mx-auto font-medium">
+            {imageCount > 0 ? imageCount.toLocaleString() : '100,000+'} AI-generated images —
+            fairies, fantasy, anime, landscapes &amp; more.
+            Powered by <span className="text-pink-500 font-semibold">CuteDSL Z-Image Turbo</span>.
+          </p>
+          <div className="mt-3 flex flex-wrap justify-center gap-2">
+            <Link
+              href="/search"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-pink-400 to-purple-400 text-white rounded-full font-bold shadow-md hover:shadow-pink-300/50 hover:scale-105 transition-all"
+            >
+              <SearchIcon size={16} /> Search prompts
+            </Link>
+            <Link
+              href="/#models"
+              className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 rounded-full font-bold shadow-md border border-pink-100 hover:scale-105 transition-all"
+            >
+              <Sparkles size={16} className="text-pink-500" /> Generate your own
+            </Link>
+          </div>
+        </section>
+
+        {/* Theme pills — crawlable static links to /search */}
+        <section aria-labelledby="themes-heading" className="mb-4 sm:mb-5 px-1">
+          <h2 id="themes-heading" className="sr-only">Popular themes</h2>
+          <div className="flex flex-wrap justify-center gap-1.5">
+            {THEMES.map(t => (
+              <Link
+                key={t.slug}
+                href={`/tag/${t.slug}`}
+                prefetch={false}
+                rel="tag"
+                className={`px-3 py-1 rounded-full text-white text-xs sm:text-sm font-bold bg-gradient-to-r ${t.color} hover:scale-105 hover:shadow-md transition-all`}
+                title={`${t.label} AI art gallery`}
+              >
+                <span className="mr-1" aria-hidden>{t.emoji}</span>{t.label}
+              </Link>
+            ))}
+            <Link
+              href="/tags"
+              prefetch={false}
+              className="px-3 py-1 rounded-full text-xs sm:text-sm font-bold bg-white text-slate-700 border border-pink-200 hover:bg-pink-50 hover:scale-105 transition-all"
+            >
+              More tags →
+            </Link>
+          </div>
+        </section>
+
+        {/* Image grid */}
         {initialLoad ? (
-          <div className="flex items-center justify-center py-32">
+          <div className="flex items-center justify-center py-24">
             <Loader2 className="animate-spin text-pink-400" size={48} />
           </div>
         ) : images.length === 0 ? (
-          <div className="text-center py-32">
+          <div className="text-center py-24">
             <ImageIcon className="mx-auto mb-4 text-slate-300" size={64} />
             <p className="text-xl text-slate-500 font-medium">No images yet.</p>
           </div>
         ) : (
           <>
-            {/* CSS columns masonry */}
-            <div
-              style={{
-                columns: 'var(--gallery-cols, 2)',
-                columnGap: '0.75rem',
-              }}
-              className="[--gallery-cols:2] sm:[--gallery-cols:3] md:[--gallery-cols:4] lg:[--gallery-cols:5] xl:[--gallery-cols:6] 2xl:[--gallery-cols:7]"
-            >
-              {images.map(img => (
-                <div
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(128px,1fr))] sm:grid-cols-[repeat(auto-fill,minmax(148px,1fr))] lg:grid-cols-[repeat(auto-fill,minmax(168px,1fr))] 2xl:grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-1.5 sm:gap-2 items-start">
+              {images.map((img, idx) => (
+                <a
                   key={img.id}
-                  className="break-inside-avoid mb-3 group relative rounded-xl overflow-hidden bg-white border border-slate-100 shadow-sm hover:shadow-xl hover:border-pink-200 transition-all duration-200 cursor-pointer"
-                  onClick={() => setSelectedImage(img)}
+                  href={`/image/${imageSlug(img.id, img.prompt)}`}
+                  onClick={e => {
+                    // Open lightbox for normal clicks; allow new-tab via modifiers.
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                    e.preventDefault();
+                    setSelectedImage(img);
+                  }}
+                  className="group relative rounded-md overflow-hidden bg-white border border-pink-100 shadow-sm hover:shadow-xl hover:border-pink-300 hover:-translate-y-0.5 transition-all duration-200 cursor-pointer block"
+                  title={img.prompt}
                 >
                   <img
-                    src={`${IMG_BASE}/${img.med_path || img.thumb_path || img.file_path}`}
+                    src={`${IMG_BASE}/${img.thumb_path || img.med_path || img.file_path}`}
                     alt={img.prompt}
-                    loading="lazy"
-                    className="w-full block"
+                    loading={idx < 12 ? 'eager' : 'lazy'}
+                    decoding="async"
+                    fetchPriority={idx < 6 ? 'high' : 'auto'}
+                    width={img.width}
+                    height={img.height}
+                    className="w-full h-auto block"
                     style={{ aspectRatio: `${img.width} / ${img.height}` }}
                   />
-                  {/* Hover overlay */}
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col justify-end p-3">
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex flex-col justify-end p-2">
                     <p className="text-white text-xs leading-snug line-clamp-3 font-medium">
                       {img.prompt}
                     </p>
                   </div>
-                </div>
+                </a>
               ))}
             </div>
 
-            {/* Infinite scroll trigger */}
             {images.length < total && (
-              <div ref={loaderRef} className="flex justify-center py-16">
+              <div ref={loaderRef} className="flex justify-center py-10">
                 {loading ? (
                   <Loader2 className="animate-spin text-pink-400" size={32} />
                 ) : (
@@ -189,37 +282,65 @@ export default function GalleryPage() {
             </p>
           </>
         )}
+
+        {/* Crawlable intro / about section — gives SEO text content for the page shell */}
+        <section aria-labelledby="about-gallery" className="max-w-3xl mx-auto mt-12 bg-white/70 backdrop-blur-sm rounded-3xl p-8 border border-pink-100 shadow-sm">
+          <h2 id="about-gallery" className="font-fredoka text-3xl font-bold text-slate-800 mb-4 flex items-center gap-2">
+            <Sparkles className="text-pink-500" size={24} /> About the Gallery
+          </h2>
+          <p className="text-slate-600 leading-relaxed mb-4">
+            Every image here was generated with <strong>CuteDSL Z-Image Turbo</strong> — a fused-kernel
+            acceleration of the Z-Image diffusion transformer that runs <strong>2× faster</strong> on
+            RTX 5090 via custom Triton kernels and NVFP4 quantization. Prompts come from the
+            community-curated <em>daspartho/stable-diffusion-prompts</em> dataset, covering
+            fairies, dragons, anime, landscapes, cyberpunk, kawaii animals, space, and more.
+          </p>
+          <p className="text-slate-600 leading-relaxed mb-4">
+            Click any image to see its <strong>prompt, seed, model, and related art</strong>.
+            Every image has its own SEO-friendly page under <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">/image/...</code>,
+            and the full catalog is indexed in the <Link href="/sitemap.xml" className="text-pink-500 hover:text-pink-600 underline">image sitemap</Link>.
+          </p>
+          <p className="text-slate-600 leading-relaxed">
+            Want to generate your own? <Link href="/#api" className="text-pink-500 hover:text-pink-600 font-semibold">Grab an API key</Link>,
+            deposit some $CUTEDSL, and call <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">POST /api/service</code> with <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">service: &quot;zimage&quot;</code>.
+          </p>
+        </section>
       </main>
 
       {/* Lightbox */}
       {selectedImage && (
         <div
-          className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image detail"
+          className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-2 sm:p-4 backdrop-blur-sm"
           onClick={() => setSelectedImage(null)}
         >
           <div
-            className="bg-white rounded-2xl max-w-2xl w-full max-h-[92vh] overflow-y-auto shadow-2xl"
+            className="bg-white rounded-2xl w-full max-w-[min(96vw,1100px)] max-h-[94vh] overflow-y-auto shadow-2xl"
             onClick={e => e.stopPropagation()}
           >
-            {/* Image */}
             <div className="relative">
               <img
                 src={`${IMG_BASE}/${selectedImage.med_path || selectedImage.file_path}`}
                 alt={selectedImage.prompt}
-                className="w-full rounded-t-2xl block"
+                width={selectedImage.width}
+                height={selectedImage.height}
+                className="w-full max-h-[76vh] rounded-t-2xl block object-contain bg-black"
+                style={{ aspectRatio: `${selectedImage.width} / ${selectedImage.height}` }}
               />
               <button
                 onClick={() => setSelectedImage(null)}
+                aria-label="Close"
                 className="absolute top-3 right-3 p-2 bg-black/50 hover:bg-black/70 rounded-full text-white transition-colors"
               >
                 <X size={18} />
               </button>
             </div>
 
-            {/* Info */}
             <div className="p-5">
               <p className="text-slate-800 text-base leading-relaxed mb-4 font-medium">
-                {selectedImage.prompt}
+                {linkifyPrompt(selectedImage.prompt)}
               </p>
               <div className="flex flex-wrap gap-2 text-xs text-slate-400 mb-5">
                 <span className="bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg">
@@ -268,18 +389,20 @@ export default function GalleryPage() {
       )}
 
       {/* Footer */}
-      <footer className="bg-white/90 border-t border-pink-200 py-8">
-        <div className="max-w-screen-2xl mx-auto px-6 flex justify-between items-center">
+      <footer className="bg-white/90 border-t border-pink-200 py-8 relative z-10">
+        <div className="max-w-screen-2xl mx-auto px-6 flex flex-col sm:flex-row justify-between items-center gap-3">
           <p className="text-slate-400 text-sm">
             &copy; 2026{' '}
             <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">
-              Applied Science Company
+              Applied AI NZ
             </a>
           </p>
-          <div className="flex gap-4 text-sm font-bold">
+          <div className="flex flex-wrap gap-4 text-sm font-bold justify-center">
             <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
             <Link href="/search" className="text-slate-500 hover:text-pink-500">Search</Link>
             <Link href="/evals" className="text-slate-500 hover:text-cyan-500">Evals</Link>
+            <Link href="/blog" className="text-slate-500 hover:text-purple-500">Blog</Link>
+            <Link href="/docs" className="text-slate-500 hover:text-blue-500">API Docs</Link>
           </div>
         </div>
       </footer>

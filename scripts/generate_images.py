@@ -41,6 +41,11 @@ import psycopg2
 import requests
 from PIL import Image
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "inference"))
+
+from image_quality import bumpy_metrics, compact_prompt, detect_too_bumpy, retry_prompt
+
 # Config
 IMAGES_DIR = Path("/sdb-disk/cutedsl-images")
 PROMPTS_FILE = IMAGES_DIR / "prompts.jsonl"
@@ -96,6 +101,16 @@ def get_db():
             );
             CREATE INDEX IF NOT EXISTS idx_images_created ON generated_images(created_at DESC);
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS generated_image_rejections (
+                prompt_hash TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_image_rejections_updated
+                ON generated_image_rejections(updated_at DESC);
+        """)
     conn.autocommit = False
     return conn
 
@@ -122,7 +137,7 @@ def load_all_prompts() -> list[str]:
 
 
 def get_existing_hashes(conn) -> set:
-    """Get prompt hashes already in DB."""
+    """Get prompt hashes already generated or rejected."""
     with conn.cursor() as cur:
         cur.execute("SELECT file_path FROM generated_images")
         paths = {row[0] for row in cur.fetchall()}
@@ -131,23 +146,45 @@ def get_existing_hashes(conn) -> set:
         fname = p.split("/")[-1] if "/" in p else p
         if "_" in fname:
             hashes.add(fname.split("_")[0])
+    with conn.cursor() as cur:
+        cur.execute("SELECT prompt_hash FROM generated_image_rejections")
+        hashes.update(row[0] for row in cur.fetchall())
     return hashes
 
 
-def generate_image_local(prompt: str, width: int, height: int, steps: int) -> dict | None:
+def record_rejection(conn, prompt: str, reason: str):
+    """Record a prompt that should be skipped on future resumptions."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO generated_image_rejections (prompt_hash, prompt, reason, updated_at)
+               VALUES (%s, %s, %s, NOW())
+               ON CONFLICT (prompt_hash)
+               DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW()""",
+            (prompt_hash(prompt), prompt, reason),
+        )
+    conn.commit()
+
+
+def seed_for_prompt(prompt: str, attempt: int = 0) -> int:
+    return (int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16) + attempt) % (2**31)
+
+
+def generate_image_local(prompt: str, width: int, height: int, steps: int, seed: int) -> dict | None:
     """Call local Z-Image API."""
     try:
         resp = requests.post(
             f"{INFERENCE_URL}/generate_image",
             json={
-                "prompt": prompt,
+                "prompt": compact_prompt(prompt),
                 "width": width,
                 "height": height,
+                "seed": seed,
                 "num_inference_steps": steps,
                 "guidance_scale": 0.0,
                 "auto_lora": False,
+                "low_priority": True,
             },
-            timeout=180,
+            timeout=360,
         )
         if resp.status_code == 200:
             return resp.json()
@@ -161,7 +198,7 @@ def generate_image_local(prompt: str, width: int, height: int, steps: int) -> di
         return None
 
 
-def generate_image_fal(prompt: str, width: int, height: int, steps: int) -> dict | None:
+def generate_image_fal(prompt: str, width: int, height: int, steps: int, seed: int) -> dict | None:
     """Call fal.ai Flux Schnell API. Returns dict compatible with local API response."""
     try:
         resp = requests.post(
@@ -171,10 +208,11 @@ def generate_image_fal(prompt: str, width: int, height: int, steps: int) -> dict
                 "Content-Type": "application/json",
             },
             json={
-                "prompt": prompt,
+                "prompt": compact_prompt(prompt),
                 "image_size": {"width": width, "height": height},
                 "num_inference_steps": min(steps, 4),  # Schnell is fast, 4 steps max
                 "num_images": 1,
+                "seed": seed,
                 "enable_safety_checker": False,
             },
             timeout=60,
@@ -206,11 +244,62 @@ def generate_image_fal(prompt: str, width: int, height: int, steps: int) -> dict
         return None
 
 
-def generate_image(prompt: str, width: int, height: int, steps: int) -> dict | None:
+def generate_image(prompt: str, width: int, height: int, steps: int, seed: int) -> dict | None:
     """Generate image using configured backend."""
     if BACKEND == "fal":
-        return generate_image_fal(prompt, width, height, steps)
-    return generate_image_local(prompt, width, height, steps)
+        return generate_image_fal(prompt, width, height, steps, seed)
+    return generate_image_local(prompt, width, height, steps, seed)
+
+
+def decode_result_image(api_result: dict) -> Image.Image | None:
+    """Decode an API image response into a PIL image."""
+    img_b64 = api_result.get("image_base64")
+    if not img_b64:
+        return None
+    try:
+        img_bytes = base64.b64decode(img_b64)
+        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        print(f"  Decode failed: {e}")
+        return None
+
+
+def generate_image_with_quality_retry(prompt: str, width: int, height: int, steps: int) -> tuple[dict | None, str | None]:
+    """Generate an image, retrying once if the result is bumpy."""
+    saw_bumpy = False
+    for attempt in range(2):
+        attempt_prompt = prompt if attempt == 0 else retry_prompt(prompt)
+        result = generate_image(
+            attempt_prompt,
+            width,
+            height,
+            steps,
+            seed_for_prompt(prompt, attempt),
+        )
+        if not result:
+            continue
+
+        img = decode_result_image(result)
+        if img is None:
+            continue
+
+        if not detect_too_bumpy(img):
+            if attempt > 0:
+                result["prompt_retry_used"] = attempt_prompt
+            return result, None
+
+        saw_bumpy = True
+        metrics = bumpy_metrics(img)
+        print(
+            "  Bumpy image detected "
+            f"(lap_ratio={metrics.laplacian_ratio:.3f}, "
+            f"lap_mean={metrics.laplacian_abs_mean:.1f}, "
+            f"entropy={metrics.entropy:.2f})"
+        )
+        if attempt == 0:
+            print("  Retrying once with shortened smooth prompt...")
+
+    return None, "bumpy_image" if saw_bumpy else None
 
 
 def save_and_insert(api_result: dict, prompt: str, conn) -> bool:
@@ -221,7 +310,7 @@ def save_and_insert(api_result: dict, prompt: str, conn) -> bool:
 
     try:
         img_bytes = base64.b64decode(img_b64)
-        img = Image.open(io.BytesIO(img_bytes))
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception as e:
         print(f"  Decode failed: {e}")
         return False
@@ -346,13 +435,17 @@ def main():
         short = (prompt[:70] + "...") if len(prompt) > 70 else prompt
         print(f"[{i+1:,}/{len(pending):,}] {short}")
 
-        result = generate_image(prompt, args.width, args.height, args.steps)
+        result, rejection_reason = generate_image_with_quality_retry(prompt, args.width, args.height, args.steps)
         if result and save_and_insert(result, prompt, conn):
             success += 1
             consecutive_fails = 0
         else:
             failed += 1
             consecutive_fails += 1
+            if rejection_reason:
+                record_rejection(conn, prompt, rejection_reason)
+                consecutive_fails = 0
+                print(f"  Rejected prompt ({rejection_reason}); future runs will skip it.")
 
             # Back off if many consecutive failures (server might be down)
             if consecutive_fails >= 10:

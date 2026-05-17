@@ -47,6 +47,7 @@ func (db *DB) migrate() error {
 		email TEXT DEFAULT '',
 		api_key TEXT UNIQUE NOT NULL,
 		credits DOUBLE PRECISION DEFAULT 0,
+		unlimited_api BOOLEAN DEFAULT FALSE,
 		total_deposited DOUBLE PRECISION DEFAULT 0,
 		drip_step INTEGER DEFAULT 0,
 		drip_started_at TIMESTAMPTZ DEFAULT '1970-01-01',
@@ -132,6 +133,8 @@ func (db *DB) migrate() error {
 	-- Latent storage reference
 	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS latent_path TEXT DEFAULT '';
 
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS unlimited_api BOOLEAN DEFAULT FALSE;
+
 	-- Full-text search via pg_trgm (fast ILIKE with GIN index)
 	CREATE EXTENSION IF NOT EXISTS pg_trgm;
 	CREATE INDEX IF NOT EXISTS idx_images_prompt_trgm ON generated_images USING GIN (prompt gin_trgm_ops);
@@ -148,9 +151,9 @@ func (db *DB) GetOrCreateUser(walletAddress string) (*User, bool, error) {
 
 	var user User
 	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
+		"SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
 		walletAddress,
-	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.UnlimitedAPI, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		user = User{
@@ -184,9 +187,9 @@ func (db *DB) GetUserByWallet(walletAddress string) (*User, error) {
 
 	var user User
 	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
+		"SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
 		walletAddress,
-	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.UnlimitedAPI, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -200,9 +203,9 @@ func (db *DB) GetUserByAPIKey(apiKey string) (*User, error) {
 
 	var user User
 	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE api_key = $1",
+		"SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE api_key = $1",
 		apiKey,
-	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.UnlimitedAPI, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +483,7 @@ func (db *DB) ListDripEligibleUsers() ([]User, error) {
 	defer db.mu.RUnlock()
 
 	rows, err := db.conn.Query(
-		`SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at
+		`SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at
 		 FROM users WHERE email != '' AND drip_step < 20 AND drip_started_at > '1970-01-01'`,
 	)
 	if err != nil {
@@ -491,7 +494,7 @@ func (db *DB) ListDripEligibleUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.UnlimitedAPI, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -505,7 +508,7 @@ func (db *DB) ListLowCreditUsers() ([]User, error) {
 	defer db.mu.RUnlock()
 
 	rows, err := db.conn.Query(
-		`SELECT id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at
+		`SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at
 		 FROM users WHERE email != '' AND credits <= 0 AND total_deposited > 0`,
 	)
 	if err != nil {
@@ -516,7 +519,7 @@ func (db *DB) ListLowCreditUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.UnlimitedAPI, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)

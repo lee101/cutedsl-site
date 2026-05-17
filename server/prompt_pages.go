@@ -251,7 +251,7 @@ main{max-width:80rem;margin:0 auto;padding:1.25rem 2rem 5rem;display:grid;grid-t
 @media(max-width:900px){main{grid-template-columns:1fr;padding:1rem 1rem 4rem}}
 .hero-col{}
 .hero-img-wrap{background:#fff;border:1px solid #fbcfe8;border-radius:1.25rem;overflow:hidden;box-shadow:0 4px 24px rgba(219,39,119,.08)}
-.hero-img-wrap img{width:100%;display:block;max-height:75vh;object-fit:contain;background:#f8fafc}
+.hero-img-wrap img{width:100%;height:auto;display:block;max-height:75vh;object-fit:contain;background:#f8fafc}
 .info-col{}
 .info-card{background:#fff;border:1px solid #fce7f3;border-radius:1.25rem;padding:1.5rem;box-shadow:0 2px 12px rgba(219,39,119,.06);position:sticky;top:1.5rem}
 h1{font-size:1.1rem;font-weight:700;color:#0f172a;line-height:1.5;margin:0 0 1.25rem}
@@ -285,7 +285,7 @@ h2{font-size:1.2rem;font-weight:800;color:#0f172a;margin:0 0 1rem;display:flex;a
 .card{break-inside:avoid;margin-bottom:.75rem;background:#fff;border:1px solid #f1f5f9;border-radius:.875rem;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s}
 .card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(219,39,119,.12);border-color:#fbcfe8}
 .card a{display:block;color:inherit}
-.card img{width:100%;display:block;background:#f1f5f9}
+.card img{width:100%;height:auto;display:block;background:#f1f5f9}
 .card p{font-size:.72rem;color:#64748b;padding:.45rem .6rem .5rem;line-height:1.4;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 footer{text-align:center;color:#94a3b8;font-size:.82rem;padding:2rem 0 3rem;border-top:1px solid #fce7f3}
 footer a{color:#db2777}
@@ -495,10 +495,10 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 					"name":  "CuteDSL",
 					"url":   "https://cutedsl.cc",
 				},
-				"license":         "https://creativecommons.org/licenses/by/4.0/",
+				"license":            "https://creativecommons.org/licenses/by/4.0/",
 				"acquireLicensePage": "https://cutedsl.cc",
-				"keywords":        keywords,
-				"relatedLink":     canonicalURL,
+				"keywords":           keywords,
+				"relatedLink":        canonicalURL,
 			},
 			map[string]interface{}{
 				"@type": "BreadcrumbList",
@@ -509,14 +509,14 @@ func handlePromptHTML(ctx *fasthttp.RequestCtx, imageID string) {
 				},
 			},
 			map[string]interface{}{
-				"@type":            "WebPage",
-				"@id":              canonicalURL,
-				"url":              canonicalURL,
-				"name":             titlePrompt + " | CuteDSL AI Art",
-				"description":      metaPrompt,
-				"datePublished":    img.CreatedAt.Format(time.RFC3339),
-				"inLanguage":       "en",
-				"isPartOf":         map[string]interface{}{"@type": "WebSite", "name": "CuteDSL", "url": "https://cutedsl.cc"},
+				"@type":              "WebPage",
+				"@id":                canonicalURL,
+				"url":                canonicalURL,
+				"name":               titlePrompt + " | CuteDSL AI Art",
+				"description":        metaPrompt,
+				"datePublished":      img.CreatedAt.Format(time.RFC3339),
+				"inLanguage":         "en",
+				"isPartOf":           map[string]interface{}{"@type": "WebSite", "name": "CuteDSL", "url": "https://cutedsl.cc"},
 				"primaryImageOfPage": map[string]interface{}{"@id": canonicalURL + "#image"},
 			},
 		},

@@ -70,8 +70,8 @@ CF_API_KEY="${CLOUDFLARE_API_KEY}"
 CF_EMAIL="${CLOUDFLARE_EMAIL:-leepenkman@gmail.com}"
 # appstatic.app.nz is served under the app.nz zone
 CF_ZONE_APPNZ="${CLOUDFLARE_ZONE_APP_NZ}"
-# cutedsl.com zone (if configured separately)
-CF_ZONE_CUTEDSL="${CLOUDFLARE_ZONE_CUTEDSL}"
+# cutedsl.cc zone (if configured separately)
+CF_ZONE_CUTEDSL_CC="${CLOUDFLARE_ZONE_CUTEDSL_CC}"
 
 purge_urls() {
     local zone_id="$1"
@@ -123,17 +123,18 @@ APPSTATIC_URLS=(
     "https://appstatic.app.nz/cutedsl/images/token-bg.webp"
 )
 
-# URLs to purge on cutedsl.com (if proxied through CF)
-CUTEDSL_URLS=(
-    "https://cutedsl.com/"
-    "https://cutedsl.com/blog"
-    "https://cutedsl.com/blog/"
-    "https://cutedsl.com/evals"
-    "https://cutedsl.com/evals/"
-    "https://cutedsl.com/search"
-    "https://cutedsl.com/search/"
-    "https://cutedsl.com/sitemap.xml"
-    "https://cutedsl.com/robots.txt"
+# URLs to purge on cutedsl.cc (if proxied through CF)
+CUTEDSL_CC_URLS=(
+    "https://cutedsl.cc/"
+    "https://cutedsl.cc/blog"
+    "https://cutedsl.cc/blog/"
+    "https://cutedsl.cc/evals"
+    "https://cutedsl.cc/evals/"
+    "https://cutedsl.cc/search"
+    "https://cutedsl.cc/search/"
+    "https://cutedsl.cc/sitemap.xml"
+    "https://cutedsl.cc/robots.txt"
+    "https://www.cutedsl.cc/"
 )
 
 if [ -n "$CF_API_KEY" ] && [ -n "$CF_ZONE_APPNZ" ]; then
@@ -143,11 +144,11 @@ else
     echo "  ⚠ Skipping appstatic purge (set CLOUDFLARE_API_KEY and CLOUDFLARE_ZONE_APP_NZ)"
 fi
 
-if [ -n "$CF_API_KEY" ] && [ -n "$CF_ZONE_CUTEDSL" ]; then
-    echo "  Purging cutedsl.com..."
-    purge_urls "$CF_ZONE_CUTEDSL" "${CUTEDSL_URLS[@]}"
+if [ -n "$CF_API_KEY" ] && [ -n "$CF_ZONE_CUTEDSL_CC" ]; then
+    echo "  Purging cutedsl.cc..."
+    purge_urls "$CF_ZONE_CUTEDSL_CC" "${CUTEDSL_CC_URLS[@]}"
 else
-    echo "  ⚠ Skipping cutedsl.com purge (set CLOUDFLARE_ZONE_CUTEDSL)"
+    echo "  ⚠ Skipping cutedsl.cc purge (set CLOUDFLARE_ZONE_CUTEDSL_CC)"
 fi
 
 echo ""

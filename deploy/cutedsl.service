@@ -23,7 +23,7 @@ SyslogIdentifier=cutedsl
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/cutedsl-site
+ReadWritePaths=/opt/cutedsl-site /nvme0n1-disk/tmp
 
 [Install]
 WantedBy=multi-user.target

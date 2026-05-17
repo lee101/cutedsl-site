@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
+import { CodeBlock } from '@/lib/code-block';
 
 const API_BASE = '/api';
 const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
@@ -77,8 +78,10 @@ export default function Home() {
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
   const [showAccount, setShowAccount] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
+  const [clientOrigin, setClientOrigin] = useState('');
 
   useEffect(() => {
+    setClientOrigin(window.location.origin);
     const interval = setInterval(() => {
       setBgIndex((prev) => (prev + 1) % BACKGROUNDS.length);
     }, 6000);
@@ -170,7 +173,7 @@ export default function Home() {
       const res = await fetch(`${API_BASE}/service`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ service: 'zimage', prompt: demoPrompt, width: 512, height: 512, num_steps: 4 }),
+        body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 4 }),
       });
       const data = await res.json();
       if (data.result?.image_base64) {
@@ -313,6 +316,15 @@ export default function Home() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const bytesToBase64 = (bytes: Uint8Array) => {
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
   // Fetch swap quote from bags.fm via our proxy
   const fetchSwapQuote = async (solAmt: string) => {
     if (!solAmt || parseFloat(solAmt) <= 0) { setBuyQuote(null); return; }
@@ -361,27 +373,30 @@ export default function Home() {
 
       // bags.fm returns base58-encoded VersionedTransaction
       const bs58 = await import('bs58');
-      const { VersionedTransaction, Connection } = await import('@solana/web3.js');
+      const { VersionedTransaction } = await import('@solana/web3.js');
       const txBytes = bs58.default.decode(swapTxEncoded);
       const transaction = VersionedTransaction.deserialize(txBytes);
 
-      // Sign and send via Phantom
+      // Sign with Phantom, then broadcast through our backend RPC failover.
       const signed = await solana.signTransaction(transaction);
       setBuyStatus('Sending transaction...');
 
-      const connection = new Connection(
-        'https://api.mainnet-beta.solana.com',
-        'confirmed'
-      );
-      const signature = await connection.sendRawTransaction(signed.serialize(), {
-        skipPreflight: true,
-        maxRetries: 3,
+      const sendRes = await fetch(`${API_BASE}/swap/send_transaction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signed_transaction: bytesToBase64(signed.serialize()) }),
       });
+      const sendData = await sendRes.json();
+      if (!sendRes.ok || !sendData.success) {
+        throw new Error(sendData.error || 'Failed to send transaction');
+      }
 
-      setBuyStatus('Confirming...');
-      await connection.confirmTransaction(signature, 'confirmed');
+      const signature = sendData.signature;
 
-      setBuyStatus(`Swap complete! Tx: ${signature.slice(0, 8)}...`);
+      setBuyStatus(sendData.confirmed
+        ? `Swap complete! Tx: ${signature.slice(0, 8)}...`
+        : `Swap submitted (${sendData.confirmation_status || 'pending'}): ${signature.slice(0, 8)}...`
+      );
       setBuyQuote(null);
 
       // Refresh balance after a short delay
@@ -448,15 +463,15 @@ export default function Home() {
           <Image src={`${IMG_BASE}/logo.webp`} alt="CuteDSL" width={40} height={40} className="rounded-lg" />
           <span className="font-fredoka text-3xl font-bold text-pink-600 tracking-wide">CuteDSL</span>
         </Link>
-        <div className="hidden md:flex gap-6 font-bold text-slate-700">
+        <div className="hidden md:flex gap-5 font-bold text-slate-700">
           <Link href="#models" className="hover:text-pink-500 transition-colors">Models</Link>
+          <Link href="/gallery" className="hover:text-pink-500 transition-colors">Gallery</Link>
+          <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
           <Link href="#training" className="hover:text-purple-500 transition-colors">Training</Link>
-          <Link href="#api" className="hover:text-blue-500 transition-colors">Credits</Link>
           <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
           <Link href="#token" className="hover:text-cyan-500 transition-colors">$CUTEDSL</Link>
           <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
           <Link href="/blog" className="hover:text-orange-500 transition-colors">Blog</Link>
-          <Link href="#applied-science" className="hover:text-indigo-500 transition-colors">Applied Science</Link>
         </div>
         <div className="flex items-center gap-3">
           {walletAddress ? (
@@ -643,11 +658,15 @@ export default function Home() {
             <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/40 p-4 rounded-2xl backdrop-blur-sm">
               Cute DSL accelerates AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, and more. Powered exclusively by $CUTEDSL on Solana.
             </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start">
+            <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start flex-wrap">
               <a href="#models" className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
                 <Wand2 size={20} />
                 Explore Models
               </a>
+              <Link href="/gallery" prefetch={false} className="bg-white text-slate-700 font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 border-2 border-pink-100">
+                <Sparkles size={20} className="text-pink-500" />
+                Art Gallery
+              </Link>
               <a href="#api" className="bg-white text-slate-700 font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 border-2 border-pink-100">
                 <Code size={20} className="text-blue-500" />
                 API Docs
@@ -827,7 +846,7 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Image</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Fast image generation via Flux Schnell. 4-step inference for quick 1024x1024 images. Also available on <a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 underline">eBank.nz</a>.
+                Fast image generation via Flux Schnell. 4-step inference for quick 1024x1024 images. Also available through eBank.nz.
               </p>
               <div className="flex items-center gap-2 text-indigo-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('flux_image') > 0 ? `${formatCute(getServicePrice('flux_image'))} $CUTEDSL` : '40 $CUTEDSL'} / image
@@ -862,10 +881,10 @@ export default function Home() {
                   Generate
                 </button>
               </div>
-              <pre className="text-xs text-slate-500 bg-slate-50 p-3 rounded-lg mb-4 overflow-x-auto">{`curl -X POST ${typeof window !== 'undefined' ? window.location.origin : ''}/api/service \\
+              <CodeBlock language="bash" className="text-xs bg-slate-950 p-3 rounded-lg mb-4 shadow-none" code={`curl -X POST ${clientOrigin}/api/service \\
   -H "Authorization: Bearer ${apiKey}" \\
   -H "Content-Type: application/json" \\
-  -d '{"service":"zimage","prompt":"${demoPrompt}","width":512,"height":512}'`}</pre>
+  -d '{"prompt":"${demoPrompt}","width":512,"height":512}'`} />
               {demoResult && (
                 <div className="mt-4">
                   <img src={demoResult} alt="Generated" className="rounded-2xl shadow-lg max-w-full mx-auto" style={{maxHeight: 512}} />
@@ -1173,10 +1192,10 @@ export default function Home() {
 
           {/* Quick example */}
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 mb-8">
-            <pre className="text-xs text-slate-600 bg-slate-50 p-4 rounded-lg overflow-x-auto">{`curl -X POST https://cutedsl.app.nz/api/service \\
+            <CodeBlock language="bash" className="text-xs p-4 rounded-lg shadow-none" code={`curl -X POST https://cutedsl.cc/api/service \\
   -H "Authorization: Bearer ${apiKey || 'YOUR_API_KEY'}" \\
   -H "Content-Type: application/json" \\
-  -d '{"service": "zimage", "prompt": "a cute fairy in a forest", "width": 1024}'`}</pre>
+  -d '{"service": "zimage", "prompt": "a cute fairy in a forest", "width": 1024}'`} />
           </div>
 
           {/* Preview cards */}
@@ -1252,14 +1271,14 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Applied Science Company Section */}
-      <section id="applied-science" className="py-24 relative z-10 bg-slate-50/90 backdrop-blur-lg border-t border-slate-200">
+      {/* Applied AI NZ Section */}
+      <section id="applied-ai-nz" className="py-24 relative z-10 bg-slate-50/90 backdrop-blur-lg border-t border-slate-200">
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
-            <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="inline-block bg-indigo-100 text-indigo-700 px-4 py-1 rounded-full font-bold text-sm mb-4 hover:bg-indigo-200 transition-colors">The Applied Science Company</a>
+            <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="inline-block bg-indigo-100 text-indigo-700 px-4 py-1 rounded-full font-bold text-sm mb-4 hover:bg-indigo-200 transition-colors">Applied AI NZ</a>
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">Our Ecosystem</h2>
             <p className="text-lg text-slate-600 max-w-3xl mx-auto">
-              Cute DSL is part of a broader ecosystem of cutting-edge AI and technology products developed by <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-800 underline">the Applied Science Company</a>.
+              Cute DSL is part of a broader ecosystem of cutting-edge AI and technology products developed by <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-800 underline">Applied AI NZ</a>.
             </p>
           </div>
 
@@ -1377,24 +1396,27 @@ export default function Home() {
                 <span className="font-fredoka text-2xl font-bold text-slate-800">CuteDSL</span>
               </div>
               <p className="text-slate-500 font-medium max-w-sm">
-                SOTA model acceleration &amp; inference platform. Part of the <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-700 underline">Applied Science Company</a> ecosystem.
+                SOTA model acceleration &amp; inference platform. Part of the <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-700 underline">Applied AI NZ</a> ecosystem.
               </p>
             </div>
             
             <div>
-              <h4 className="font-bold text-slate-800 mb-4">Resources</h4>
+              <h4 className="font-bold text-slate-800 mb-4">Explore</h4>
               <ul className="space-y-2 text-slate-500 font-medium">
+                <li><Link href="/gallery" className="hover:text-pink-500 transition-colors">AI Art Gallery</Link></li>
+                <li><Link href="/search" className="hover:text-pink-500 transition-colors">Search Images</Link></li>
                 <li><Link href="#models" className="hover:text-pink-500 transition-colors">Models (zimage, chronos2)</Link></li>
-                <li><Link href="#training" className="hover:text-purple-500 transition-colors">LoRA Training & Inference</Link></li>
-                <li><Link href="#api" className="hover:text-blue-500 transition-colors">API Usage Docs</Link></li>
-                <li><Link href="#api" className="hover:text-yellow-500 transition-colors">Cloud Credits</Link></li>
+                <li><Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals & Benchmarks</Link></li>
+                <li><Link href="/blog" className="hover:text-purple-500 transition-colors">Blog</Link></li>
+                <li><Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link></li>
+                <li><a href="https://github.com/lee101/cutedsl" target="_blank" rel="noopener noreferrer" className="hover:text-slate-700 transition-colors">GitHub — lee101/cutedsl</a></li>
               </ul>
             </div>
 
             <div>
               <h4 className="font-bold text-slate-800 mb-4">Ecosystem</h4>
               <ul className="space-y-2 text-slate-500 font-medium">
-                <li><a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">App.nz — Applied Science Co.</a></li>
+                <li><a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">App.nz — Applied AI NZ</a></li>
                 <li><a href="https://netwrck.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Netwrck.com</a></li>
                 <li><a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">eBank.nz</a></li>
                 <li><a href="https://helix.app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Helix.app.nz</a></li>
@@ -1405,7 +1427,7 @@ export default function Home() {
           </div>
           
           <div className="border-t border-slate-200 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
-            <p className="text-slate-400 font-medium text-sm">© 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Applied Science Company</a>. All rights reserved.</p>
+            <p className="text-slate-400 font-medium text-sm">© 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Applied AI NZ</a>. All rights reserved.</p>
             <div className="flex gap-4">
               <a href="https://x.com/leeleepenkman" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-pink-500 transition-colors">X</a>
               <a href="https://codex-infinity.com" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-cyan-500 transition-colors">Codex Infinity</a>

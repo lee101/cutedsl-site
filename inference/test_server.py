@@ -6,11 +6,14 @@ Requires: inference server running on localhost:8100
 """
 
 import os
+import time
 import pytest
 import httpx
 
 BASE_URL = os.getenv("INFERENCE_TEST_URL", "http://localhost:8100")
-client = httpx.Client(base_url=BASE_URL, timeout=60.0)
+SECRET = os.getenv("INFERENCE_TEST_SECRET", "cutedsl2024")
+RUN_SLOW_ZIMAGE_TESTS = os.getenv("RUN_SLOW_ZIMAGE_TESTS", "0") == "1"
+client = httpx.Client(base_url=BASE_URL, timeout=180.0)
 
 
 def server_available():
@@ -118,10 +121,82 @@ def test_create_and_upload_image_compat():
         "prompt": "test compat endpoint",
         "width": 512,
         "height": 512,
-        "seed": 1,
+        "secret": SECRET,
+        "save_path": f"pytest/compat_{int(time.time())}.webp",
     })
     assert r.status_code == 200
-    assert "image_base64" in r.json()
+    assert r.json()["path"].startswith("https://")
+
+
+slow_zimage = pytest.mark.skipif(
+    not RUN_SLOW_ZIMAGE_TESTS,
+    reason="set RUN_SLOW_ZIMAGE_TESTS=1 to run GPU-backed prompt/teleport coverage",
+)
+
+
+def _upload_image(prompt: str, name: str, *, auto_lora: bool, teleport: bool, width: int = 512, height: int = 512):
+    r = client.get("/create_and_upload_image", params={
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "model": "zimage-turbo",
+        "auto_lora": str(auto_lora).lower(),
+        "teleport": str(teleport).lower(),
+        "perf": "true",
+        "secret": SECRET,
+        "save_path": f"pytest/{int(time.time())}_{name}.webp",
+    })
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["path"].startswith("https://")
+    assert data.get("perf", {}).get("inference_time_ms", 0) >= 0
+    return data
+
+
+@skip_if_no_server
+@slow_zimage
+@pytest.mark.parametrize("label,prompt", [
+    ("short", "pretty girl portrait"),
+    ("medium", "cinematic watercolor fox in a misty forest with soft rim light and coherent detail"),
+    ("long", " ".join(["clean detailed product photo of a futuristic smartphone on a white seamless background"] * 12)),
+    ("very_long", " ".join(["high quality coherent fantasy landscape with mountains, river, castle, atmospheric light"] * 28)),
+])
+def test_create_and_upload_prompt_lengths(label, prompt):
+    health = client.get("/health").json()
+    if not health["models"]["zimage"]:
+        pytest.skip("zimage model not loaded")
+
+    data = _upload_image(prompt, f"prompt_len_{label}", auto_lora=True, teleport=False)
+    assert data["perf"]["width"] == 512
+    assert data["perf"]["height"] == 512
+
+
+@skip_if_no_server
+@slow_zimage
+def test_create_and_upload_teleport_replay_quality_and_latency():
+    health = client.get("/health").json()
+    if not health["models"]["zimage"]:
+        pytest.skip("zimage model not loaded")
+
+    prompt = "pixel art stone block inventory icon, centered, simple game UI asset"
+    baseline = _upload_image(prompt, "teleport_baseline", auto_lora=False, teleport=False)
+    _upload_image(prompt, "teleport_prime", auto_lora=False, teleport=True)
+    replay = _upload_image(prompt, "teleport_replay", auto_lora=False, teleport=True)
+
+    assert replay["perf"]["teleport_cache_hit"] is True
+    assert replay["perf"]["inference_time_ms"] <= baseline["perf"]["inference_time_ms"]
+
+    import io
+    import math
+    import numpy as np
+    from PIL import Image
+
+    base_img = Image.open(io.BytesIO(httpx.get(baseline["path"], timeout=30).content)).convert("RGB")
+    replay_img = Image.open(io.BytesIO(httpx.get(replay["path"], timeout=30).content)).convert("RGB")
+    diff = np.asarray(base_img, dtype=np.float32) - np.asarray(replay_img, dtype=np.float32)
+    mse = float(np.mean(diff * diff))
+    psnr = float("inf") if mse == 0 else float(20 * math.log10(255.0 / math.sqrt(mse)))
+    assert psnr >= 30.0
 
 
 # ---- Chronos2 Forecast ----

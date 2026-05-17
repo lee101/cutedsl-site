@@ -64,7 +64,7 @@
     {
       "id": 9,
       "delay_days": 25,
-      "subject": "How CuteChronos2 Achieves 24x Speedup — Applied Science",
+      "subject": "How CuteChronos2 Achieves 24x Speedup — Applied AI NZ",
       "template": "09-chronos-deep-dive.html",
       "description": "Technical deep dive on CuteChronos2 acceleration techniques"
     },

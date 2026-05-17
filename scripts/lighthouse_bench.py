@@ -5,7 +5,7 @@ Runs Lighthouse on every route and reports Core Web Vitals + category scores
 (Performance, SEO, Accessibility, Best Practices).
 
 Usage:
-    python scripts/lighthouse_bench.py                    # against https://cutedsl.app.nz
+    python scripts/lighthouse_bench.py                    # against https://cutedsl.cc
     python scripts/lighthouse_bench.py http://localhost:3000
 
 Output:
@@ -99,7 +99,7 @@ def extract_metrics(data: dict) -> dict:
 
 
 def main():
-    base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://cutedsl.app.nz"
+    base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://cutedsl.cc"
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_dir = Path(__file__).parent.parent / "screenshots" / ts / "lighthouse"
     out_dir.mkdir(parents=True, exist_ok=True)

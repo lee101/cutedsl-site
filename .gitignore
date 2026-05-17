@@ -39,3 +39,6 @@ screenshots/
 
 # Temp files
 swap_test.py
+.runlogs/
+images
+frontend/tsconfig.tsbuildinfo

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,74 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 	if body["service"] != "cutedsl" {
 		t.Fatalf("expected service cutedsl, got %v", body["service"])
+	}
+}
+
+func TestFrontendErrorEndpointLogsBrowserContext(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "frontend-errors.jsonl")
+	t.Setenv("FRONTEND_ERROR_LOG_PATH", logPath)
+
+	status, body := doPost(t, "/api/frontend-error", map[string]interface{}{
+		"level":     "error",
+		"message":   "Synthetic frontend failure",
+		"name":      "TypeError",
+		"stack":     "TypeError: Synthetic frontend failure\n    at Home (app/page.tsx:1:1)",
+		"source":    "https://cutedsl.cc/_next/static/chunks/app.js",
+		"lineno":    12,
+		"colno":     34,
+		"url":       "https://cutedsl.cc/?test=true",
+		"referrer":  "https://appstatic.app.nz/cutedsl/",
+		"userAgent": "Mozilla/5.0 Test Browser",
+		"language":  "en-US",
+		"timezone":  "UTC",
+		"viewport": map[string]int{
+			"width":  1280,
+			"height": 720,
+		},
+		"screen": map[string]int{
+			"width":  1920,
+			"height": 1080,
+		},
+		"connection": map[string]interface{}{
+			"effectiveType": "4g",
+			"rtt":           40,
+		},
+		"sessionId":   "session-test",
+		"fingerprint": "synthetic|app.js|12|34",
+	})
+	if status != 202 {
+		t.Fatalf("expected 202, got %d: %v", status, body)
+	}
+	if body["request_id"] == "" {
+		t.Fatalf("expected request_id in response: %v", body)
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read frontend error log: %v", err)
+	}
+	var event map[string]interface{}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatalf("decode frontend error event: %v\n%s", err, string(raw))
+	}
+	if event["level"] != "error" || event["message"] != "Synthetic frontend failure" {
+		t.Fatalf("unexpected event: %v", event)
+	}
+	if event["user_agent"] != "Mozilla/5.0 Test Browser" {
+		t.Fatalf("missing browser context: %v", event)
+	}
+	if event["session_id"] != "session-test" {
+		t.Fatalf("missing session id: %v", event)
+	}
+}
+
+func TestFrontendErrorEndpointRejectsNonErrors(t *testing.T) {
+	status, _ := doPost(t, "/api/frontend-error", map[string]interface{}{
+		"level":   "info",
+		"message": "not an error",
+	})
+	if status != 400 {
+		t.Fatalf("expected 400 for non-error frontend event, got %d", status)
 	}
 }
 
@@ -266,7 +335,7 @@ func TestCutePrice(t *testing.T) {
 
 func TestService_MissingAuth(t *testing.T) {
 	status, body := doPost(t, "/api/service", map[string]string{
-		"service": "zimage",
+		"prompt": "test",
 	})
 	if status != 401 {
 		t.Fatalf("expected 401 for missing auth, got %d: %v", status, body)
@@ -329,15 +398,16 @@ func TestService_InvalidAPIKey(t *testing.T) {
 	}
 }
 
-func TestService_MissingService(t *testing.T) {
+func TestService_DefaultsToZImage(t *testing.T) {
 	wallet := fmt.Sprintf("NoSvc_%d", time.Now().UnixNano())
 	doPost(t, "/api/auth/wallet", map[string]string{"wallet_address": wallet})
 
-	status, _ := doPost(t, "/api/service", map[string]interface{}{
+	status, body := doPost(t, "/api/service", map[string]interface{}{
 		"wallet_address": wallet,
+		"prompt":         "test",
 	})
-	if status != 400 {
-		t.Fatalf("expected 400 for missing service, got %d", status)
+	if status != 402 && status != 503 {
+		t.Fatalf("expected default zimage billing path to return 402 or 503, got %d: %v", status, body)
 	}
 }
 
@@ -408,6 +478,20 @@ func TestCryptoCheckout_UnregisteredWallet(t *testing.T) {
 	// Should fail - wallet not registered, or pricing unavailable
 	if status == 200 {
 		t.Fatalf("expected error for unregistered wallet, got 200: %v", body)
+	}
+}
+
+func TestSwapSendTransactionValidation(t *testing.T) {
+	status, _ := doPost(t, "/api/swap/send_transaction", map[string]interface{}{})
+	if status != 400 {
+		t.Fatalf("expected 400 for missing signed transaction, got %d", status)
+	}
+
+	status, _ = doPost(t, "/api/swap/send_transaction", map[string]interface{}{
+		"signed_transaction": "not-base64",
+	})
+	if status != 400 {
+		t.Fatalf("expected 400 for invalid signed transaction, got %d", status)
 	}
 }
 

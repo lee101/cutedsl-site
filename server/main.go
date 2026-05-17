@@ -1,13 +1,16 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/valyala/fasthttp"
@@ -150,7 +153,15 @@ func setCORSHeaders(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Allow the frontend origin and common dev origins
-	allowedOrigins := []string{frontendURL, "http://localhost:3000", "http://localhost:8080"}
+	allowedOrigins := []string{
+		frontendURL,
+		"https://cutedsl.cc",
+		"https://www.cutedsl.cc",
+		"https://cutedsl.app.nz",
+		"https://appstatic.app.nz",
+		"http://localhost:3000",
+		"http://localhost:8080",
+	}
 	allowed := false
 	for _, o := range allowedOrigins {
 		if origin == o {
@@ -178,6 +189,9 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	// Health check
 	case path == "/api/health" && method == "GET":
 		jsonResponse(ctx, 200, map[string]string{"status": "ok", "service": "cutedsl"})
+
+	case path == "/api/frontend-error" && method == "POST":
+		handleFrontendError(ctx)
 
 	// Crypto checkout - create deposit
 	case path == "/api/crypto-checkout" && method == "POST":
@@ -253,6 +267,9 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/swap/transaction" && method == "POST":
 		handleSwapTransaction(ctx)
 
+	case path == "/api/swap/send_transaction" && method == "POST":
+		handleSwapSendTransaction(ctx)
+
 	// Semantic prompt search (gobed) — returns prompts + similarity scores
 	case path == "/api/search" && method == "GET":
 		handleSemanticSearch(ctx)
@@ -276,6 +293,129 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	default:
 		jsonError(ctx, 404, "not found")
 	}
+}
+
+type frontendErrorPayload struct {
+	Level       string                 `json:"level"`
+	Message     string                 `json:"message"`
+	Name        string                 `json:"name"`
+	Stack       string                 `json:"stack"`
+	Source      string                 `json:"source"`
+	Lineno      int                    `json:"lineno"`
+	Colno       int                    `json:"colno"`
+	Component   string                 `json:"component"`
+	URL         string                 `json:"url"`
+	Referrer    string                 `json:"referrer"`
+	UserAgent   string                 `json:"userAgent"`
+	Language    string                 `json:"language"`
+	Timezone    string                 `json:"timezone"`
+	Viewport    map[string]int         `json:"viewport"`
+	Screen      map[string]int         `json:"screen"`
+	Connection  map[string]interface{} `json:"connection"`
+	AppVersion  string                 `json:"appVersion"`
+	BuildID     string                 `json:"buildId"`
+	SessionID   string                 `json:"sessionId"`
+	OccurredAt  string                 `json:"occurredAt"`
+	Fingerprint string                 `json:"fingerprint"`
+}
+
+func frontendErrorLogPath() string {
+	return getEnv("FRONTEND_ERROR_LOG_PATH", "/nvme0n1-disk/tmp/cutedsl-frontend-errors.jsonl")
+}
+
+func newRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b[:])
+}
+
+func handleFrontendError(ctx *fasthttp.RequestCtx) {
+	var payload frontendErrorPayload
+	if err := json.Unmarshal(ctx.PostBody(), &payload); err != nil {
+		jsonError(ctx, 400, "invalid json")
+		return
+	}
+
+	payload.Level = strings.ToLower(strings.TrimSpace(payload.Level))
+	if payload.Level == "" {
+		payload.Level = "error"
+	}
+	if payload.Level != "error" {
+		jsonError(ctx, 400, "only error events are accepted")
+		return
+	}
+	payload.Message = truncateString(strings.TrimSpace(payload.Message), 2000)
+	payload.Name = truncateString(strings.TrimSpace(payload.Name), 200)
+	payload.Stack = truncateString(payload.Stack, 12000)
+	payload.Source = truncateString(payload.Source, 1000)
+	payload.Component = truncateString(payload.Component, 200)
+	payload.URL = truncateString(payload.URL, 2000)
+	payload.Referrer = truncateString(payload.Referrer, 2000)
+	payload.UserAgent = truncateString(payload.UserAgent, 1000)
+	payload.Language = truncateString(payload.Language, 100)
+	payload.Timezone = truncateString(payload.Timezone, 100)
+	payload.AppVersion = truncateString(payload.AppVersion, 100)
+	payload.BuildID = truncateString(payload.BuildID, 100)
+	payload.SessionID = truncateString(payload.SessionID, 100)
+	payload.Fingerprint = truncateString(payload.Fingerprint, 200)
+
+	if payload.Message == "" && payload.Stack == "" {
+		jsonError(ctx, 400, "message or stack required")
+		return
+	}
+
+	requestID := newRequestID()
+	event := map[string]interface{}{
+		"timestamp":   time.Now().UTC().Format(time.RFC3339Nano),
+		"request_id":  requestID,
+		"remote_ip":   ctx.RemoteIP().String(),
+		"level":       payload.Level,
+		"message":     payload.Message,
+		"name":        payload.Name,
+		"stack":       payload.Stack,
+		"source":      payload.Source,
+		"lineno":      payload.Lineno,
+		"colno":       payload.Colno,
+		"component":   payload.Component,
+		"url":         payload.URL,
+		"referrer":    payload.Referrer,
+		"user_agent":  payload.UserAgent,
+		"language":    payload.Language,
+		"timezone":    payload.Timezone,
+		"viewport":    payload.Viewport,
+		"screen":      payload.Screen,
+		"connection":  payload.Connection,
+		"app_version": payload.AppVersion,
+		"build_id":    payload.BuildID,
+		"session_id":  payload.SessionID,
+		"occurred_at": payload.OccurredAt,
+		"fingerprint": payload.Fingerprint,
+	}
+
+	path := frontendErrorLogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		log.Printf("frontend error log mkdir failed: %v", err)
+		jsonError(ctx, 500, "failed to log frontend error")
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("frontend error log open failed: %v", err)
+		jsonError(ctx, 500, "failed to log frontend error")
+		return
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(event); err != nil && err != io.ErrClosedPipe {
+		log.Printf("frontend error log write failed: %v", err)
+		jsonError(ctx, 500, "failed to log frontend error")
+		return
+	}
+
+	ctx.Response.Header.Set("X-Request-ID", requestID)
+	jsonResponse(ctx, 202, map[string]string{"status": "logged", "request_id": requestID})
 }
 
 func extractPathParam(path, prefix, suffix string) string {

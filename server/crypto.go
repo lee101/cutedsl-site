@@ -6,8 +6,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -407,13 +409,12 @@ func makeRPCRequest(rpcURL, method string, params interface{}, timeout time.Dura
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 429 {
-		return nil, fmt.Errorf("429 rate limited")
-	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("rpc http %d: %s", resp.StatusCode, truncateString(string(body), 500))
 	}
 
 	var rpcResp struct {
@@ -683,7 +684,7 @@ func verifyPayment(intent CryptoCheckoutIntent) {
 
 	var result struct {
 		Result []struct {
-			Signature string `json:"signature"`
+			Signature string      `json:"signature"`
 			Err       interface{} `json:"err"`
 		} `json:"result"`
 	}
@@ -978,15 +979,15 @@ func handleSwapQuote(ctx *fasthttp.RequestCtx) {
 	usdValue := solAmount * solPrice
 
 	jsonResponse(ctx, 200, map[string]interface{}{
-		"success":        true,
-		"quote":          quoteResp.Response, // Pass full quote for swap building
-		"sol_amount":     solAmount,
-		"cute_amount":    outTokens / math.Pow(10, cuteDecimals),
+		"success":         true,
+		"quote":           quoteResp.Response, // Pass full quote for swap building
+		"sol_amount":      solAmount,
+		"cute_amount":     outTokens / math.Pow(10, cuteDecimals),
 		"cute_amount_raw": parsed.OutAmount,
 		"min_cute_amount": parseFloat(parsed.MinOutAmount) / math.Pow(10, cuteDecimals),
-		"usd_value":     usdValue,
-		"sol_price_usd":  solPrice,
-		"price_impact":   parsed.PriceImpactPct,
+		"usd_value":       usdValue,
+		"sol_price_usd":   solPrice,
+		"price_impact":    parsed.PriceImpactPct,
 	})
 }
 
@@ -1066,4 +1067,125 @@ func handleSwapTransaction(ctx *fasthttp.RequestCtx) {
 		"success":     true,
 		"transaction": swapResp.Response,
 	})
+}
+
+func handleSwapSendTransaction(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		SignedTransaction string `json:"signed_transaction"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		jsonError(ctx, 400, "invalid request body")
+		return
+	}
+	if req.SignedTransaction == "" {
+		jsonError(ctx, 400, "signed_transaction required")
+		return
+	}
+	if len(req.SignedTransaction) > 400000 {
+		jsonError(ctx, 400, "signed_transaction too large")
+		return
+	}
+	if _, err := base64.StdEncoding.DecodeString(req.SignedTransaction); err != nil {
+		jsonError(ctx, 400, "signed_transaction must be base64")
+		return
+	}
+
+	params := []interface{}{
+		req.SignedTransaction,
+		map[string]interface{}{
+			"encoding":            "base64",
+			"skipPreflight":       false,
+			"preflightCommitment": "confirmed",
+			"maxRetries":          5,
+		},
+	}
+	body, err := robustRPCCall("sendTransaction", params, 20*time.Second)
+	if err != nil {
+		log.Printf("swap sendTransaction RPC failed: %v", err)
+		jsonError(ctx, 502, fmt.Sprintf("transaction broadcast failed: %s", err))
+		return
+	}
+
+	var sendResp struct {
+		Result string `json:"result"`
+		Error  *struct {
+			Code    int             `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &sendResp); err != nil {
+		jsonError(ctx, 502, "failed to parse transaction broadcast response")
+		return
+	}
+	if sendResp.Error != nil {
+		log.Printf("swap sendTransaction error code=%d msg=%s data=%s", sendResp.Error.Code, sendResp.Error.Message, string(sendResp.Error.Data))
+		jsonError(ctx, 400, fmt.Sprintf("transaction broadcast failed: %s", sendResp.Error.Message))
+		return
+	}
+	if sendResp.Result == "" {
+		jsonError(ctx, 502, "transaction broadcast returned no signature")
+		return
+	}
+
+	confirmed, confirmationStatus, confirmErr := waitForSignatureConfirmation(sendResp.Result, 45*time.Second)
+	if confirmErr != nil {
+		log.Printf("swap confirmation failed sig=%s: %v", sendResp.Result, confirmErr)
+		jsonError(ctx, 502, fmt.Sprintf("transaction confirmation failed: %s", confirmErr))
+		return
+	}
+
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"success":             true,
+		"signature":           sendResp.Result,
+		"confirmed":           confirmed,
+		"confirmation_status": confirmationStatus,
+	})
+}
+
+func waitForSignatureConfirmation(signature string, timeout time.Duration) (bool, string, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		params := []interface{}{
+			[]string{signature},
+			map[string]interface{}{"searchTransactionHistory": true},
+		}
+		body, err := robustRPCCall("getSignatureStatuses", params, 10*time.Second)
+		if err != nil {
+			return false, "", err
+		}
+
+		var statusResp struct {
+			Result struct {
+				Value []struct {
+					Err                interface{} `json:"err"`
+					ConfirmationStatus string      `json:"confirmationStatus"`
+				} `json:"value"`
+			} `json:"result"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &statusResp); err != nil {
+			return false, "", err
+		}
+		if statusResp.Error != nil {
+			return false, "", errors.New(statusResp.Error.Message)
+		}
+		if len(statusResp.Result.Value) > 0 {
+			status := statusResp.Result.Value[0]
+			if status.Err != nil {
+				errBytes, _ := json.Marshal(status.Err)
+				return false, status.ConfirmationStatus, fmt.Errorf("transaction failed on-chain: %s", string(errBytes))
+			}
+			if status.ConfirmationStatus == "confirmed" || status.ConfirmationStatus == "finalized" {
+				return true, status.ConfirmationStatus, nil
+			}
+			if status.ConfirmationStatus != "" {
+				return false, status.ConfirmationStatus, nil
+			}
+		}
+		time.Sleep(1500 * time.Millisecond)
+	}
+	return false, "pending", nil
 }

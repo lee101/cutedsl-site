@@ -6,6 +6,7 @@ import Image from 'next/image';
 import { ArrowLeft, ArrowRight, Copy, Check, Lock, Key, BookOpen } from 'lucide-react';
 import { useAuth, replaceApiKey } from '@/hooks/use-auth';
 import { MODELS, CATEGORY_LABELS, CATEGORY_COLORS } from '@/lib/models';
+import { CodeBlock } from '@/lib/code-block';
 
 const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
 
@@ -88,15 +89,13 @@ export default function DocsPage() {
             <p className="text-slate-600 mb-4">
               All services share a single endpoint: <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">POST /api/service</code>
             </p>
-            <pre className="bg-slate-900 text-slate-100 rounded-xl p-5 text-sm overflow-x-auto leading-relaxed">
-{replaceApiKey(`curl -X POST https://cutedsl.app.nz/api/service \\
+            <CodeBlock language="bash" code={replaceApiKey(`curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
     "service": "<service_name>",
     ...service-specific parameters
-  }'`, apiKey)}
-            </pre>
+  }'`, apiKey)} />
           </div>
         </section>
 
@@ -105,14 +104,12 @@ export default function DocsPage() {
           <h2 className="text-2xl font-bold text-slate-800 mb-4">Response Format</h2>
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
             <p className="text-slate-600 mb-4">All responses follow this envelope:</p>
-            <pre className="bg-slate-900 text-slate-100 rounded-xl p-5 text-sm overflow-x-auto leading-relaxed">
-{`{
+            <CodeBlock language="json" code={`{
   "result": { ... },        // Service-specific response data
   "credits_used": 1000,     // $CUTEDSL tokens deducted
   "credits_remain": 49000,  // Remaining balance
   "usd_equivalent": 1.00    // USD value of credits used
-}`}
-            </pre>
+}`} />
             <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
               <div className="bg-red-50 border border-red-200 rounded-lg p-3">
                 <span className="font-bold text-red-700">401</span> <span className="text-red-600">— Invalid or missing API key</span>

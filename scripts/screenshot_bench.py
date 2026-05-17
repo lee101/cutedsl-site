@@ -5,7 +5,7 @@ Walks every advertised route at desktop + mobile widths and saves PNGs to
 ./screenshots/<timestamp>/<viewport>/<route>.png so we can review visually.
 
 Usage:
-    python scripts/screenshot_bench.py                    # against https://cutedsl.app.nz
+    python scripts/screenshot_bench.py                    # against https://cutedsl.cc
     python scripts/screenshot_bench.py http://localhost:3000
 """
 import os
@@ -51,7 +51,7 @@ def slug(route: str) -> str:
 
 
 def main():
-    base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://cutedsl.app.nz"
+    base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://cutedsl.cc"
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_root = Path(__file__).parent.parent / "screenshots" / ts
     out_root.mkdir(parents=True, exist_ok=True)

@@ -51,3 +51,32 @@ html {
   will-change: opacity;
   contain: strict;
 }
+
+.hljs {
+  border: 1px solid rgb(51 65 85);
+  background: rgb(15 23 42);
+  color: rgb(226 232 240);
+  white-space: pre;
+}
+
+.hljs code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.hljs::-webkit-scrollbar {
+  height: 10px;
+}
+
+.hljs::-webkit-scrollbar-track {
+  background: rgb(15 23 42);
+  border-radius: 999px;
+}
+
+.hljs::-webkit-scrollbar-thumb {
+  background: rgb(71 85 105);
+  border-radius: 999px;
+}
+
+.hljs::-webkit-scrollbar-thumb:hover {
+  background: rgb(100 116 139);
+}
