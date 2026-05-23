@@ -22,6 +22,7 @@ func TestStripeCheckoutEmbeddedSessionAndWebhook(t *testing.T) {
 	sessionID := fmt.Sprintf("cs_test_%d", time.Now().UnixNano())
 	customerID := "cus_local_embedded"
 	paymentIntentID := "pi_local_embedded"
+	checkoutEmail := fmt.Sprintf("stripe-checkout-%d@example.com", time.Now().UnixNano())
 	paymentMethodID := "pm_card_visa"
 	var createdSessionForm map[string]string
 
@@ -35,6 +36,9 @@ func TestStripeCheckoutEmbeddedSessionAndWebhook(t *testing.T) {
 		case "/v1/customers":
 			if err := r.ParseForm(); err != nil {
 				t.Fatalf("parse customer form: %v", err)
+			}
+			if got := r.Form.Get("email"); got != checkoutEmail {
+				t.Fatalf("customer email = %q, want %q", got, checkoutEmail)
 			}
 			if r.Form.Get("metadata[wallet_address]") == "" {
 				t.Fatalf("customer missing wallet metadata: %v", r.Form)
@@ -93,6 +97,28 @@ func TestStripeCheckoutEmbeddedSessionAndWebhook(t *testing.T) {
 	user, err := dbConn.GetUserByWallet(wallet)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
+	}
+
+	status, body = doPost(t, "/api/stripe-checkout", map[string]interface{}{
+		"wallet_address": wallet,
+		"amount_usd":     25,
+		"return_url":     "http://localhost:3000/?payment=success&session_id={CHECKOUT_SESSION_ID}#credits",
+	})
+	if status != 400 {
+		t.Fatalf("checkout without email status %d body %v", status, body)
+	}
+
+	status, body = doPost(t, "/api/auth/email", map[string]string{
+		"wallet_address": wallet,
+		"email":          checkoutEmail,
+		"password":       "stripe-checkout-123",
+	})
+	if status != 200 {
+		t.Fatalf("save checkout email: status %d body %v", status, body)
+	}
+	user, err = dbConn.GetUserByWallet(wallet)
+	if err != nil {
+		t.Fatalf("get user after email: %v", err)
 	}
 
 	status, body = doPost(t, "/api/stripe-checkout", map[string]interface{}{

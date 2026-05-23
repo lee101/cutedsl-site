@@ -358,6 +358,10 @@ func handleStripeCheckout(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 404, "wallet not registered")
 		return
 	}
+	if !looksLikeEmail(user.Email) {
+		jsonError(ctx, 400, "email required before stripe checkout")
+		return
+	}
 
 	customerID := user.StripeCustomerID
 	if customerID == "" {

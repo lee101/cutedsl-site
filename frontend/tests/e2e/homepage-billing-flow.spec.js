@@ -8,6 +8,7 @@ async function installHomepageBillingMocks(page) {
   const emailWallet = 'email:homebilling000000000000000000000000000000';
   let user = null;
   let password = TEST_PASSWORD;
+  let emailAuthCompleted = false;
   let balance = {
     wallet_address: emailWallet,
     credits: 0,
@@ -80,6 +81,7 @@ async function installHomepageBillingMocks(page) {
       };
       balance = { ...balance, wallet_address: emailWallet, has_password: true };
     }
+    emailAuthCompleted = true;
     await route.fulfill({ status: 200, json: { user, api_key: user.api_key, cute_price_usd: 0.01, credits_usd: balance.credits_usd } });
   });
 
@@ -121,6 +123,10 @@ async function installHomepageBillingMocks(page) {
       await route.fulfill({ status: 400, json: { error: 'wallet_address and amount_usd required' } });
       return;
     }
+    if (!emailAuthCompleted) {
+      await route.fulfill({ status: 409, json: { error: 'email must be captured before stripe checkout' } });
+      return;
+    }
     await route.fulfill({
       status: 200,
       json: {
@@ -133,7 +139,7 @@ async function installHomepageBillingMocks(page) {
   });
 }
 
-test('homepage supports email Stripe checkout and linking a Solana wallet for SOL flows', async ({ page }) => {
+test('homepage captures email before Stripe checkout and links a Solana wallet for SOL flows', async ({ page }) => {
   await installHomepageBillingMocks(page);
 
   await page.goto('/');
@@ -141,7 +147,10 @@ test('homepage supports email Stripe checkout and linking a Solana wallet for SO
 
   await page.getByTestId('home-email').fill(TEST_EMAIL);
   await page.getByTestId('home-password').fill(TEST_PASSWORD);
-  await page.getByTestId('home-stripe-pay').click();
+  await page.getByTestId('home-email-continue').click();
+  await expect(page.getByText(`Card login ready for ${TEST_EMAIL}`)).toBeVisible();
+
+  await page.getByTestId('stripe-checkout-btn').click();
 
   await expect(page.getByText('Secure card checkout')).toBeVisible();
   await expect(page.getByTestId('mock-home-stripe-checkout')).toBeVisible();

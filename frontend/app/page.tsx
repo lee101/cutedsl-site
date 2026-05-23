@@ -292,6 +292,7 @@ export default function Home() {
 
   const signedIn = !!walletAddress && !!apiKey;
   const hasSolanaWallet = !!walletAddress && !walletAddress.startsWith('email:');
+  const cardCheckoutReady = signedIn && !!email && !!balance?.has_password;
 
   const runE2ETests = async () => {
     const results: {route: string; status: string; ms: number}[] = [];
@@ -332,6 +333,14 @@ export default function Home() {
       });
       const data = await parseJSONResponse<AuthResponse>(res, 'Email login failed');
       storeAuth(data.user, data.api_key);
+      setBalance((current) => current ? { ...current, wallet_address: data.user.wallet_address, has_password: true } : {
+        wallet_address: data.user.wallet_address,
+        credits: 0,
+        credits_usd: 0,
+        cute_price_usd: cutePrice,
+        total_deposited: 0,
+        has_password: true,
+      });
       setAuthStatus('Signed in with email. Card checkout is ready.');
       fetchBalance(data.user.wallet_address);
       fetchHistory(data.user.wallet_address);
@@ -512,24 +521,19 @@ export default function Home() {
 
   const ensureStripeBillingAccount = async () => {
     if (!signedIn || !walletAddress) {
-      return loginWithEmailPassword();
+      setStripeStatus('Create or login with email before card checkout.');
+      return null;
     }
 
-    const needsEmail = !email;
-    const needsPassword = !balance?.has_password;
-    if (!needsEmail && !needsPassword) {
-      return walletAddress;
-    }
-    if (!isValidEmail(emailInput)) {
-      setStripeStatus('Add an email before card checkout.');
+    if (!email || !isValidEmail(email)) {
+      setStripeStatus('Save an email before card checkout.');
       return null;
     }
-    if (needsPassword && passwordInput.length < 8) {
-      setStripeStatus('Add an 8+ character password before card checkout.');
+    if (!balance?.has_password) {
+      setStripeStatus('Save an 8+ character password before card checkout.');
       return null;
     }
-    const saved = await saveEmail();
-    return saved ? walletAddress : null;
+    return walletAddress;
   };
 
   const createStripeCheckout = async () => {
@@ -1247,8 +1251,8 @@ export default function Home() {
                   {/* Email/password billing login */}
                   {(!email || !balance?.has_password) ? (
                     <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-5 rounded-2xl border border-indigo-200">
-                      <div className="text-sm font-bold text-slate-700 mb-1">Email and password for card checkout</div>
-                      <div className="text-xs text-slate-500 mb-3">Use this to come back later without reconnecting a wallet.</div>
+                      <div className="text-sm font-bold text-slate-700 mb-1">Set up card checkout</div>
+                      <div className="text-xs text-slate-500 mb-3">We create your Stripe customer from this email before opening Stripe.</div>
                       <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
                         <input
                           type="email"
@@ -1312,109 +1316,118 @@ export default function Home() {
 
                     {buyTab === 'card' ? (
                       <div className="space-y-4">
-                        {embeddedCheckoutClientSecret ? (
-                          <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" data-testid="embedded-checkout-container">
-                            <div className="mb-3 flex items-center justify-between gap-3 px-1">
-                              <div>
-                                <div className="text-sm font-bold text-slate-700">Secure card checkout</div>
-                                <div className="text-xs text-slate-400">Powered by Stripe</div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => setEmbeddedCheckoutClientSecret('')}
-                                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-                                aria-label="Close Stripe checkout"
-                              >
-                                <X size={16} />
-                              </button>
-                            </div>
-                            <div ref={embeddedCheckoutElementRef} className="min-h-[440px]" />
+                        {!cardCheckoutReady ? (
+                          <div className="rounded-2xl border border-dashed border-pink-200 bg-pink-50/60 p-5">
+                            <div className="mb-1 text-sm font-bold text-slate-700">Email required before Stripe checkout</div>
+                            <div className="text-xs text-slate-500">Save your email and password above first, then Stripe will open with a customer tied to that email.</div>
                           </div>
                         ) : (
                           <>
-                            <div className="flex gap-2">
-                              <div className="relative flex-1">
-                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max="500"
-                                  value={stripeAmount}
-                                  onChange={(e) => setStripeAmount(e.target.value)}
-                                  className="w-full pl-7 pr-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-lg"
-                                  placeholder="25"
-                                />
+                            {embeddedCheckoutClientSecret ? (
+                              <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" data-testid="embedded-checkout-container">
+                                <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                                  <div>
+                                    <div className="text-sm font-bold text-slate-700">Secure card checkout</div>
+                                    <div className="text-xs text-slate-400">Powered by Stripe for {email}</div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEmbeddedCheckoutClientSecret('')}
+                                    className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                                    aria-label="Close Stripe checkout"
+                                  >
+                                    <X size={16} />
+                                  </button>
+                                </div>
+                                <div ref={embeddedCheckoutElementRef} className="min-h-[440px]" />
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex gap-2">
+                                  <div className="relative flex-1">
+                                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="500"
+                                      value={stripeAmount}
+                                      onChange={(e) => setStripeAmount(e.target.value)}
+                                      className="w-full pl-7 pr-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-lg"
+                                      placeholder="25"
+                                    />
+                                  </div>
+                                  <button
+                                    onClick={createStripeCheckout}
+                                    disabled={stripeLoading || !stripeAmount}
+                                    data-testid="stripe-checkout-btn"
+                                    className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 inline-flex items-center gap-2"
+                                  >
+                                    {stripeLoading ? <RefreshCw size={20} className="animate-spin" /> : <CreditCard size={18} />}
+                                    Pay
+                                  </button>
+                                </div>
+                                {cutePrice > 0 && stripeAmount && (
+                                  <div className="text-xs text-slate-400">
+                                    Buys &asymp; {formatCute(parseFloat(stripeAmount || '0') / cutePrice)} $CUTEDSL. Stripe will save your card for optional auto top-up after checkout.
+                                  </div>
+                                )}
+                              </>
+                            )}
+
+                            <div className="bg-white/70 rounded-2xl border border-slate-200 p-4 space-y-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <div className="text-sm font-bold text-slate-700">Auto top-up</div>
+                                  <div className="text-xs text-slate-400">Charge your saved Stripe card when your balance is low.</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setAutotopupEnabled(!autotopupEnabled)}
+                                  className={`w-12 h-7 rounded-full p-1 transition-colors ${autotopupEnabled ? 'bg-pink-500' : 'bg-slate-300'}`}
+                                  aria-pressed={autotopupEnabled}
+                                >
+                                  <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${autotopupEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-2 gap-3">
+                                <label className="text-xs font-bold text-slate-500">
+                                  Threshold USD
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="100"
+                                    value={autotopupThreshold}
+                                    onChange={(e) => setAutotopupThreshold(e.target.value)}
+                                    className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm font-normal text-slate-700"
+                                  />
+                                </label>
+                                <label className="text-xs font-bold text-slate-500">
+                                  Top-up USD
+                                  <input
+                                    type="number"
+                                    min="5"
+                                    max="500"
+                                    value={autotopupAmount}
+                                    onChange={(e) => setAutotopupAmount(e.target.value)}
+                                    className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm font-normal text-slate-700"
+                                  />
+                                </label>
                               </div>
                               <button
-                                onClick={createStripeCheckout}
-                                disabled={stripeLoading || !stripeAmount}
-                                data-testid="stripe-checkout-btn"
-                                className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 inline-flex items-center gap-2"
+                                onClick={saveAutotopupSettings}
+                                disabled={autotopupSaving}
+                                className="w-full bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50"
                               >
-                                {stripeLoading ? <RefreshCw size={20} className="animate-spin" /> : <CreditCard size={18} />}
-                                Pay
+                                {autotopupSaving ? 'Saving...' : 'Save auto top-up'}
                               </button>
+                              {balance && !balance.has_payment_method && (
+                                <div className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
+                                  Buy credits with Stripe once before enabling auto top-up.
+                                </div>
+                              )}
                             </div>
-                            {cutePrice > 0 && stripeAmount && (
-                              <div className="text-xs text-slate-400">
-                                Buys &asymp; {formatCute(parseFloat(stripeAmount || '0') / cutePrice)} $CUTEDSL. Stripe will save your card for optional auto top-up after checkout.
-                              </div>
-                            )}
                           </>
                         )}
-
-                        <div className="bg-white/70 rounded-2xl border border-slate-200 p-4 space-y-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-sm font-bold text-slate-700">Auto top-up</div>
-                              <div className="text-xs text-slate-400">Charge your saved Stripe card when your balance is low.</div>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => setAutotopupEnabled(!autotopupEnabled)}
-                              className={`w-12 h-7 rounded-full p-1 transition-colors ${autotopupEnabled ? 'bg-pink-500' : 'bg-slate-300'}`}
-                              aria-pressed={autotopupEnabled}
-                            >
-                              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${autotopupEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
-                            </button>
-                          </div>
-                          <div className="grid grid-cols-2 gap-3">
-                            <label className="text-xs font-bold text-slate-500">
-                              Threshold USD
-                              <input
-                                type="number"
-                                min="1"
-                                max="100"
-                                value={autotopupThreshold}
-                                onChange={(e) => setAutotopupThreshold(e.target.value)}
-                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm font-normal text-slate-700"
-                              />
-                            </label>
-                            <label className="text-xs font-bold text-slate-500">
-                              Top-up USD
-                              <input
-                                type="number"
-                                min="5"
-                                max="500"
-                                value={autotopupAmount}
-                                onChange={(e) => setAutotopupAmount(e.target.value)}
-                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm font-normal text-slate-700"
-                              />
-                            </label>
-                          </div>
-                          <button
-                            onClick={saveAutotopupSettings}
-                            disabled={autotopupSaving}
-                            className="w-full bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50"
-                          >
-                            {autotopupSaving ? 'Saving...' : 'Save auto top-up'}
-                          </button>
-                          {balance && !balance.has_payment_method && (
-                            <div className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
-                              Buy credits with Stripe once before enabling auto top-up.
-                            </div>
-                          )}
-                        </div>
 
                         {stripeStatus && (
                           <div className={`text-sm font-medium px-3 py-2 rounded-lg ${stripeStatus.includes('failed') || stripeStatus.includes('Failed') || stripeStatus.includes('cancelled') || stripeStatus.includes('before enabling') || stripeStatus.includes('Add ') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
@@ -1579,7 +1592,7 @@ export default function Home() {
                       <CreditCard size={18} className="text-pink-500" />
                       <div>
                         <div className="text-sm font-bold text-slate-800">Pay by card</div>
-                        <div className="text-xs text-slate-500">Create or login to an email account, then Stripe opens here.</div>
+                        <div className="text-xs text-slate-500">Create or login with email first. Stripe opens after your customer is ready.</div>
                       </div>
                     </div>
                     <div className="grid gap-3">
@@ -1600,35 +1613,14 @@ export default function Home() {
                         className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
                         placeholder="8+ character password"
                       />
-                      <div className="flex gap-2">
-                        <div className="relative flex-1">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
-                          <input
-                            type="number"
-                            min="1"
-                            max="500"
-                            value={stripeAmount}
-                            onChange={(e) => setStripeAmount(e.target.value)}
-                            className="w-full rounded-xl border border-slate-200 py-3 pl-7 pr-3 text-base outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
-                            placeholder="25"
-                          />
-                        </div>
-                        <button
-                          onClick={createStripeCheckout}
-                          disabled={stripeLoading || authLoading || !stripeAmount}
-                          data-testid="home-stripe-pay"
-                          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-pink-400 to-purple-400 px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
-                        >
-                          {stripeLoading || authLoading ? <RefreshCw size={18} className="animate-spin" /> : <CreditCard size={18} />}
-                          Pay
-                        </button>
-                      </div>
                       <button
                         onClick={loginWithEmailPassword}
                         disabled={authLoading || !isValidEmail(emailInput) || passwordInput.length < 8}
-                        className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:border-pink-300 disabled:opacity-50"
+                        data-testid="home-email-continue"
+                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-400 to-purple-400 px-4 py-3 text-sm font-bold text-white disabled:opacity-50"
                       >
-                        Login or create account
+                        {authLoading ? <RefreshCw size={16} className="animate-spin" /> : <Mail size={16} />}
+                        Continue with email
                       </button>
                     </div>
                     {(authStatus || stripeStatus) && (
