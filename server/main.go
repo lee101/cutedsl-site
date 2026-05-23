@@ -461,25 +461,59 @@ func handleWalletAuth(ctx *fasthttp.RequestCtx) {
 	var req struct {
 		WalletAddress string `json:"wallet_address"`
 		Email         string `json:"email,omitempty"`
+		Password      string `json:"password,omitempty"`
+		APIKey        string `json:"api_key,omitempty"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil || req.WalletAddress == "" {
 		jsonError(ctx, 400, "wallet_address required")
 		return
 	}
+	req.WalletAddress = strings.TrimSpace(req.WalletAddress)
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	req.APIKey = strings.TrimSpace(req.APIKey)
 
-	user, created, err := dbConn.GetOrCreateUser(req.WalletAddress)
-	if err != nil {
-		jsonError(ctx, 500, "failed to register wallet")
-		return
+	var user *User
+	created := false
+	linked := false
+	var err error
+
+	if req.APIKey != "" {
+		user, err = dbConn.GetUserByAPIKey(req.APIKey)
+		if err != nil {
+			jsonError(ctx, 401, "invalid api key")
+			return
+		}
+		if user.WalletAddress != req.WalletAddress {
+			user, linked, err = dbConn.LinkUserToWallet(user.ID, req.WalletAddress)
+			if err != nil {
+				log.Printf("wallet link error: %v", err)
+				jsonError(ctx, 500, "failed to link wallet")
+				return
+			}
+		}
+	} else {
+		user, created, err = dbConn.GetOrCreateUser(req.WalletAddress)
+		if err != nil {
+			jsonError(ctx, 500, "failed to register wallet")
+			return
+		}
 	}
 
 	// If email provided (on signup or update), set it and start drip
-	req.Email = strings.TrimSpace(req.Email)
 	if req.Email != "" && req.Email != user.Email {
-		if err := dbConn.UpdateUserEmail(user.ID, req.Email); err != nil {
+		if !looksLikeEmail(req.Email) {
+			jsonError(ctx, 400, "valid email required")
+			return
+		}
+		updated, err := dbConn.UpdateUserEmailAndPassword(user.ID, req.Email, "")
+		if err != nil {
 			log.Printf("Failed to update email for %s: %v", user.ID, err)
+			if strings.Contains(err.Error(), "email already in use") {
+				jsonError(ctx, 409, "email already in use")
+				return
+			}
 		} else {
-			user.Email = req.Email
+			user = updated
 			// Send welcome email immediately for new email signups
 			if created || user.DripStep == 0 {
 				go func() {
@@ -492,12 +526,31 @@ func handleWalletAuth(ctx *fasthttp.RequestCtx) {
 			}
 		}
 	}
+	if req.Password != "" {
+		if user.Email == "" {
+			jsonError(ctx, 400, "email required to set password")
+			return
+		}
+		passwordHash, err := hashPassword(req.Password)
+		if err != nil {
+			jsonError(ctx, 400, err.Error())
+			return
+		}
+		updated, err := dbConn.UpdateUserEmailAndPassword(user.ID, user.Email, passwordHash)
+		if err != nil {
+			log.Printf("wallet password update error: %v", err)
+			jsonError(ctx, 500, "failed to update email password")
+			return
+		}
+		user = updated
+	}
 
 	cutePrice := getCUTEPriceUSD()
 	jsonResponse(ctx, 200, map[string]interface{}{
 		"user":           user,
 		"api_key":        user.APIKey,
 		"created":        created,
+		"linked":         linked,
 		"cute_price_usd": cutePrice,
 		"credits_usd":    user.Credits * cutePrice,
 	})
@@ -663,22 +716,31 @@ func handleUpdateEmail(ctx *fasthttp.RequestCtx) {
 	var req struct {
 		WalletAddress string `json:"wallet_address"`
 		Email         string `json:"email"`
+		Password      string `json:"password,omitempty"`
 	}
 	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
 		jsonError(ctx, 400, "invalid request")
 		return
 	}
 
-	req.Email = strings.TrimSpace(req.Email)
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	if req.Email == "" || req.WalletAddress == "" {
 		jsonError(ctx, 400, "wallet_address and email required")
 		return
 	}
 
-	// Basic email validation
-	if !strings.Contains(req.Email, "@") || !strings.Contains(req.Email, ".") {
+	if !looksLikeEmail(req.Email) {
 		jsonError(ctx, 400, "invalid email address")
 		return
+	}
+	passwordHash := ""
+	if req.Password != "" {
+		var err error
+		passwordHash, err = hashPassword(req.Password)
+		if err != nil {
+			jsonError(ctx, 400, err.Error())
+			return
+		}
 	}
 
 	user, err := dbConn.GetUserByWallet(req.WalletAddress)
@@ -688,11 +750,15 @@ func handleUpdateEmail(ctx *fasthttp.RequestCtx) {
 	}
 
 	wasEmpty := user.Email == ""
-	if err := dbConn.UpdateUserEmail(user.ID, req.Email); err != nil {
+	user, err = dbConn.UpdateUserEmailAndPassword(user.ID, req.Email, passwordHash)
+	if err != nil {
+		if strings.Contains(err.Error(), "email already in use") {
+			jsonError(ctx, 409, "email already in use")
+			return
+		}
 		jsonError(ctx, 500, "failed to update email")
 		return
 	}
-	user.Email = req.Email
 
 	// Start drip campaign if this is a new email
 	if wasEmpty {
@@ -706,8 +772,10 @@ func handleUpdateEmail(ctx *fasthttp.RequestCtx) {
 	}
 
 	jsonResponse(ctx, 200, map[string]interface{}{
-		"success": true,
-		"email":   req.Email,
+		"success":      true,
+		"email":        req.Email,
+		"has_password": user.PasswordHash != "",
+		"user":         user,
 	})
 }
 

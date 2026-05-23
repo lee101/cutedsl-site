@@ -189,6 +189,7 @@ type WalletBalanceResponse struct {
 	AutotopupThresholdUSD float64 `json:"autotopup_threshold_usd"`
 	AutotopupAmountUSD    float64 `json:"autotopup_amount_usd"`
 	HasPaymentMethod      bool    `json:"has_payment_method"`
+	HasPassword           bool    `json:"has_password"`
 	UnlimitedAPI          bool    `json:"unlimited_api"`
 	SubscriptionStatus    string  `json:"subscription_status,omitempty"`
 	SubscriptionPlan      string  `json:"subscription_plan,omitempty"`

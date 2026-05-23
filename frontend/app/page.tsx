@@ -67,6 +67,7 @@ interface WalletBalance {
   autotopup_threshold_usd?: number;
   autotopup_amount_usd?: number;
   has_payment_method?: boolean;
+  has_password?: boolean;
 }
 
 interface ServicePricing {
@@ -86,6 +87,38 @@ interface BillingEvent {
   description: string;
   credits_after: number;
   created_at: string;
+}
+
+interface UserPayload {
+  id: string;
+  wallet_address: string;
+  email?: string;
+  api_key?: string;
+}
+
+interface AuthResponse {
+  user: UserPayload;
+  api_key: string;
+}
+
+interface EmailUpdateResponse {
+  success: boolean;
+  email: string;
+  has_password?: boolean;
+  user?: UserPayload;
+}
+
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const isValidEmail = (value: string) => emailPattern.test(value.trim());
+
+async function parseJSONResponse<T>(res: Response, fallback: string): Promise<T> {
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const message = typeof data?.error === 'string' ? data.error : fallback;
+    throw new Error(message);
+  }
+  return data as T;
 }
 
 export default function Home() {
@@ -108,6 +141,9 @@ export default function Home() {
   const [testResults, setTestResults] = useState<{route: string; status: string; ms: number}[]>([]);
   const [email, setEmail] = useState<string | null>(null);
   const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authStatus, setAuthStatus] = useState<string | null>(null);
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailSaved, setEmailSaved] = useState(false);
   const [buyTab, setBuyTab] = useState<'card' | 'buy' | 'deposit'>('card');
@@ -134,6 +170,17 @@ export default function Home() {
     setClientOrigin(window.location.origin);
   }, []);
 
+  const storeAuth = useCallback((user: UserPayload, key: string) => {
+    setWalletAddress(user.wallet_address);
+    setApiKey(key);
+    setEmail(user.email || null);
+    if (user.email) setEmailInput(user.email);
+    localStorage.setItem('cutedsl_wallet', user.wallet_address);
+    localStorage.setItem('cutedsl_api_key', key);
+    if (user.email) localStorage.setItem('cutedsl_email', user.email);
+    else localStorage.removeItem('cutedsl_email');
+  }, []);
+
   // Fetch pricing on mount
   useEffect(() => {
     fetch(`${API_BASE}/pricing`)
@@ -149,7 +196,7 @@ export default function Home() {
   // Fetch balance when wallet connected
   const fetchBalance = useCallback(async (wallet: string) => {
     try {
-      const res = await fetch(`${API_BASE}/balance?wallet=${wallet}`);
+      const res = await fetch(`${API_BASE}/balance?wallet=${encodeURIComponent(wallet)}`);
       const data = await res.json();
       setBalance(data);
       setCutePrice(data.cute_price_usd || cutePrice);
@@ -161,7 +208,7 @@ export default function Home() {
 
   const fetchHistory = useCallback(async (wallet: string) => {
     try {
-      const res = await fetch(`${API_BASE}/billing-history?wallet=${wallet}`);
+      const res = await fetch(`${API_BASE}/billing-history?wallet=${encodeURIComponent(wallet)}`);
       const data = await res.json();
       setBillingHistory(data.events || []);
     } catch {}
@@ -243,6 +290,9 @@ export default function Home() {
     }
   }, []);
 
+  const signedIn = !!walletAddress && !!apiKey;
+  const hasSolanaWallet = !!walletAddress && !walletAddress.startsWith('email:');
+
   const runE2ETests = async () => {
     const results: {route: string; status: string; ms: number}[] = [];
     const test = async (route: string, opts?: RequestInit) => {
@@ -264,6 +314,34 @@ export default function Home() {
     await test('/billing-history?wallet=test_e2e_wallet');
     await test('/auth/wallet', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({wallet_address: 'e2e_test_' + Date.now()}) });
     await test('/service', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({service:'zimage',wallet_address:'nonexistent'}) });
+  };
+
+  const loginWithEmailPassword = async () => {
+    if (!isValidEmail(emailInput) || passwordInput.length < 8) {
+      setAuthStatus('Enter a valid email and an 8+ character password.');
+      return null;
+    }
+
+    setAuthLoading(true);
+    setAuthStatus(null);
+    try {
+      const res = await fetch(`${API_BASE}/auth/email-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailInput.trim(), password: passwordInput }),
+      });
+      const data = await parseJSONResponse<AuthResponse>(res, 'Email login failed');
+      storeAuth(data.user, data.api_key);
+      setAuthStatus('Signed in with email. Card checkout is ready.');
+      fetchBalance(data.user.wallet_address);
+      fetchHistory(data.user.wallet_address);
+      return data.user.wallet_address;
+    } catch (err: any) {
+      setAuthStatus(err?.message || 'Email login failed');
+      return null;
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const tryImageGen = async () => {
@@ -291,6 +369,7 @@ export default function Home() {
 
   const connectWallet = async () => {
     setConnectingWallet(true);
+    setAuthStatus(null);
     try {
       // Check for Phantom wallet
       const solana = (window as any).solana;
@@ -298,35 +377,33 @@ export default function Home() {
         const res = await fetch(`${API_BASE}/auth/wallet`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ wallet_address: addr }),
+          body: JSON.stringify({
+            wallet_address: addr,
+            api_key: apiKey || undefined,
+            email: isValidEmail(emailInput) ? emailInput.trim() : undefined,
+            password: passwordInput.length >= 8 ? passwordInput : undefined,
+          }),
         });
-        const data = await res.json();
-        if (data.api_key) {
-          setApiKey(data.api_key);
-          localStorage.setItem('cutedsl_api_key', data.api_key);
-        }
-        if (data.user?.email) {
-          setEmail(data.user.email);
-          localStorage.setItem('cutedsl_email', data.user.email);
-        }
+        const data = await parseJSONResponse<AuthResponse>(res, 'Wallet login failed');
+        storeAuth(data.user, data.api_key);
+        fetchBalance(data.user.wallet_address);
+        fetchHistory(data.user.wallet_address);
+        setAuthStatus(data.user.email ? 'Wallet connected to your email account.' : 'Wallet connected.');
       };
 
       if (solana?.isPhantom) {
         const resp = await solana.connect();
         const addr = resp.publicKey.toString();
-        setWalletAddress(addr);
-        localStorage.setItem('cutedsl_wallet', addr);
         await registerWallet(addr);
       } else {
         // Fallback: prompt for wallet address
         const addr = prompt('Enter your Solana wallet address:');
         if (addr && addr.length > 30) {
-          setWalletAddress(addr);
-          localStorage.setItem('cutedsl_wallet', addr);
           await registerWallet(addr);
         }
       }
-    } catch (err) {
+    } catch (err: any) {
+      setAuthStatus(err?.message || 'Wallet connect failed');
       console.error('Wallet connect error:', err);
     } finally {
       setConnectingWallet(false);
@@ -340,6 +417,8 @@ export default function Home() {
     setApiKey(null);
     setEmail(null);
     setEmailInput('');
+    setPasswordInput('');
+    setAuthStatus(null);
     setEmailSaved(false);
     localStorage.removeItem('cutedsl_wallet');
     localStorage.removeItem('cutedsl_api_key');
@@ -351,30 +430,50 @@ export default function Home() {
   };
 
   const saveEmail = async () => {
-    if (!walletAddress || !emailInput.includes('@')) return;
+    if (!walletAddress || !isValidEmail(emailInput)) return false;
     setEmailSaving(true);
+    setAuthStatus(null);
     try {
+      const payload: Record<string, unknown> = {
+        wallet_address: walletAddress,
+        email: emailInput.trim(),
+      };
+      if (passwordInput.length >= 8) {
+        payload.password = passwordInput;
+      }
       const res = await fetch(`${API_BASE}/auth/email`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wallet_address: walletAddress, email: emailInput }),
+        body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const data = await parseJSONResponse<EmailUpdateResponse>(res, 'Failed to save email login');
       if (data.success) {
-        setEmail(emailInput);
-        localStorage.setItem('cutedsl_email', emailInput);
+        setEmail(data.email);
+        setEmailInput(data.email);
+        localStorage.setItem('cutedsl_email', data.email);
+        if (data.has_password) {
+          setBalance((current) => current ? { ...current, has_password: true } : current);
+        }
         setEmailSaved(true);
+        setAuthStatus(data.has_password ? 'Email and password saved for card checkout.' : 'Email saved.');
         setTimeout(() => setEmailSaved(false), 3000);
+        return true;
       }
-    } catch (err) {
+    } catch (err: any) {
+      setAuthStatus(err?.message || 'Failed to save email login');
       console.error('Email save error:', err);
+      return false;
     } finally {
       setEmailSaving(false);
     }
+    return false;
   };
 
   const createDeposit = async () => {
-    if (!walletAddress || !depositAmount) return;
+    if (!hasSolanaWallet || !walletAddress || !depositAmount) {
+      setBuyStatus('Connect a Solana wallet before depositing tokens.');
+      return;
+    }
     setDepositLoading(true);
     setDepositResult(null);
     try {
@@ -411,17 +510,41 @@ export default function Home() {
     }
   };
 
+  const ensureStripeBillingAccount = async () => {
+    if (!signedIn || !walletAddress) {
+      return loginWithEmailPassword();
+    }
+
+    const needsEmail = !email;
+    const needsPassword = !balance?.has_password;
+    if (!needsEmail && !needsPassword) {
+      return walletAddress;
+    }
+    if (!isValidEmail(emailInput)) {
+      setStripeStatus('Add an email before card checkout.');
+      return null;
+    }
+    if (needsPassword && passwordInput.length < 8) {
+      setStripeStatus('Add an 8+ character password before card checkout.');
+      return null;
+    }
+    const saved = await saveEmail();
+    return saved ? walletAddress : null;
+  };
+
   const createStripeCheckout = async () => {
-    if (!walletAddress || !stripeAmount) return;
+    if (!stripeAmount) return;
     setStripeLoading(true);
     setStripeStatus(null);
     try {
+      const billingWallet = await ensureStripeBillingAccount();
+      if (!billingWallet) return;
       const amount = parseFloat(stripeAmount);
       const res = await fetch(`${API_BASE}/stripe-checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          wallet_address: walletAddress,
+          wallet_address: billingWallet,
           amount_usd: amount,
           return_url: `${window.location.origin}/?payment=success&session_id={CHECKOUT_SESSION_ID}#credits`,
         }),
@@ -505,7 +628,10 @@ export default function Home() {
 
   // Execute swap: get quote → build tx → sign with Phantom → send
   const executeBuy = async () => {
-    if (!walletAddress || !buySolAmount || buyLoading) return;
+    if (!hasSolanaWallet || !walletAddress || !buySolAmount || buyLoading) {
+      setBuyStatus('Connect a Solana wallet before buying with SOL.');
+      return;
+    }
     const solana = (window as any).solana;
     if (!solana?.isPhantom) {
       setBuyStatus('Phantom wallet required for swaps');
@@ -622,7 +748,7 @@ export default function Home() {
           <Link href="/blog" className="hover:text-orange-500 transition-colors">Blog</Link>
         </div>
         <div className="flex items-center gap-3">
-          {walletAddress ? (
+          {signedIn ? (
             <div className="flex items-center gap-3">
               <Link href="/account" className="hidden sm:flex items-center gap-2 bg-white/90 px-4 py-2 rounded-full border border-pink-200 shadow-sm hover:shadow-md transition-all cursor-pointer">
                 <Coins size={16} className="text-yellow-500" />
@@ -1105,7 +1231,7 @@ export default function Home() {
                 <h3 className="font-fredoka text-3xl font-bold text-slate-800">Cloud Credits</h3>
               </div>
 
-              {walletAddress ? (
+              {signedIn ? (
                 <div className="space-y-6">
                   {/* Balance */}
                   <div className="bg-gradient-to-r from-yellow-50 to-pink-50 p-6 rounded-2xl border border-yellow-200">
@@ -1118,11 +1244,12 @@ export default function Home() {
                     )}
                   </div>
 
-                  {/* Email signup */}
-                  {!email ? (
+                  {/* Email/password billing login */}
+                  {(!email || !balance?.has_password) ? (
                     <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-5 rounded-2xl border border-indigo-200">
-                      <div className="text-sm font-bold text-slate-600 mb-2">Get updates & API tips via email</div>
-                      <div className="flex gap-2">
+                      <div className="text-sm font-bold text-slate-700 mb-1">Email and password for card checkout</div>
+                      <div className="text-xs text-slate-500 mb-3">Use this to come back later without reconnecting a wallet.</div>
+                      <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
                         <input
                           type="email"
                           value={emailInput}
@@ -1131,20 +1258,32 @@ export default function Home() {
                           className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-200 outline-none text-sm"
                           placeholder="your@email.com"
                         />
+                        <input
+                          type="password"
+                          value={passwordInput}
+                          onChange={(e) => setPasswordInput(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && saveEmail()}
+                          className="flex-1 px-4 py-2.5 rounded-xl border border-slate-200 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-200 outline-none text-sm"
+                          placeholder="8+ character password"
+                        />
                         <button
                           onClick={saveEmail}
-                          disabled={emailSaving || !emailInput.includes('@')}
+                          disabled={emailSaving || !isValidEmail(emailInput) || passwordInput.length < 8}
                           className="bg-gradient-to-r from-indigo-400 to-purple-400 text-white font-bold px-5 py-2.5 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 text-sm"
                         >
                           {emailSaving ? <RefreshCw size={16} className="animate-spin" /> : emailSaved ? <Check size={16} /> : 'Save'}
                         </button>
                       </div>
-                      <div className="text-xs text-slate-400 mt-2">We&apos;ll send you a 20-part onboarding series about our API, acceleration techniques, and tips.</div>
                     </div>
                   ) : (
                     <div className="flex items-center gap-2 text-sm text-slate-500 bg-indigo-50/50 px-4 py-2 rounded-xl">
                       <Check size={14} className="text-green-500" />
-                      Signed up as {email}
+                      Card login ready for {email}
+                    </div>
+                  )}
+                  {authStatus && (
+                    <div className={`rounded-lg px-3 py-2 text-sm font-medium ${authStatus.toLowerCase().includes('failed') || authStatus.toLowerCase().includes('required') || authStatus.toLowerCase().includes('use') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                      {authStatus}
                     </div>
                   )}
 
@@ -1278,12 +1417,26 @@ export default function Home() {
                         </div>
 
                         {stripeStatus && (
-                          <div className={`text-sm font-medium px-3 py-2 rounded-lg ${stripeStatus.includes('failed') || stripeStatus.includes('Failed') || stripeStatus.includes('cancelled') || stripeStatus.includes('before enabling') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                          <div className={`text-sm font-medium px-3 py-2 rounded-lg ${stripeStatus.includes('failed') || stripeStatus.includes('Failed') || stripeStatus.includes('cancelled') || stripeStatus.includes('before enabling') || stripeStatus.includes('Add ') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
                             {stripeStatus}
                           </div>
                         )}
                       </div>
                     ) : buyTab === 'buy' ? (
+                      !hasSolanaWallet ? (
+                        <div className="rounded-2xl border border-dashed border-purple-200 bg-purple-50/60 p-5 text-center">
+                          <div className="mb-2 text-sm font-bold text-slate-700">Connect a Solana wallet to buy with SOL</div>
+                          <p className="mb-4 text-xs text-slate-500">Your email/card account stays linked after connecting.</p>
+                          <button
+                            onClick={connectWallet}
+                            disabled={connectingWallet}
+                            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
+                          >
+                            {connectingWallet ? <RefreshCw size={16} className="animate-spin" /> : <Wallet size={16} />}
+                            Connect wallet
+                          </button>
+                        </div>
+                      ) : (
                       <div className="space-y-3">
                         <div className="flex gap-2">
                           <div className="relative flex-1">
@@ -1336,7 +1489,22 @@ export default function Home() {
                           Swaps SOL for $CUTEDSL via bags.fm liquidity pool. Signed with your Phantom wallet.
                         </div>
                       </div>
+                      )
                     ) : (
+                      !hasSolanaWallet ? (
+                        <div className="rounded-2xl border border-dashed border-purple-200 bg-purple-50/60 p-5 text-center">
+                          <div className="mb-2 text-sm font-bold text-slate-700">Connect a Solana wallet to deposit $CUTEDSL</div>
+                          <p className="mb-4 text-xs text-slate-500">Card-funded credits work with email only; token deposits need a wallet.</p>
+                          <button
+                            onClick={connectWallet}
+                            disabled={connectingWallet}
+                            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
+                          >
+                            {connectingWallet ? <RefreshCw size={16} className="animate-spin" /> : <Wallet size={16} />}
+                            Connect wallet
+                          </button>
+                        </div>
+                      ) : (
                       <div className="space-y-3">
                         <div className="flex gap-2">
                           <div className="relative flex-1">
@@ -1364,6 +1532,7 @@ export default function Home() {
                           </div>
                         )}
                       </div>
+                      )
                     )}
                   </div>
 
@@ -1404,16 +1573,82 @@ export default function Home() {
                   )}
                 </div>
               ) : (
-                <div className="text-center py-6">
-                  <p className="text-slate-600 mb-6 text-lg">Connect your Solana wallet to deposit $CUTEDSL and start using AI services.</p>
-                  <button
-                    onClick={connectWallet}
-                    disabled={connectingWallet}
-                    className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-8 py-4 rounded-full hover:scale-105 transition-transform inline-flex items-center gap-2"
-                  >
-                    <Wallet size={20} />
-                    {connectingWallet ? 'Connecting...' : 'Connect Wallet'}
-                  </button>
+                <div className="space-y-5">
+                  <div className="rounded-2xl border border-pink-100 bg-white/80 p-5">
+                    <div className="mb-4 flex items-center gap-2">
+                      <CreditCard size={18} className="text-pink-500" />
+                      <div>
+                        <div className="text-sm font-bold text-slate-800">Pay by card</div>
+                        <div className="text-xs text-slate-500">Create or login to an email account, then Stripe opens here.</div>
+                      </div>
+                    </div>
+                    <div className="grid gap-3">
+                      <input
+                        type="email"
+                        value={emailInput}
+                        data-testid="home-email"
+                        onChange={(e) => setEmailInput(e.target.value)}
+                        className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
+                        placeholder="you@example.com"
+                      />
+                      <input
+                        type="password"
+                        value={passwordInput}
+                        data-testid="home-password"
+                        onChange={(e) => setPasswordInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && createStripeCheckout()}
+                        className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
+                        placeholder="8+ character password"
+                      />
+                      <div className="flex gap-2">
+                        <div className="relative flex-1">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                          <input
+                            type="number"
+                            min="1"
+                            max="500"
+                            value={stripeAmount}
+                            onChange={(e) => setStripeAmount(e.target.value)}
+                            className="w-full rounded-xl border border-slate-200 py-3 pl-7 pr-3 text-base outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
+                            placeholder="25"
+                          />
+                        </div>
+                        <button
+                          onClick={createStripeCheckout}
+                          disabled={stripeLoading || authLoading || !stripeAmount}
+                          data-testid="home-stripe-pay"
+                          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-pink-400 to-purple-400 px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
+                        >
+                          {stripeLoading || authLoading ? <RefreshCw size={18} className="animate-spin" /> : <CreditCard size={18} />}
+                          Pay
+                        </button>
+                      </div>
+                      <button
+                        onClick={loginWithEmailPassword}
+                        disabled={authLoading || !isValidEmail(emailInput) || passwordInput.length < 8}
+                        className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:border-pink-300 disabled:opacity-50"
+                      >
+                        Login or create account
+                      </button>
+                    </div>
+                    {(authStatus || stripeStatus) && (
+                      <div className={`mt-3 rounded-lg px-3 py-2 text-sm font-medium ${(authStatus || stripeStatus || '').toLowerCase().includes('fail') || (authStatus || stripeStatus || '').toLowerCase().includes('required') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                        {authStatus || stripeStatus}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-dashed border-purple-200 bg-purple-50/60 p-5 text-center">
+                    <p className="mb-4 text-sm font-medium text-slate-600">Prefer SOL or token deposits? Connect a Solana wallet.</p>
+                    <button
+                      onClick={connectWallet}
+                      disabled={connectingWallet}
+                      className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-6 py-3 text-sm font-bold text-white disabled:opacity-50"
+                    >
+                      {connectingWallet ? <RefreshCw size={18} className="animate-spin" /> : <Wallet size={18} />}
+                      Connect wallet
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

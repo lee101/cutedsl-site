@@ -696,6 +696,7 @@ func handleGetBalance(ctx *fasthttp.RequestCtx) {
 		AutotopupThresholdUSD: user.AutotopupThresholdUSD,
 		AutotopupAmountUSD:    user.AutotopupAmountUSD,
 		HasPaymentMethod:      user.StripePaymentMethodID != "",
+		HasPassword:           user.PasswordHash != "",
 		UnlimitedAPI:          user.UnlimitedAPI,
 		SubscriptionStatus:    user.SubscriptionStatus,
 		SubscriptionPlan:      user.SubscriptionPlan,

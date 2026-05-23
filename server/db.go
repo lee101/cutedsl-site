@@ -859,6 +859,174 @@ func (db *DB) UpdateUserEmail(userID, email string) error {
 	return err
 }
 
+// UpdateUserEmailAndPassword sets an email and, when provided, a password hash.
+func (db *DB) UpdateUserEmailAndPassword(userID, email, passwordHash string) (*User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil, fmt.Errorf("email required")
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var otherID string
+	err = tx.QueryRow(
+		"SELECT id FROM users WHERE lower(email) = lower($1) AND id <> $2 LIMIT 1",
+		email, userID,
+	).Scan(&otherID)
+	if err == nil {
+		return nil, fmt.Errorf("email already in use")
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	_, err = tx.Exec(
+		`UPDATE users
+		 SET email = $1,
+		     password_hash = CASE WHEN $2 != '' THEN $2 ELSE password_hash END,
+		     drip_started_at = CASE WHEN email = '' THEN NOW() ELSE drip_started_at END,
+		     updated_at = NOW()
+		 WHERE id = $3`,
+		email, passwordHash, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var user User
+	if err := scanUser(tx.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", userID), &user); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// LinkUserToWallet assigns a real wallet address to an existing account. If a
+// wallet account already exists, account-owned billing state is merged into it.
+func (db *DB) LinkUserToWallet(userID, walletAddress string) (*User, bool, error) {
+	walletAddress = strings.TrimSpace(walletAddress)
+	if walletAddress == "" {
+		return nil, false, fmt.Errorf("wallet address required")
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+
+	var source User
+	if err := scanUser(tx.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", userID), &source); err != nil {
+		return nil, false, err
+	}
+	if source.WalletAddress == walletAddress {
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		return &source, false, nil
+	}
+
+	var target User
+	err = scanUser(tx.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE wallet_address = $1", walletAddress), &target)
+	if err == sql.ErrNoRows {
+		_, err = tx.Exec("UPDATE users SET wallet_address = $1, updated_at = NOW() WHERE id = $2", walletAddress, userID)
+		if err != nil {
+			return nil, false, err
+		}
+		var linked User
+		if err := scanUser(tx.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", userID), &linked); err != nil {
+			return nil, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		return &linked, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if target.ID == source.ID {
+		if err := tx.Commit(); err != nil {
+			return nil, false, err
+		}
+		return &target, false, nil
+	}
+
+	for _, stmt := range []string{
+		"UPDATE billing_events SET user_id = $1 WHERE user_id = $2",
+		"UPDATE password_reset_tokens SET user_id = $1 WHERE user_id = $2",
+		"UPDATE stripe_checkout_sessions SET user_id = $1 WHERE user_id = $2",
+		"UPDATE autotopup_charges SET user_id = $1 WHERE user_id = $2",
+		"UPDATE crypto_checkout_intents SET user_id = $1, wallet_address = $3 WHERE user_id = $2",
+	} {
+		if strings.Contains(stmt, "$3") {
+			_, err = tx.Exec(stmt, target.ID, source.ID, walletAddress)
+		} else {
+			_, err = tx.Exec(stmt, target.ID, source.ID)
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
+	_, err = tx.Exec(
+		`UPDATE users AS dst
+		 SET email = CASE
+		       WHEN src.email != '' AND src.password_hash != '' THEN src.email
+		       WHEN dst.email = '' THEN src.email
+		       ELSE dst.email
+		     END,
+		     password_hash = CASE WHEN dst.password_hash = '' THEN src.password_hash ELSE dst.password_hash END,
+		     credits = dst.credits + src.credits,
+		     total_deposited = dst.total_deposited + src.total_deposited,
+		     unlimited_api = dst.unlimited_api OR src.unlimited_api,
+		     stripe_customer_id = COALESCE(NULLIF(dst.stripe_customer_id, ''), src.stripe_customer_id),
+		     stripe_payment_method_id = COALESCE(NULLIF(dst.stripe_payment_method_id, ''), src.stripe_payment_method_id),
+		     stripe_subscription_id = COALESCE(NULLIF(dst.stripe_subscription_id, ''), src.stripe_subscription_id),
+		     stripe_price_id = COALESCE(NULLIF(dst.stripe_price_id, ''), src.stripe_price_id),
+		     subscription_status = COALESCE(NULLIF(dst.subscription_status, ''), src.subscription_status),
+		     subscription_plan = COALESCE(NULLIF(dst.subscription_plan, ''), src.subscription_plan),
+		     subscription_current_period_end = COALESCE(dst.subscription_current_period_end, src.subscription_current_period_end),
+		     autotopup_enabled = dst.autotopup_enabled OR src.autotopup_enabled,
+		     autotopup_threshold_usd = CASE WHEN dst.autotopup_threshold_usd = 0 THEN src.autotopup_threshold_usd ELSE dst.autotopup_threshold_usd END,
+		     autotopup_amount_usd = CASE WHEN dst.autotopup_amount_usd = 0 THEN src.autotopup_amount_usd ELSE dst.autotopup_amount_usd END,
+		     autotopup_last_at = CASE WHEN dst.autotopup_last_at IS NULL THEN src.autotopup_last_at ELSE dst.autotopup_last_at END,
+		     drip_step = GREATEST(dst.drip_step, src.drip_step),
+		     drip_started_at = CASE WHEN dst.drip_started_at <= '1970-01-02'::timestamptz THEN src.drip_started_at ELSE dst.drip_started_at END,
+		     updated_at = NOW()
+		 FROM users AS src
+		 WHERE dst.id = $1 AND src.id = $2`,
+		target.ID, source.ID,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := tx.Exec("DELETE FROM users WHERE id = $1", source.ID); err != nil {
+		return nil, false, err
+	}
+
+	var merged User
+	if err := scanUser(tx.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", target.ID), &merged); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return &merged, true, nil
+}
+
 // UpdateDripStep updates the drip step for a user
 func (db *DB) UpdateDripStep(userID string, step int) error {
 	db.mu.Lock()
