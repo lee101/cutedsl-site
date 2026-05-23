@@ -42,3 +42,9 @@ swap_test.py
 .runlogs/
 images
 frontend/tsconfig.tsbuildinfo
+visualbench
+frontend/test-results/
+frontend/playwright-report/
+monitoring/cutedsl_frontend_autofix_cron.log
+monitoring/cutedsl_frontend_autofix_monitor.log
+monitoring/cutedsl_inference_autofix_monitor.log

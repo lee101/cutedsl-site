@@ -39,6 +39,13 @@ if [ "$OUT_DIR" = "frontend/out" ]; then
     aws s3 sync "$OUT_DIR" "s3://$R2_BUCKET/$BUCKET_PATH/" $SYNC_OPTS \
         --exclude '*.map' \
         --cache-control "public, max-age=31536000, immutable"
+    aws s3api put-object \
+        --endpoint-url "$R2_ENDPOINT" \
+        --bucket "$R2_BUCKET" \
+        --key "$BUCKET_PATH/" \
+        --body "$OUT_DIR/index.html" \
+        --content-type "text/html; charset=utf-8" \
+        --cache-control "public, max-age=3600" >/dev/null
     echo "  ✓ Static export synced"
 else
     # Next.js standalone - sync static assets only

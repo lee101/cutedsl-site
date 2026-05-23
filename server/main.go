@@ -57,6 +57,7 @@ func main() {
 
 	// Initialize subsystems
 	initCrypto()
+	initStripe()
 	initServices()
 	initUploads()
 	initEmail()
@@ -85,6 +86,11 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 	// API routes
 	if strings.HasPrefix(path, "/api/") {
 		routeAPI(ctx, path, method)
+		return
+	}
+
+	if path == "/stripe-webhook" && method == "POST" {
+		handleStripeWebhook(ctx)
 		return
 	}
 
@@ -197,6 +203,22 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/crypto-checkout" && method == "POST":
 		handleCryptoCheckout(ctx)
 
+	// Stripe checkout and auto top-up
+	case (path == "/api/stripe-checkout" || path == "/api/create-credits-checkout") && method == "POST":
+		handleStripeCheckout(ctx)
+
+	case path == "/api/stripe/config" && method == "GET":
+		handleStripeConfig(ctx)
+
+	case (path == "/api/stripe-webhook" || path == "/api/stripe/webhook") && method == "POST":
+		handleStripeWebhook(ctx)
+
+	case path == "/api/autotopup-settings" && method == "GET":
+		handleGetAutotopupSettings(ctx)
+
+	case (path == "/api/autotopup-settings" || path == "/api/save-autotopup-settings") && method == "POST":
+		handleSaveAutotopupSettings(ctx)
+
 	// Crypto checkout - get status
 	case strings.HasPrefix(path, "/api/crypto-checkout/") && strings.HasSuffix(path, "/events") && method == "GET":
 		intentID := extractPathParam(path, "/api/crypto-checkout/", "/events")
@@ -248,6 +270,16 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	// Register / login (wallet-based)
 	case path == "/api/auth/wallet" && method == "POST":
 		handleWalletAuth(ctx)
+
+	// Simple email account login
+	case path == "/api/auth/email-login" && method == "POST":
+		handleEmailLogin(ctx)
+
+	case path == "/api/auth/forgot-password" && method == "POST":
+		handleForgotPassword(ctx)
+
+	case path == "/api/auth/reset-password" && method == "POST":
+		handleResetPassword(ctx)
 
 	// Update user email
 	case path == "/api/auth/email" && method == "POST":
@@ -469,6 +501,161 @@ func handleWalletAuth(ctx *fasthttp.RequestCtx) {
 		"cute_price_usd": cutePrice,
 		"credits_usd":    user.Credits * cutePrice,
 	})
+}
+
+// handleEmailLogin creates or retrieves a simple email-backed account.
+func handleEmailLogin(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		jsonError(ctx, 400, "invalid request")
+		return
+	}
+
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if !looksLikeEmail(req.Email) {
+		jsonError(ctx, 400, "valid email required")
+		return
+	}
+	if len(req.Password) < 8 {
+		jsonError(ctx, 400, "password must be at least 8 characters")
+		return
+	}
+
+	passwordHash, err := hashPassword(req.Password)
+	if err != nil {
+		jsonError(ctx, 400, err.Error())
+		return
+	}
+	user, created, err := dbConn.GetOrCreateUserByEmailWithPassword(req.Email, passwordHash)
+	if err != nil {
+		log.Printf("email login error: %v", err)
+		jsonError(ctx, 500, "failed to login")
+		return
+	}
+	if !created {
+		if user.PasswordHash == "" {
+			if err := dbConn.SetUserPasswordHash(user.ID, passwordHash); err != nil {
+				jsonError(ctx, 500, "failed to set password")
+				return
+			}
+			user.PasswordHash = passwordHash
+		} else if !checkPassword(req.Password, user.PasswordHash) {
+			jsonError(ctx, 401, "invalid email or password")
+			return
+		}
+	}
+
+	if created || user.DripStep == 0 {
+		go func() {
+			if dripConfig != nil && len(dripConfig.Emails) > 0 {
+				if err := sendDripEmail(user, dripConfig.Emails[0]); err != nil {
+					log.Printf("Welcome email error: %v", err)
+				}
+			}
+		}()
+	}
+
+	cutePrice := getCUTEPriceUSD()
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"user":           user,
+		"api_key":        user.APIKey,
+		"created":        created,
+		"cute_price_usd": cutePrice,
+		"credits_usd":    user.Credits * cutePrice,
+	})
+}
+
+func handleForgotPassword(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		jsonError(ctx, 400, "invalid request")
+		return
+	}
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if !looksLikeEmail(req.Email) {
+		jsonError(ctx, 400, "valid email required")
+		return
+	}
+
+	resp := map[string]interface{}{"success": true}
+	user, err := dbConn.GetUserByEmail(req.Email)
+	if err == nil {
+		raw, tokenHash, err := newPasswordResetToken()
+		if err != nil {
+			jsonError(ctx, 500, "failed to create reset token")
+			return
+		}
+		if err := dbConn.CreatePasswordResetToken(user.ID, tokenHash, time.Now().Add(30*time.Minute)); err != nil {
+			jsonError(ctx, 500, "failed to save reset token")
+			return
+		}
+		resetURL := strings.TrimRight(defaultPublicURL(ctx), "/") + "/account?reset_token=" + raw
+		go func() {
+			if err := sendPasswordResetEmail(user.Email, resetURL); err != nil {
+				log.Printf("password reset email error for %s: %v", user.Email, err)
+			}
+		}()
+		if devMode || strings.EqualFold(os.Getenv("EMAIL_DEBUG_RESET_TOKEN"), "true") {
+			resp["reset_token"] = raw
+		}
+	} else {
+		log.Printf("password reset requested for unknown email %s", req.Email)
+	}
+
+	jsonResponse(ctx, 200, resp)
+}
+
+func handleResetPassword(ctx *fasthttp.RequestCtx) {
+	var req struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		jsonError(ctx, 400, "invalid request")
+		return
+	}
+	req.Token = strings.TrimSpace(req.Token)
+	if req.Token == "" {
+		jsonError(ctx, 400, "token required")
+		return
+	}
+	passwordHash, err := hashPassword(req.Password)
+	if err != nil {
+		jsonError(ctx, 400, err.Error())
+		return
+	}
+
+	user, err := dbConn.ConsumePasswordResetToken(passwordResetTokenHash(req.Token))
+	if err != nil {
+		jsonError(ctx, 400, "invalid or expired reset token")
+		return
+	}
+	if err := dbConn.SetUserPasswordHash(user.ID, passwordHash); err != nil {
+		jsonError(ctx, 500, "failed to update password")
+		return
+	}
+	user.PasswordHash = passwordHash
+	cutePrice := getCUTEPriceUSD()
+	jsonResponse(ctx, 200, map[string]interface{}{
+		"success":        true,
+		"user":           user,
+		"api_key":        user.APIKey,
+		"cute_price_usd": cutePrice,
+		"credits_usd":    user.Credits * cutePrice,
+	})
+}
+
+func looksLikeEmail(email string) bool {
+	if len(email) < 5 || len(email) > 320 || strings.ContainsAny(email, " \t\r\n") {
+		return false
+	}
+	at := strings.LastIndex(email, "@")
+	return at > 0 && at < len(email)-3 && strings.Contains(email[at+1:], ".")
 }
 
 // handleUpdateEmail updates a user's email address

@@ -1,6 +1,6 @@
 {
   "campaign": "new_user_onboarding",
-  "description": "20-email drip campaign for new CuteDSL users over 90 days — API-first AI acceleration platform powered by $CUTEDSL on Solana",
+  "description": "20-email drip campaign for new CuteDSL users over 90 days — API-first AI platform with simple prepaid credits",
   "from_email": "lee@cutedsl.com",
   "from_name": "CuteDSL",
   "base_url": "https://cutedsl.com",
@@ -8,9 +8,9 @@
     {
       "id": 1,
       "delay_days": 0,
-      "subject": "Welcome to CuteDSL — AI Acceleration Powered by $CUTEDSL",
+      "subject": "Welcome to CuteDSL — Fast AI APIs With Simple Credits",
       "template": "01-welcome.html",
-      "description": "Welcome email with platform overview: API services, $CUTEDSL token, wallet-based auth"
+      "description": "Welcome email with platform overview: API services, account setup, and simple credits"
     },
     {
       "id": 2,
@@ -36,14 +36,14 @@
     {
       "id": 5,
       "delay_days": 10,
-      "subject": "Text-to-Speech With Kokoro — 20+ Voices at $0.10/100 chars",
+      "subject": "Text-to-Speech With Kokoro — 20+ Voices at $0.005/100 chars",
       "template": "05-tts.html",
       "description": "Kokoro TTS API with voice samples and code examples"
     },
     {
       "id": 6,
       "delay_days": 14,
-      "subject": "Gemma4 26B — Multimodal Chat & Vision at $0.05/Request",
+      "subject": "Gemma4 26B — Multimodal Chat & Vision at $0.01/Request",
       "template": "06-gemma4.html",
       "description": "Gemma4 multimodal LLM for chat, vision, and reasoning"
     },
@@ -106,9 +106,9 @@
     {
       "id": 15,
       "delay_days": 55,
-      "subject": "$CUTEDSL Token — How Credits Work on Solana",
+      "subject": "CuteDSL Credits — Simple Ways to Pay",
       "template": "15-token-credits.html",
-      "description": "How $CUTEDSL token deposits, pricing, and credit system works"
+      "description": "How CuteDSL credits, card payments, $CUTEDSL deposits, and usage pricing work"
     },
     {
       "id": 16,

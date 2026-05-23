@@ -5,7 +5,7 @@ import Image from 'next/image';
 import { Wand2, ArrowLeft, ArrowRight, Calendar, Tag } from 'lucide-react';
 import { CodeBlock } from '@/lib/code-block';
 
-const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
+const IMG_BASE = '/images';
 const BAGS_CTA = `
 
 ---
@@ -411,12 +411,12 @@ That last point matters. We want CuteDSL to be the inference layer for AI agents
 Current service pricing in $CUTEDSL:
 
 | Service | Price (USD) | What you get |
-| zimage | $1.00 | One 1024x1024 CuteDSL-accelerated image |
-| chronos2 | $0.50 | One time series forecast |
+| zimage | $0.04 | One 1024x1024 CuteDSL-accelerated image |
+| chronos2 | $0.02 | One time series forecast |
 | flux_image | $0.04 | One Flux Schnell image (via fal.ai) |
-| tts | $0.10 | 100 characters of Kokoro TTS audio |
-| stt | $0.20 | 1 minute of speech-to-text |
-| gemma4 | $0.05 | One Gemma4 chat/vision request |
+| tts | $0.005 | 100 characters of Kokoro TTS audio |
+| stt | $0.02 | 1 minute of speech-to-text |
+| gemma4 | $0.01 | One Gemma4 chat/vision request |
 | ltx_video | $0.30 | One LTX 2.3 text-to-video |
 
 The $CUTEDSL amount per call floats with the token price. As the token appreciates, each token buys more compute. As it depreciates, you need more tokens. But ATH-locked pricing means your effective rate can only improve if you bought early.
@@ -433,7 +433,7 @@ Ready to try accelerated AI inference paid with crypto?
     date: '2026-04-04',
     tags: ['zimage', 'flux', 'solana', 'image-generation', 'tutorial'],
     image: `${IMG_BASE}/blog-generate-images-sol.webp`,
-    excerpt: 'A step-by-step guide to generating AI images using CuteDSL — connect a Solana wallet, deposit $CUTEDSL, and start creating. Two engines: Flux Schnell ($0.04) and Z-Image Turbo ($1.00).',
+    excerpt: 'A step-by-step guide to generating AI images using CuteDSL — connect a Solana wallet, deposit $CUTEDSL, and start creating. Two engines: Flux Schnell ($0.04) and Z-Image Turbo ($0.04).',
     content: `You can generate AI images through CuteDSL starting at **$0.04 per image**. No account creation, no email, no API key application. Just a Solana wallet and some $CUTEDSL tokens.
 
 This post walks through the entire flow and explains the two image generation engines available.
@@ -444,7 +444,7 @@ CuteDSL offers two image generation services:
 
 **Flux Schnell ($0.04/image)** — Our fast, affordable option. Powered by fal.ai's Flux Schnell model. 1024x1024 images in ~2 seconds. Great for prototyping, placeholder art, and bulk generation. This is a third-party proxy priced at market rate.
 
-**Z-Image Turbo ($1.00/image)** — Our flagship, CuteDSL-accelerated engine. Custom fused Triton kernels, NVFP4 quantization on RTX 5090, and the full CuteZImage pipeline. Higher quality, supports custom LoRAs, and every generation saves latent tensors for future [latent teleportation](/blog#latent-teleportation) optimization. Priced at ATH rate — early $CUTEDSL holders get this cheaper forever.
+**Z-Image Turbo ($0.04/image)** — Our flagship, CuteDSL-accelerated engine. Custom fused Triton kernels, NVFP4 quantization on RTX 5090, and the full CuteZImage pipeline. Higher quality, supports custom LoRAs, and every generation saves latent tensors for future [latent teleportation](/blog#latent-teleportation) optimization. Priced at ATH rate — early $CUTEDSL holders get this cheaper forever.
 
 ## Step 1: Get $CUTEDSL tokens
 
@@ -476,7 +476,7 @@ curl -X POST https://cutedsl.cc/api/service \\
     "prompt": "a cute fairy with pink wings in an enchanted forest"
   }'
 
-# Z-Image Turbo — CuteDSL accelerated ($1.00)
+# Z-Image Turbo — CuteDSL accelerated ($0.04)
 curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -500,7 +500,7 @@ The gallery stores three sizes per image (1024px original, 512px medium, 256px t
 
 Flux Schnell via fal.ai costs us roughly $0.02-0.03 per generation. We add a small margin and pass it through at market rate. There's no subscription, no minimum spend, no monthly commitment. Generate one image or ten thousand — same price per image.
 
-Z-Image at $1.00 reflects the cost of running CuteDSL's custom Triton kernels on our own RTX 5090 GPU infrastructure, plus the LoRA auto-selection, latent saving, and NSFW classification that runs on every generation. The ATH pricing means this rate only improves for early holders as the token appreciates.
+Z-Image at $0.04 reflects the cost of running CuteDSL's custom Triton kernels on our own RTX 5090 GPU infrastructure, plus the LoRA auto-selection, latent saving, and NSFW classification that runs on every generation. The ATH pricing means this rate only improves for early holders as the token appreciates.
 
 ## Use cases we're seeing
 
@@ -873,7 +873,7 @@ Total tool-wait time: ~25 seconds for 25 AI service calls. The agent spent more 
 
 ## The Kokoro TTS integration
 
-One underappreciated use case: agents that generate audio. A [Codex Infinity](https://codex-infinity.com) agent building a presentation app used CuteDSL's TTS service to auto-generate narration for each slide. At $0.10 per 100 characters and ~200ms latency, the agent generated 20 slide narrations in about 4 seconds total.
+One underappreciated use case: agents that generate audio. A [Codex Infinity](https://codex-infinity.com) agent building a presentation app used CuteDSL's TTS service to auto-generate narration for each slide. At $0.005 per 100 characters and ~200ms latency, the agent generated 20 slide narrations in about 4 seconds total.
 
 The agent didn't need to be taught how to use TTS — it discovered the CuteDSL API endpoint in its environment, read the docs, and decided narration would improve the presentation. This is the kind of emergent behavior you get when tools are fast enough that agents don't avoid using them.
 
@@ -1482,7 +1482,7 @@ We're experimenting with learned LoRA composition — training a small network t
     title: 'Z-Image Turbo: Ablation Gallery — Steps, Guidance, and Seed Sweeps',
     date: '2026-04-04',
     tags: ['zimage', 'ablation', 'gallery', 'image-generation', 'benchmarks'],
-    image: `${IMG_BASE}/blog-zimage-gallery.webp`,
+    image: `${IMG_BASE}/blog-image-gallery.webp`,
     excerpt: 'Visual ablation study across inference steps, guidance scales, and random seeds — showing how each parameter affects Z-Image Turbo output quality and style.',
     content: `One of the most common questions we get: "what settings should I use for Z-Image?" Instead of guessing, we ran a systematic ablation across the three most impactful parameters: inference steps, classifier-free guidance scale, and random seed.
 
@@ -1615,14 +1615,14 @@ The implementation gracefully falls back to separate projections when n_heads !=
 
 ## Try it
 
-Generate images via the CuteDSL API at [$1.00 per generation](https://cutedsl.cc/#api-docs). All generations use the full acceleration stack including fused QKV.`,
+Generate images via the CuteDSL API at [$0.04 per generation](https://cutedsl.cc/#api-docs). All generations use the full acceleration stack including fused QKV.`,
   },
   {
     slug: 'latent-teleportation-visual-results',
     title: 'Latent Teleportation: Visual Results and Quality Analysis',
     date: '2026-04-04',
     tags: ['latent-teleportation', 'diffusion', 'research', 'slerp', 'gallery'],
-    image: `${IMG_BASE}/blog-latent-teleport.webp`,
+    image: `${IMG_BASE}/blog-generate-images-sol.webp`,
     excerpt: 'We cached intermediate diffusion latents and used SLERP interpolation to skip denoising steps — reducing 20 steps to 5 with measurable quality tradeoffs.',
     content: `Latent Teleportation is our research technique for speeding up diffusion inference by caching and reusing intermediate latent states. Instead of denoising from pure noise every time, we "teleport" to a cached latent that's already partially denoised, then refine from there.
 
@@ -1732,7 +1732,7 @@ Parakeet supports word-level timestamp extraction — useful for subtitle genera
 
 ## Production deployment
 
-CuteDSL's STT service currently uses Gemma4-powered transcription proxied through text-generator.io at $0.20/minute. We're evaluating whether to bring Parakeet in-house for lower latency and cost. The tradeoff is:
+CuteDSL's STT service currently uses Gemma4-powered transcription proxied through text-generator.io at $0.02/minute. We're evaluating whether to bring Parakeet in-house for lower latency and cost. The tradeoff is:
 
 - **Gemma4 STT**: Higher accuracy on diverse accents, multilingual, no GPU needed on our side
 - **Parakeet**: Lower latency (89ms vs ~500ms), lower marginal cost, but English-focused
@@ -1751,7 +1751,7 @@ We're working on:
     title: 'The Complete $CUTEDSL Token Guide: Buy, Deposit, and Use AI Credits',
     date: '2026-04-04',
     tags: ['cutedsl', 'solana', 'token', 'credits', 'guide'],
-    image: `${IMG_BASE}/blog-token-guide.webp`,
+    image: `${IMG_BASE}/blog-why-solana-token.webp`,
     excerpt: 'Everything you need to know about acquiring $CUTEDSL tokens, depositing them for API credits, and understanding the pricing model.',
     content: `CuteDSL is powered exclusively by the **$CUTEDSL** token on Solana. This guide covers everything from buying tokens to using them for AI inference.
 
@@ -1791,13 +1791,13 @@ CuteDSL uses a dual pricing system:
 
 | Service | USD Price | What You Get |
 |---------|-----------|-------------|
-| Z-Image Turbo | $1.00/image | 1024x1024 text-to-image with fused Triton kernels |
-| Chronos-2 | $0.50/forecast | Time series forecasting with 27x acceleration |
-| Kokoro TTS | $0.10/100 chars | 20+ voices, WAV output |
-| Gemma4 Chat | $0.05/request | 26B multimodal LLM |
-| STT | $0.20/minute | Speech-to-text transcription |
-| Image Caption | $0.05/image | Automated image descriptions |
-| LoRA Training | $50.00/job | Custom model fine-tuning |
+| Z-Image Turbo | $0.04/image | 1024x1024 text-to-image with fused Triton kernels |
+| Chronos-2 | $0.02/forecast | Time series forecasting with 27x acceleration |
+| Kokoro TTS | $0.005/100 chars | 20+ voices, WAV output |
+| Gemma4 Chat | $0.01/request | 26B multimodal LLM |
+| STT | $0.02/minute | Speech-to-text transcription |
+| Image Caption | $0.01/image | Automated image descriptions |
+| LoRA Training | $10.00/job | Custom model fine-tuning |
 
 **Third-party proxies** (LTX Video, Flux Image) are priced at current market rate since we pay per-request to upstream providers.
 
@@ -2035,7 +2035,7 @@ This means:
 
 ## Pricing
 
-Chronos2 is a first-party service priced at the $CUTEDSL all-time high rate. If the token price goes up, your effective cost per forecast goes down permanently. Currently $0.50/forecast in USD equivalent.`,
+Chronos2 is a first-party service priced at the $CUTEDSL all-time high rate. If the token price goes up, your effective cost per forecast goes down permanently. Currently $0.02/forecast in USD equivalent.`,
   },
 ];
 
@@ -2069,7 +2069,7 @@ export default function BlogPage() {
             <a key={post.slug} href={`#${post.slug}`} className="block bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow overflow-hidden">
               {post.image && (
                 <div className="w-full h-48 relative">
-                  <Image src={post.image} alt={post.title} fill className="object-cover" />
+                  <Image src={post.image} alt={post.title} fill sizes="(min-width: 768px) 768px, calc(100vw - 48px)" className="object-cover" />
                 </div>
               )}
               <div className="p-8">
@@ -2095,7 +2095,7 @@ export default function BlogPage() {
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
               {post.image && (
                 <div className="w-full h-64 relative">
-                  <Image src={post.image} alt={post.title} fill className="object-cover" />
+                  <Image src={post.image} alt={post.title} fill sizes="(min-width: 768px) 768px, calc(100vw - 48px)" className="object-cover" />
                 </div>
               )}
               <div className="p-10">

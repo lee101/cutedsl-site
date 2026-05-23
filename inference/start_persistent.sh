@@ -32,7 +32,7 @@ setsid nohup env \
     TMPDIR=/nvme0n1-disk/tmp \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     IMAGE_API_SECRET=cutedsl2024 \
-    LOAD_CHRONOS=0 \
+    LOAD_CHRONOS="${LOAD_CHRONOS:-1}" \
     PRELOAD_MODELS=1 \
     ENABLE_NVFP4=0 \
     ZIMAGE_USE_CUTE=0 \
@@ -45,6 +45,7 @@ setsid nohup env \
     MAX_GPU_CONCURRENT=1 \
     LOW_PRIORITY_IDLE_SECONDS=5.0 \
     HF_HOME=/nvme0n1-disk/hf_cache \
+    CHRONOS_MODEL_PATH="${CHRONOS_MODEL_PATH:-amazon/chronos-2}" \
     MODEL_IDLE_TIMEOUT=1800 \
     CUTEZIMAGE_CPU_OFFLOAD=0 \
     CUTEZIMAGE_ENABLE_ATTENTION_SLICING=0 \

@@ -35,6 +35,16 @@ func TestMain(m *testing.M) {
 
 	devMode = true
 	frontendURL = "http://localhost:3000"
+	os.Setenv("ZIMAGE_PRICE_USD", "0.04")
+	os.Setenv("CHRONOS_PRICE_USD", "0.02")
+	os.Setenv("TTS_PRICE_USD_PER_100CHARS", "0.005")
+	os.Setenv("STT_PRICE_USD_PER_MINUTE", "0.02")
+	os.Setenv("GEMMA4_PRICE_USD", "0.01")
+	os.Setenv("CAPTION_PRICE_USD", "0.01")
+	os.Setenv("LORA_TRAINING_PRICE_USD", "10")
+	os.Setenv("LTX_VIDEO_PRICE_USD", "0.30")
+	os.Setenv("FLUX_IMAGE_PRICE_USD", "0.04")
+	os.Setenv("NSFW_DETECT_PRICE_USD", "0.001")
 	initServices()
 
 	// Find a free port
@@ -307,14 +317,20 @@ func TestPricing(t *testing.T) {
 
 	// Check that all expected services are present
 	services := map[string]bool{}
+	prices := map[string]float64{}
 	for _, p := range pricing {
 		pm := p.(map[string]interface{})
-		services[pm["service"].(string)] = true
+		service := pm["service"].(string)
+		services[service] = true
+		prices[service], _ = pm["price_usd"].(float64)
 	}
 	for _, expected := range []string{"zimage", "chronos2", "tts", "stt", "gemma4", "caption", "lora_training"} {
 		if !services[expected] {
 			t.Errorf("missing service in pricing: %s", expected)
 		}
+	}
+	if prices["zimage"] != 0.04 {
+		t.Fatalf("expected zimage price_usd 0.04, got %v", prices["zimage"])
 	}
 }
 

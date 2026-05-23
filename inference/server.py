@@ -34,6 +34,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from image_quality import bumpy_metrics, compact_prompt, detect_too_bumpy, retry_prompt
+from training_store import load_jobs, save_job, update_job, upload_training_artifacts
+from runpod_lora_manager import refresh_runpod_status, runpod_enabled, start_runpod_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cutedsl-inference")
@@ -54,6 +56,19 @@ DTYPE_MAP = {
     "float8_e4m3fn": getattr(torch, "float8_e4m3fn", torch.bfloat16),
 }
 DTYPE = DTYPE_MAP.get(DTYPE_STR, torch.bfloat16)
+
+
+def _chronos_device_dtype() -> tuple[str, torch.dtype]:
+    """Chronos2 is small enough to fall back to CPU when local CUDA is unhealthy."""
+    if DEVICE.startswith("cuda"):
+        try:
+            if torch.cuda.is_available():
+                return DEVICE, DTYPE
+        except Exception:
+            pass
+        logger.warning("Chronos2 CUDA unavailable; falling back to CPU float32")
+        return "cpu", torch.float32
+    return DEVICE, DTYPE
 
 # NVFP4 quantization (RTX 5090 Blackwell) - uses torchao NVFP4InferenceConfig
 # Block size is fixed at 16 in the NVFP4 spec (float4_e2m1fn_x2 + float8_e4m3fn scales)
@@ -563,13 +578,14 @@ def _load_chronos():
 
     logger.info("Loading Chronos2 from %s...", CHRONOS_MODEL_PATH)
     t0 = time.time()
+    chronos_device, chronos_dtype = _chronos_device_dtype()
 
     chronos_pipeline = CuteChronos2Pipeline.from_pretrained(
         CHRONOS_MODEL_PATH,
-        device=DEVICE,
-        dtype=DTYPE,
+        device=chronos_device,
+        dtype=chronos_dtype,
         use_cute=True,
-        compile_mode=CHRONOS_COMPILE_MODE,
+        compile_mode=CHRONOS_COMPILE_MODE if chronos_device.startswith("cuda") else None,
     )
 
     # Apply NVFP4 to model weights
@@ -581,7 +597,7 @@ def _load_chronos():
     # Warmup
     logger.info("Chronos2 warmup...")
     try:
-        dummy = torch.randn(1, 64, device=DEVICE)
+        dummy = torch.randn(1, 64, device=chronos_device)
         chronos_pipeline.predict(dummy, prediction_length=16)
         logger.info("Chronos2 warmup complete")
     except Exception as e:
@@ -1043,7 +1059,7 @@ def _detect_lora_format(path: str) -> str:
     """Detect if LoRA is zimage-native or sdxl-kohya format."""
     from safetensors import safe_open
     with safe_open(path, framework="pt") as sf:
-        keys = list(sf.keys())[:5]
+        keys = list(sf.keys())[:128]
         if any(k.startswith("diffusion_model") for k in keys):
             return "zimage-native"
         return "sdxl-kohya"
@@ -1066,6 +1082,12 @@ def _load_lora_onto_pipe(pipe, lora_url: str, lora_scale: float = 1.0):
     transformer = pipe.transformer
     _apply_lora_weights_direct(transformer, local_path, scale=lora_scale)
     _active_lora_cache.setdefault(id(transformer), []).append((local_path, lora_scale))
+
+
+def _effective_lora_scale(lora, requested_scale: float | None = None) -> float:
+    if requested_scale is not None and requested_scale != 1.0:
+        return requested_scale
+    return getattr(lora, "scale", 1.0) or 1.0
 
 
 def _reset_zimage_scheduler(pipe):
@@ -1140,9 +1162,9 @@ def _generate_image_once_sync(req: ZImageRequest):
         generator=generator,
     )
 
-    if lora and hasattr(text2img_pipe, "load_lora_weights"):
+    if lora:
         try:
-            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=req.lora_scale)
+            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=_effective_lora_scale(lora, req.lora_scale))
             try:
                 result = text2img_pipe(**pipe_kwargs)
             finally:
@@ -1308,7 +1330,8 @@ def list_loras():
         "count": len(loras),
         "loras": [
             {"id": l.id, "name": l.name, "trigger_word": l.trigger_word,
-             "template": l.template, "keywords": l.keywords}
+             "template": l.template, "scale": l.scale, "is_adult": l.is_adult,
+             "keywords": l.keywords}
             for l in loras
         ],
     }
@@ -1324,7 +1347,8 @@ def search_loras(q: str = Query(..., min_length=1), top_k: int = 5):
         "results": [
             {"id": r.lora.id, "name": r.lora.name, "score": round(r.score, 3),
              "match_type": r.match_type, "trigger_word": r.lora.trigger_word,
-             "template": r.lora.template}
+             "template": r.lora.template, "scale": r.lora.scale,
+             "is_adult": r.lora.is_adult}
             for r in results
         ],
     }
@@ -1680,9 +1704,9 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
     )
     _reset_zimage_scheduler(text2img_pipe)
 
-    if lora and hasattr(text2img_pipe, "load_lora_weights"):
+    if lora:
         try:
-            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=1.0)
+            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=_effective_lora_scale(lora))
             try:
                 with _nvtx_range("zimage.full.pipeline_lora"):
                     result = text2img_pipe(**pipe_kwargs)
@@ -2091,8 +2115,15 @@ async def style_transfer_bytes_and_upload_image(
 # LoRA Training API
 # ---------------------------------------------------------------------------
 
-# In-memory job store (swap for Redis/DB in production)
-training_jobs: dict[str, dict] = {}
+# In-memory cache backed by JSON status files so long-running jobs survive a
+# process restart and frontend polling can resume cleanly.
+training_jobs: dict[str, dict] = load_jobs()
+
+
+def _save_training_job(job_id: str) -> None:
+    job = training_jobs.get(job_id)
+    if job:
+        save_job(job)
 
 
 class LoRATrainRequest(BaseModel):
@@ -2117,20 +2148,23 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "loading_model"
         job["progress"] = 0.05
+        _save_training_job(job_id)
 
         from cutechronos.pipeline import CuteChronos2Pipeline
 
         # Load base model for fine-tuning
         base_model_path = os.getenv("CHRONOS_MODEL_PATH", "amazon/chronos-2")
+        train_device, train_dtype = _chronos_device_dtype()
         pipeline = CuteChronos2Pipeline.from_pretrained(
             base_model_path,
-            device=DEVICE,
-            dtype=DTYPE,
+            device=train_device,
+            dtype=train_dtype,
             use_cute=False,  # no custom kernels during training
         )
 
         job["status"] = "preparing_data"
         job["progress"] = 0.1
+        _save_training_job(job_id)
 
         # Prepare training data from provided values
         if not req.values or len(req.values) == 0:
@@ -2140,6 +2174,7 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "training"
         job["progress"] = 0.15
+        _save_training_job(job_id)
 
         # Apply LoRA adapters
         try:
@@ -2170,7 +2205,7 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
 
         for step in range(total_steps):
             idx = step % len(train_tensors)
-            series = train_tensors[idx].to(DEVICE, dtype=DTYPE)
+            series = train_tensors[idx].to(train_device, dtype=train_dtype)
 
             future_len = PATCH * NUM_FUTURE_PATCHES
             if len(series) < future_len + 32:
@@ -2194,26 +2229,34 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
             job["progress"] = 0.15 + 0.8 * (step / total_steps)
             if step % 5 == 0:
                 job["loss"] = float(loss.item())
+                _save_training_job(job_id)
                 logger.info("Training job %s: step %d/%d loss=%.4f", job_id, step, total_steps, loss.item())
 
         # Save the trained LoRA adapter
-        output_dir = os.path.join("trained_loras", job_id)
+        output_dir = os.path.join(TRAINED_LORA_ROOT, job_id)
         os.makedirs(output_dir, exist_ok=True)
         pipeline.model.save_pretrained(output_dir)
 
         job["status"] = "completed"
         job["progress"] = 1.0
         job["output_path"] = output_dir
+        try:
+            job.update(upload_training_artifacts(job_id, output_dir))
+        except Exception as upload_err:
+            logger.warning("Training job %s artifact upload failed: %s", job_id, upload_err)
+            job["artifact_upload_error"] = str(upload_err)
+        _save_training_job(job_id)
         logger.info("Training job %s completed: %s", job_id, output_dir)
 
     except Exception as e:
         logger.error("Training job %s failed: %s", job_id, e)
         job["status"] = "failed"
         job["error"] = str(e)
+        _save_training_job(job_id)
 
 
-DATASET_ROOT = os.getenv("LORA_DATASET_ROOT", "lora_datasets")
-TRAINED_LORA_ROOT = os.getenv("TRAINED_LORA_ROOT", "trained_loras")
+DATASET_ROOT = os.getenv("LORA_DATASET_ROOT", os.path.join(os.path.dirname(__file__), "lora_datasets"))
+TRAINED_LORA_ROOT = os.getenv("TRAINED_LORA_ROOT", os.path.join(os.path.dirname(__file__), "trained_loras"))
 
 
 def _dataset_dir(dataset_name: str) -> str:
@@ -2242,6 +2285,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "loading_dataset"
         job["progress"] = 0.02
+        _save_training_job(job_id)
 
         ds_dir = _dataset_dir(req.dataset_name)
         if not os.path.isdir(ds_dir):
@@ -2266,6 +2310,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         job["dataset_size"] = len(image_paths)
         job["status"] = "loading_model"
         job["progress"] = 0.05
+        _save_training_job(job_id)
 
         # Load a VANILLA zimage pipeline for training — NOT the cute-accelerated
         # one. CuteZImageTransformer uses q_proj/k_proj/v_proj (Qwen-style) and
@@ -2295,6 +2340,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "preparing_lora"
         job["progress"] = 0.1
+        _save_training_job(job_id)
 
         try:
             from peft import LoraConfig, get_peft_model
@@ -2366,6 +2412,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         total_steps = min(req.num_steps, 5000)
         job["status"] = "training"
         job["progress"] = 0.15
+        _save_training_job(job_id)
 
         successful_steps = 0
         last_loss = None
@@ -2403,6 +2450,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
                 job["progress"] = 0.15 + 0.8 * (step / total_steps)
                 if step % 5 == 0 or step == total_steps - 1:
                     job["loss"] = last_loss
+                    _save_training_job(job_id)
                     logger.info("Z-Image train %s: step %d/%d loss=%.4f", job_id, step, total_steps, last_loss)
 
                 del loss, pred, out, x_t, noise, target, x_in, x_list
@@ -2435,6 +2483,12 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         job["successful_steps"] = successful_steps
         if last_loss is not None:
             job["loss"] = last_loss
+        try:
+            job.update(upload_training_artifacts(job_id, output_dir))
+        except Exception as upload_err:
+            logger.warning("Training job %s artifact upload failed: %s", job_id, upload_err)
+            job["artifact_upload_error"] = str(upload_err)
+        _save_training_job(job_id)
         logger.info("Training job %s completed: %d/%d steps succeeded -> %s",
                     job_id, successful_steps, total_steps, output_dir)
 
@@ -2442,6 +2496,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         logger.error("Training job %s failed: %s", job_id, e)
         job["status"] = "failed"
         job["error"] = str(e)
+        _save_training_job(job_id)
 
 
 @app.post("/train/upload_dataset")
@@ -2497,6 +2552,38 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         raise HTTPException(400, "model must be 'zimage' or 'chronos2'")
     if not req.image_urls:
         raise HTTPException(400, "image_urls must be non-empty")
+
+    if runpod_enabled():
+        if req.model != "zimage":
+            raise HTTPException(400, "RunPod remote training currently supports zimage only")
+        job_id = str(uuid.uuid4())
+        payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+        update_job(
+            training_jobs,
+            job_id,
+            job_id=job_id,
+            model=req.model,
+            dataset_name=req.dataset_name,
+            status="queued",
+            progress=0.0,
+            created_at=time.time(),
+            image_count=len(req.image_urls),
+            backend="runpod",
+        )
+        try:
+            job = start_runpod_training(training_jobs, job_id, payload)
+        except Exception as e:
+            update_job(training_jobs, job_id, status="failed", error=str(e), progress=1.0)
+            raise HTTPException(502, f"RunPod training backend unavailable: {e}")
+        return {
+            "job_id": job_id,
+            "model": req.model,
+            "dataset_name": req.dataset_name,
+            "image_count": len(req.image_urls),
+            "status": job.get("status", "starting"),
+            "backend": "runpod",
+            "runpod_cost_per_hr": job.get("runpod_cost_per_hr"),
+        }
 
     try:
         ds_dir = _dataset_dir(req.dataset_name)
@@ -2556,6 +2643,7 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         "created_at": time.time(),
         "image_count": downloaded,
     }
+    _save_training_job(job_id)
 
     if req.model == "chronos2":
         thread = threading.Thread(target=_run_chronos2_training, args=(job_id, train_req), daemon=True)
@@ -2602,6 +2690,7 @@ def start_training(req: LoRATrainRequest):
         "progress": 0.0,
         "created_at": time.time(),
     }
+    _save_training_job(job_id)
 
     if req.model == "chronos2":
         thread = threading.Thread(target=_run_chronos2_training, args=(job_id, req), daemon=True)
@@ -2624,6 +2713,12 @@ def get_training_status(job_id: str):
     job = training_jobs.get(job_id)
     if not job:
         raise HTTPException(404, "training job not found")
+    if job.get("backend") == "runpod" and job.get("status") not in {"completed", "failed"}:
+        try:
+            job = refresh_runpod_status(training_jobs, job_id) or job
+        except Exception as e:
+            job["status_refresh_error"] = str(e)
+            _save_training_job(job_id)
     return job
 
 

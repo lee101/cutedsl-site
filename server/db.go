@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +17,29 @@ import (
 type DB struct {
 	conn *sql.DB
 	mu   sync.RWMutex
+}
+
+const userSelectColumns = `id, wallet_address, email, COALESCE(password_hash, ''), api_key, credits, unlimited_api, total_deposited,
+	COALESCE(stripe_customer_id, ''), COALESCE(stripe_payment_method_id, ''),
+	COALESCE(stripe_subscription_id, ''), COALESCE(stripe_price_id, ''),
+	COALESCE(subscription_status, ''), COALESCE(subscription_plan, ''),
+	COALESCE(subscription_current_period_end, '1970-01-01'::timestamptz),
+	autotopup_enabled, autotopup_threshold_usd, autotopup_amount_usd,
+	COALESCE(autotopup_last_at, '1970-01-01'::timestamptz),
+	drip_step, drip_started_at, created_at, updated_at`
+
+func scanUser(row interface {
+	Scan(dest ...interface{}) error
+}, user *User) error {
+	return row.Scan(
+		&user.ID, &user.WalletAddress, &user.Email, &user.PasswordHash, &user.APIKey, &user.Credits,
+		&user.UnlimitedAPI, &user.TotalDeposited, &user.StripeCustomerID,
+		&user.StripePaymentMethodID, &user.StripeSubscriptionID, &user.StripePriceID,
+		&user.SubscriptionStatus, &user.SubscriptionPlan, &user.SubscriptionPeriodEnd,
+		&user.AutotopupEnabled,
+		&user.AutotopupThresholdUSD, &user.AutotopupAmountUSD, &user.AutotopupLastAt,
+		&user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt,
+	)
 }
 
 // NewDB opens the PostgreSQL database and runs migrations
@@ -46,6 +72,7 @@ func (db *DB) migrate() error {
 		wallet_address TEXT UNIQUE NOT NULL,
 		email TEXT DEFAULT '',
 		api_key TEXT UNIQUE NOT NULL,
+		password_hash TEXT DEFAULT '',
 		credits DOUBLE PRECISION DEFAULT 0,
 		unlimited_api BOOLEAN DEFAULT FALSE,
 		total_deposited DOUBLE PRECISION DEFAULT 0,
@@ -134,6 +161,58 @@ func (db *DB) migrate() error {
 	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS latent_path TEXT DEFAULT '';
 
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS unlimited_api BOOLEAN DEFAULT FALSE;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT DEFAULT '';
+
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_payment_method_id TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_price_id TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_status TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_plan TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_current_period_end TIMESTAMPTZ DEFAULT NULL;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS autotopup_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS autotopup_threshold_usd DOUBLE PRECISION DEFAULT 5;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS autotopup_amount_usd DOUBLE PRECISION DEFAULT 25;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS autotopup_last_at TIMESTAMPTZ DEFAULT NULL;
+	CREATE INDEX IF NOT EXISTS idx_users_stripe_customer ON users(stripe_customer_id) WHERE stripe_customer_id != '';
+	CREATE INDEX IF NOT EXISTS idx_users_stripe_subscription ON users(stripe_subscription_id) WHERE stripe_subscription_id != '';
+
+	CREATE TABLE IF NOT EXISTS password_reset_tokens (
+		token_hash TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		expires_at TIMESTAMPTZ NOT NULL,
+		used_at TIMESTAMPTZ DEFAULT NULL,
+		created_at TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id, created_at DESC);
+
+	CREATE TABLE IF NOT EXISTS stripe_checkout_sessions (
+		session_id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		stripe_customer_id TEXT DEFAULT '',
+		payment_intent_id TEXT DEFAULT '',
+		usd_amount DOUBLE PRECISION NOT NULL,
+		cute_amount DOUBLE PRECISION NOT NULL,
+		credited BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_stripe_checkout_user ON stripe_checkout_sessions(user_id);
+	CREATE INDEX IF NOT EXISTS idx_stripe_checkout_pi ON stripe_checkout_sessions(payment_intent_id);
+
+	CREATE TABLE IF NOT EXISTS autotopup_charges (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		usd_amount DOUBLE PRECISION NOT NULL,
+		cute_amount DOUBLE PRECISION NOT NULL,
+		stripe_payment_intent_id TEXT DEFAULT '',
+		status TEXT NOT NULL,
+		error TEXT DEFAULT '',
+		created_at TIMESTAMPTZ DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_autotopup_user_created ON autotopup_charges(user_id, created_at DESC);
 
 	-- Full-text search via pg_trgm (fast ILIKE with GIN index)
 	CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -150,19 +229,18 @@ func (db *DB) GetOrCreateUser(walletAddress string) (*User, bool, error) {
 	defer db.mu.Unlock()
 
 	var user User
-	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
-		walletAddress,
-	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.UnlimitedAPI, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE wallet_address = $1", walletAddress), &user)
 
 	if err == sql.ErrNoRows {
 		user = User{
-			ID:            newUUID(),
-			WalletAddress: walletAddress,
-			APIKey:        "cutedsl_" + newUUID()[:24],
-			Credits:       0,
-			CreatedAt:     time.Now(),
-			UpdatedAt:     time.Now(),
+			ID:                    newUUID(),
+			WalletAddress:         walletAddress,
+			APIKey:                "cutedsl_" + newUUID()[:24],
+			Credits:               0,
+			AutotopupThresholdUSD: 5,
+			AutotopupAmountUSD:    25,
+			CreatedAt:             time.Now(),
+			UpdatedAt:             time.Now(),
 		}
 		_, err = db.conn.Exec(
 			"INSERT INTO users (id, wallet_address, email, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
@@ -180,16 +258,136 @@ func (db *DB) GetOrCreateUser(walletAddress string) (*User, bool, error) {
 	return &user, false, nil
 }
 
+func emailWalletAddress(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return "email:" + hex.EncodeToString(sum[:])[:40]
+}
+
+// GetUserByEmail returns a user by email.
+func (db *DB) GetUserByEmail(email string) (*User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil, fmt.Errorf("email required")
+	}
+
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var user User
+	err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE lower(email) = lower($1)", email), &user)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// GetOrCreateUserByEmail finds or creates a user keyed by email.
+func (db *DB) GetOrCreateUserByEmail(email string) (*User, bool, error) {
+	return db.GetOrCreateUserByEmailWithPassword(email, "")
+}
+
+// GetOrCreateUserByEmailWithPassword finds or creates a user keyed by email and optionally stores a password hash.
+func (db *DB) GetOrCreateUserByEmailWithPassword(email, passwordHash string) (*User, bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil, false, fmt.Errorf("email required")
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	var user User
+	err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE lower(email) = lower($1)", email), &user)
+	if err == nil {
+		return &user, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, false, fmt.Errorf("query email user: %w", err)
+	}
+	user = User{
+		ID:                    newUUID(),
+		WalletAddress:         emailWalletAddress(email),
+		Email:                 email,
+		PasswordHash:          passwordHash,
+		APIKey:                "cutedsl_" + newUUID()[:24],
+		Credits:               0,
+		AutotopupThresholdUSD: 5,
+		AutotopupAmountUSD:    25,
+		CreatedAt:             time.Now(),
+		UpdatedAt:             time.Now(),
+	}
+	_, err = db.conn.Exec(
+		"INSERT INTO users (id, wallet_address, email, password_hash, api_key, credits, total_deposited, drip_step, drip_started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+		user.ID, user.WalletAddress, user.Email, user.PasswordHash, user.APIKey, user.Credits, user.TotalDeposited, user.DripStep, user.DripStartedAt, user.CreatedAt, user.UpdatedAt,
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("create email user: %w", err)
+	}
+	return &user, true, nil
+}
+
+// SetUserPasswordHash updates a user's password hash.
+func (db *DB) SetUserPasswordHash(userID, passwordHash string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2", passwordHash, userID)
+	return err
+}
+
+// CreatePasswordResetToken records a password reset token by hash.
+func (db *DB) CreatePasswordResetToken(userID, tokenHash string, expiresAt time.Time) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		`INSERT INTO password_reset_tokens (token_hash, user_id, expires_at, created_at)
+		 VALUES ($1, $2, $3, NOW())`,
+		tokenHash, userID, expiresAt,
+	)
+	return err
+}
+
+// ConsumePasswordResetToken marks a valid reset token used and returns its user.
+func (db *DB) ConsumePasswordResetToken(tokenHash string) (*User, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var userID string
+	err = tx.QueryRow(
+		`UPDATE password_reset_tokens
+		 SET used_at = NOW()
+		 WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+		 RETURNING user_id`,
+		tokenHash,
+	).Scan(&userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var user User
+	if err := scanUser(tx.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", userID), &user); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 // GetUserByWallet returns a user by wallet address
 func (db *DB) GetUserByWallet(walletAddress string) (*User, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 
 	var user User
-	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE wallet_address = $1",
-		walletAddress,
-	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.UnlimitedAPI, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE wallet_address = $1", walletAddress), &user)
 	if err != nil {
 		return nil, err
 	}
@@ -202,10 +400,20 @@ func (db *DB) GetUserByAPIKey(apiKey string) (*User, error) {
 	defer db.mu.RUnlock()
 
 	var user User
-	err := db.conn.QueryRow(
-		"SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at FROM users WHERE api_key = $1",
-		apiKey,
-	).Scan(&user.ID, &user.WalletAddress, &user.Email, &user.APIKey, &user.Credits, &user.UnlimitedAPI, &user.TotalDeposited, &user.DripStep, &user.DripStartedAt, &user.CreatedAt, &user.UpdatedAt)
+	err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE api_key = $1", apiKey), &user)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// GetUserByID returns a user by ID.
+func (db *DB) GetUserByID(userID string) (*User, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var user User
+	err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", userID), &user)
 	if err != nil {
 		return nil, err
 	}
@@ -226,6 +434,192 @@ func (db *DB) AddUserCredits(userID string, amount float64) (float64, error) {
 		return 0, fmt.Errorf("add credits: %w", err)
 	}
 	return newBalance, nil
+}
+
+// AddPurchasedCredits adds purchased credits and increases lifetime deposits.
+func (db *DB) AddPurchasedCredits(userID string, cuteAmount float64) (float64, error) {
+	return db.AddUserCredits(userID, cuteAmount)
+}
+
+// SetStripeCustomerID stores a Stripe customer ID for a user.
+func (db *DB) SetStripeCustomerID(userID, customerID string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		"UPDATE users SET stripe_customer_id = $1, updated_at = NOW() WHERE id = $2",
+		customerID, userID,
+	)
+	return err
+}
+
+// SetStripePaymentMethodID stores the default Stripe payment method for auto-top-up.
+func (db *DB) SetStripePaymentMethodID(userID, paymentMethodID string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		"UPDATE users SET stripe_payment_method_id = $1, updated_at = NOW() WHERE id = $2",
+		paymentMethodID, userID,
+	)
+	return err
+}
+
+// UpdateStripeSubscription stores subscription state and mirrors active access
+// to unlimited_api for the service billing path.
+func (db *DB) UpdateStripeSubscription(userID, customerID, subscriptionID, priceID, status, plan string, periodEnd time.Time) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	active := stripeSubscriptionIsActive(status)
+	_, err := db.conn.Exec(
+		`UPDATE users
+		 SET stripe_customer_id = COALESCE(NULLIF($1, ''), stripe_customer_id),
+		     stripe_subscription_id = $2,
+		     stripe_price_id = $3,
+		     subscription_status = $4,
+		     subscription_plan = $5,
+		     subscription_current_period_end = $6,
+		     unlimited_api = $7,
+		     updated_at = NOW()
+		 WHERE id = $8`,
+		customerID, subscriptionID, priceID, status, plan, periodEnd, active, userID,
+	)
+	return err
+}
+
+// UpdateStripeSubscriptionBySubscriptionID updates subscription state from
+// asynchronous Stripe subscription webhooks.
+func (db *DB) UpdateStripeSubscriptionBySubscriptionID(subscriptionID, customerID, priceID, status, plan string, periodEnd time.Time) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	active := stripeSubscriptionIsActive(status)
+	_, err := db.conn.Exec(
+		`UPDATE users
+		 SET stripe_customer_id = COALESCE(NULLIF($1, ''), stripe_customer_id),
+		     stripe_price_id = $2,
+		     subscription_status = $3,
+		     subscription_plan = $4,
+		     subscription_current_period_end = $5,
+		     unlimited_api = $6,
+		     updated_at = NOW()
+		 WHERE stripe_subscription_id = $7 OR (stripe_customer_id = $1 AND $1 != '')`,
+		customerID, priceID, status, plan, periodEnd, active, subscriptionID,
+	)
+	return err
+}
+
+// UpdateAutotopupSettings updates Stripe auto-top-up preferences.
+func (db *DB) UpdateAutotopupSettings(userID string, enabled bool, thresholdUSD, amountUSD float64) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		`UPDATE users
+		 SET autotopup_enabled = $1,
+		     autotopup_threshold_usd = $2,
+		     autotopup_amount_usd = $3,
+		     updated_at = NOW()
+		 WHERE id = $4`,
+		enabled, thresholdUSD, amountUSD, userID,
+	)
+	return err
+}
+
+// SetAutotopupLastAt records the last successful auto-top-up time.
+func (db *DB) SetAutotopupLastAt(userID string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec("UPDATE users SET autotopup_last_at = NOW(), updated_at = NOW() WHERE id = $1", userID)
+	return err
+}
+
+// LastAutotopupCharge returns the latest auto-top-up charge for debounce checks.
+func (db *DB) LastAutotopupCharge(userID string) (status string, createdAt time.Time, ok bool, err error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	err = db.conn.QueryRow(
+		`SELECT status, created_at FROM autotopup_charges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+		userID,
+	).Scan(&status, &createdAt)
+	if err == sql.ErrNoRows {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	return status, createdAt, true, nil
+}
+
+// LogAutotopupCharge records a Stripe auto-top-up attempt.
+func (db *DB) LogAutotopupCharge(userID string, usdAmount, cuteAmount float64, paymentIntentID, status, errMsg string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		`INSERT INTO autotopup_charges (id, user_id, usd_amount, cute_amount, stripe_payment_intent_id, status, error, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+		newUUID(), userID, usdAmount, cuteAmount, paymentIntentID, status, errMsg,
+	)
+	return err
+}
+
+// CreditStripeCheckout idempotently credits a completed Stripe Checkout session.
+func (db *DB) CreditStripeCheckout(userID, stripeCustomerID, sessionID, paymentIntentID string, usdAmount, cuteAmount float64) (bool, float64, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	defer tx.Rollback()
+
+	var inserted string
+	err = tx.QueryRow(
+		`INSERT INTO stripe_checkout_sessions
+		 (session_id, user_id, stripe_customer_id, payment_intent_id, usd_amount, cute_amount, credited, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW())
+		 ON CONFLICT (session_id) DO NOTHING
+		 RETURNING session_id`,
+		sessionID, userID, stripeCustomerID, paymentIntentID, usdAmount, cuteAmount,
+	).Scan(&inserted)
+	if err == sql.ErrNoRows {
+		if err := tx.Commit(); err != nil {
+			return false, 0, err
+		}
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, err
+	}
+
+	var newBalance float64
+	err = tx.QueryRow(
+		"UPDATE users SET credits = credits + $1, total_deposited = total_deposited + $1, updated_at = NOW(), stripe_customer_id = COALESCE(NULLIF($2, ''), stripe_customer_id) WHERE id = $3 RETURNING credits",
+		cuteAmount, stripeCustomerID, userID,
+	).Scan(&newBalance)
+	if err != nil {
+		return false, 0, err
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO billing_events (id, user_id, event_type, amount, cute_amount, usd_amount, description, credits_after, created_at)
+		 VALUES ($1, $2, 'stripe_deposit', $3, $3, $4, $5, $6, NOW())`,
+		newUUID(), userID, cuteAmount, usdAmount,
+		fmt.Sprintf("Stripe credit purchase ($%.2f)", usdAmount), newBalance,
+	)
+	if err != nil {
+		return false, 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	return true, newBalance, nil
 }
 
 // DeductUserCredits deducts credits from a user's balance
@@ -483,7 +877,7 @@ func (db *DB) ListDripEligibleUsers() ([]User, error) {
 	defer db.mu.RUnlock()
 
 	rows, err := db.conn.Query(
-		`SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at
+		`SELECT ` + userSelectColumns + `
 		 FROM users WHERE email != '' AND drip_step < 20 AND drip_started_at > '1970-01-01'`,
 	)
 	if err != nil {
@@ -494,7 +888,7 @@ func (db *DB) ListDripEligibleUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.UnlimitedAPI, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := scanUser(rows, &u); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -508,7 +902,7 @@ func (db *DB) ListLowCreditUsers() ([]User, error) {
 	defer db.mu.RUnlock()
 
 	rows, err := db.conn.Query(
-		`SELECT id, wallet_address, email, api_key, credits, unlimited_api, total_deposited, drip_step, drip_started_at, created_at, updated_at
+		`SELECT ` + userSelectColumns + `
 		 FROM users WHERE email != '' AND credits <= 0 AND total_deposited > 0`,
 	)
 	if err != nil {
@@ -519,7 +913,7 @@ func (db *DB) ListLowCreditUsers() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.WalletAddress, &u.Email, &u.APIKey, &u.Credits, &u.UnlimitedAPI, &u.TotalDeposited, &u.DripStep, &u.DripStartedAt, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := scanUser(rows, &u); err != nil {
 			return nil, err
 		}
 		users = append(users, u)

@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import time
+import argparse
 from pathlib import Path
 
 ROUTES = [
@@ -42,7 +43,37 @@ def slug(route: str) -> str:
     return s
 
 
-def run_lighthouse(url: str, out_json: Path) -> dict | None:
+def discover_chrome_path() -> str | None:
+    """Find a local Chrome executable, preferring Playwright's pinned Chromium."""
+    if os.environ.get("CHROME_PATH"):
+        return os.environ["CHROME_PATH"]
+
+    repo = Path(__file__).parent.parent
+    candidates = [
+        ["node", "-e", "const {chromium}=require('./frontend/node_modules/playwright'); console.log(chromium.executablePath())"],
+        ["node", "-e", "const {chromium}=require('./frontend/node_modules/@playwright/test'); console.log(chromium.executablePath())"],
+    ]
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, cwd=repo, check=True, capture_output=True, text=True, timeout=10)
+            path = result.stdout.strip()
+            if path and Path(path).exists():
+                return path
+        except Exception:
+            pass
+
+    for name in ("chromium", "chromium-browser", "google-chrome", "chrome"):
+        try:
+            result = subprocess.run(["which", name], check=True, capture_output=True, text=True, timeout=5)
+            path = result.stdout.strip()
+            if path:
+                return path
+        except Exception:
+            pass
+    return None
+
+
+def run_lighthouse(url: str, out_json: Path, chrome_path: str | None) -> dict | None:
     cmd = [
         "npx", "--yes", "lighthouse",
         url,
@@ -52,8 +83,11 @@ def run_lighthouse(url: str, out_json: Path) -> dict | None:
         "--quiet",
         "--only-categories=performance,seo,accessibility,best-practices",
     ]
+    env = os.environ.copy()
+    if chrome_path:
+        env["CHROME_PATH"] = chrome_path
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120, env=env)
         with open(out_json) as f:
             return json.load(f)
     except subprocess.TimeoutExpired:
@@ -99,19 +133,30 @@ def extract_metrics(data: dict) -> dict:
 
 
 def main():
-    base = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "https://cutedsl.cc"
+    parser = argparse.ArgumentParser(description="Run Lighthouse on CuteDSL routes.")
+    parser.add_argument("base", nargs="?", default="https://cutedsl.cc")
+    parser.add_argument("--routes", nargs="+", default=ROUTES, help="Routes to audit, e.g. --routes / /account /docs")
+    args = parser.parse_args()
+
+    base = args.base.rstrip("/")
+    routes = args.routes
+    chrome_path = discover_chrome_path()
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_dir = Path(__file__).parent.parent / "screenshots" / ts / "lighthouse"
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[lighthouse] base={base} out={out_dir}")
+    if chrome_path:
+        print(f"[lighthouse] chrome={chrome_path}")
+    else:
+        print("[lighthouse] chrome=not found; set CHROME_PATH if Lighthouse fails")
 
     rows = []
-    for route in ROUTES:
+    for route in routes:
         url = base + route
         out_json = out_dir / f"{slug(route)}.json"
         print(f"  auditing {route} ...")
         t0 = time.time()
-        data = run_lighthouse(url, out_json)
+        data = run_lighthouse(url, out_json, chrome_path)
         dt = time.time() - t0
         if data:
             m = extract_metrics(data)

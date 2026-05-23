@@ -22,17 +22,29 @@ const (
 
 // User represents a platform user identified by their Solana wallet
 type User struct {
-	ID             string    `json:"id"`
-	WalletAddress  string    `json:"wallet_address"`
-	Email          string    `json:"email,omitempty"`
-	APIKey         string    `json:"api_key"`
-	Credits        float64   `json:"credits"` // Balance in $CUTE
-	UnlimitedAPI   bool      `json:"unlimited_api"`
-	TotalDeposited float64   `json:"total_deposited"`
-	DripStep       int       `json:"drip_step"`       // Last sent drip email step (0 = none)
-	DripStartedAt  time.Time `json:"drip_started_at"` // When drip campaign started
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID                    string    `json:"id"`
+	WalletAddress         string    `json:"wallet_address"`
+	Email                 string    `json:"email,omitempty"`
+	PasswordHash          string    `json:"-"`
+	APIKey                string    `json:"api_key"`
+	Credits               float64   `json:"credits"` // Balance in $CUTE
+	UnlimitedAPI          bool      `json:"unlimited_api"`
+	TotalDeposited        float64   `json:"total_deposited"`
+	StripeCustomerID      string    `json:"stripe_customer_id,omitempty"`
+	StripePaymentMethodID string    `json:"stripe_payment_method_id,omitempty"`
+	StripeSubscriptionID  string    `json:"stripe_subscription_id,omitempty"`
+	StripePriceID         string    `json:"stripe_price_id,omitempty"`
+	SubscriptionStatus    string    `json:"subscription_status,omitempty"`
+	SubscriptionPlan      string    `json:"subscription_plan,omitempty"`
+	SubscriptionPeriodEnd time.Time `json:"subscription_current_period_end,omitempty"`
+	AutotopupEnabled      bool      `json:"autotopup_enabled"`
+	AutotopupThresholdUSD float64   `json:"autotopup_threshold_usd"`
+	AutotopupAmountUSD    float64   `json:"autotopup_amount_usd"`
+	AutotopupLastAt       time.Time `json:"autotopup_last_at,omitempty"`
+	DripStep              int       `json:"drip_step"`       // Last sent drip email step (0 = none)
+	DripStartedAt         time.Time `json:"drip_started_at"` // When drip campaign started
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 // BillingEvent records credit additions and deductions
@@ -167,9 +179,18 @@ type ImageSearchResult struct {
 
 // WalletBalanceResponse is returned when checking balance
 type WalletBalanceResponse struct {
-	WalletAddress  string  `json:"wallet_address"`
-	Credits        float64 `json:"credits"`     // $CUTE balance
-	CreditsUSD     float64 `json:"credits_usd"` // USD equivalent
-	CutePrice      float64 `json:"cute_price_usd"`
-	TotalDeposited float64 `json:"total_deposited"`
+	WalletAddress         string  `json:"wallet_address"`
+	Credits               float64 `json:"credits"`     // $CUTE balance
+	CreditsUSD            float64 `json:"credits_usd"` // USD equivalent
+	CutePrice             float64 `json:"cute_price_usd"`
+	TotalDeposited        float64 `json:"total_deposited"`
+	StripeCustomerID      string  `json:"stripe_customer_id,omitempty"`
+	AutotopupEnabled      bool    `json:"autotopup_enabled"`
+	AutotopupThresholdUSD float64 `json:"autotopup_threshold_usd"`
+	AutotopupAmountUSD    float64 `json:"autotopup_amount_usd"`
+	HasPaymentMethod      bool    `json:"has_payment_method"`
+	UnlimitedAPI          bool    `json:"unlimited_api"`
+	SubscriptionStatus    string  `json:"subscription_status,omitempty"`
+	SubscriptionPlan      string  `json:"subscription_plan,omitempty"`
+	StripePriceID         string  `json:"stripe_price_id,omitempty"`
 }

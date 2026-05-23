@@ -15,16 +15,16 @@ import (
 
 // Service pricing in USD (converted to $CUTE at current rate)
 var servicePricesUSD = map[string]float64{
-	"zimage":        1.00, // per generation
-	"chronos2":      0.50, // per forecast
-	"tts":           0.10, // per 100 chars
-	"stt":           0.20, // per minute
-	"gemma4":        0.05, // per request
-	"caption":       0.05, // per image
-	"lora_training": 50.00,
-	"ltx_video":     0.30, // per ~6s 1080p video via fal.ai
-	"flux_image":    0.04, // per image via fal.ai or netwrck
-	"nsfw_detect":   0.01, // per image classification
+	"zimage":        0.04,  // per generation
+	"chronos2":      0.02,  // per forecast
+	"tts":           0.005, // per 100 chars
+	"stt":           0.02,  // per minute
+	"gemma4":        0.01,  // per request
+	"caption":       0.01,  // per image
+	"lora_training": 10.00,
+	"ltx_video":     0.30,  // per ~6s 1080p video via fal.ai
+	"flux_image":    0.04,  // per image via fal.ai or netwrck
+	"nsfw_detect":   0.001, // per image classification
 }
 
 // First-party services run on our hardware — priced at ATH rate to reward early holders.
@@ -82,6 +82,7 @@ func initServices() {
 		"lora_training": "LORA_TRAINING_PRICE_USD",
 		"ltx_video":     "LTX_VIDEO_PRICE_USD",
 		"flux_image":    "FLUX_IMAGE_PRICE_USD",
+		"nsfw_detect":   "NSFW_DETECT_PRICE_USD",
 	}
 	for svc, envKey := range envPriceMap {
 		if p := os.Getenv(envKey); p != "" {
@@ -137,10 +138,7 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 
 	var pricing []ServicePricing
 	for service, usdPrice := range servicePricesUSD {
-		cuteCost := float64(0)
-		if cutePrice > 0 {
-			cuteCost = usdPrice / cutePrice
-		}
+		cuteCost := getServicePriceCUTE(service)
 		pricing = append(pricing, ServicePricing{
 			Service:   service,
 			PriceUSD:  usdPrice,
@@ -290,6 +288,10 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		if jerr := json.Unmarshal(result, &r); jerr == nil && r.JobID != "" {
 			go settleLoraTrainingJob(user.ID, r.JobID, cuteCost, cutePrice)
 		}
+	}
+
+	if !user.UnlimitedAPI {
+		maybeTriggerAutoTopup(user.ID)
 	}
 
 	// Return backend response with billing info
@@ -684,11 +686,20 @@ func handleGetBalance(ctx *fasthttp.RequestCtx) {
 
 	cutePrice := getCUTEPriceUSD()
 	jsonResponse(ctx, 200, WalletBalanceResponse{
-		WalletAddress:  user.WalletAddress,
-		Credits:        user.Credits,
-		CreditsUSD:     user.Credits * cutePrice,
-		CutePrice:      cutePrice,
-		TotalDeposited: user.TotalDeposited,
+		WalletAddress:         user.WalletAddress,
+		Credits:               user.Credits,
+		CreditsUSD:            user.Credits * cutePrice,
+		CutePrice:             cutePrice,
+		TotalDeposited:        user.TotalDeposited,
+		StripeCustomerID:      user.StripeCustomerID,
+		AutotopupEnabled:      user.AutotopupEnabled,
+		AutotopupThresholdUSD: user.AutotopupThresholdUSD,
+		AutotopupAmountUSD:    user.AutotopupAmountUSD,
+		HasPaymentMethod:      user.StripePaymentMethodID != "",
+		UnlimitedAPI:          user.UnlimitedAPI,
+		SubscriptionStatus:    user.SubscriptionStatus,
+		SubscriptionPlan:      user.SubscriptionPlan,
+		StripePriceID:         user.StripePriceID,
 	})
 }
 

@@ -134,6 +134,19 @@ func sendEmail(toEmail, subject, htmlBody string) error {
 	return nil
 }
 
+func sendPasswordResetEmail(toEmail, resetURL string) error {
+	html := fmt.Sprintf(`<!doctype html>
+<html>
+<body style="font-family: Arial, sans-serif; color: #0f172a; line-height: 1.5;">
+  <h1 style="font-size: 22px;">Reset your CuteDSL password</h1>
+  <p>Use the button below to set a new password. This link expires in 30 minutes.</p>
+  <p><a href="%s" style="display:inline-block;background:#0f172a;color:#fff;text-decoration:none;padding:12px 18px;border-radius:8px;font-weight:700;">Reset password</a></p>
+  <p style="font-size:12px;color:#64748b;">If you did not request this, you can ignore this email.</p>
+</body>
+</html>`, resetURL)
+	return sendEmail(toEmail, "Reset your CuteDSL password", html)
+}
+
 // loadEmailTemplate reads an HTML template from the emails/ directory
 func loadEmailTemplate(filename string) (string, error) {
 	data, err := os.ReadFile("emails/" + filename)
@@ -258,7 +271,7 @@ func processCreditsExpired() {
 		}
 		html = personalizeTemplate(html, &user)
 
-		if err := sendEmail(user.Email, "Your $CUTEDSL Credits Have Run Out — Top Up to Keep Creating", html); err != nil {
+		if err := sendEmail(user.Email, "Your CuteDSL Credits Have Run Out — Top Up to Keep Creating", html); err != nil {
 			log.Printf("Credits expired: send error for %s: %v", user.Email, err)
 		} else {
 			log.Printf("Sent credits expired email to %s", user.Email)

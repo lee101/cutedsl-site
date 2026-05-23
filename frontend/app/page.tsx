@@ -1,25 +1,61 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Sparkles, Wand2, Image as ImageIcon, LineChart, Coins, Heart, Star, Zap,
   Mic, Volume2, BookOpen, Cloud, Code, Globe, Cpu, Database, Layout, Search, Gamepad2, Users,
-  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff
+  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff, CreditCard
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { CodeBlock } from '@/lib/code-block';
 
 const API_BASE = '/api';
-const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
+const IMG_BASE = '/images';
 
-const BACKGROUNDS = [
-  `${IMG_BASE}/bg-1.webp`,
-  `${IMG_BASE}/bg-2.webp`,
-  `${IMG_BASE}/bg-3.webp`,
-  `${IMG_BASE}/bg-4.webp`,
-];
+interface StripeEmbeddedCheckout {
+  mount: (target: string | HTMLElement) => void;
+  destroy: () => void;
+}
+
+interface StripeBrowserClient {
+  initEmbeddedCheckout: (options: {
+    clientSecret: string;
+    onComplete?: () => void;
+  }) => Promise<StripeEmbeddedCheckout>;
+}
+
+declare global {
+  interface Window {
+    Stripe?: (publishableKey: string) => StripeBrowserClient;
+  }
+}
+
+let stripeJsPromise: Promise<void> | null = null;
+
+const loadStripeJS = () => {
+  if (typeof window === 'undefined') return Promise.reject(new Error('Stripe.js requires a browser'));
+  if (window.Stripe) return Promise.resolve();
+  if (stripeJsPromise) return stripeJsPromise;
+
+  stripeJsPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[src="https://js.stripe.com/v3/"]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener('error', () => reject(new Error('Failed to load Stripe.js')), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://js.stripe.com/v3/';
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load Stripe.js'));
+    document.head.appendChild(script);
+  });
+
+  return stripeJsPromise;
+};
 
 interface WalletBalance {
   wallet_address: string;
@@ -27,6 +63,10 @@ interface WalletBalance {
   credits_usd: number;
   cute_price_usd: number;
   total_deposited: number;
+  autotopup_enabled?: boolean;
+  autotopup_threshold_usd?: number;
+  autotopup_amount_usd?: number;
+  has_payment_method?: boolean;
 }
 
 interface ServicePricing {
@@ -49,7 +89,6 @@ interface BillingEvent {
 }
 
 export default function Home() {
-  const [bgIndex, setBgIndex] = useState(0);
   const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [balance, setBalance] = useState<WalletBalance | null>(null);
   const [pricing, setPricing] = useState<ServicePricing[]>([]);
@@ -71,21 +110,28 @@ export default function Home() {
   const [emailInput, setEmailInput] = useState('');
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailSaved, setEmailSaved] = useState(false);
-  const [buyTab, setBuyTab] = useState<'buy' | 'deposit'>('buy');
+  const [buyTab, setBuyTab] = useState<'card' | 'buy' | 'deposit'>('card');
   const [buySolAmount, setBuySolAmount] = useState('0.1');
   const [buyQuote, setBuyQuote] = useState<any>(null);
   const [buyLoading, setBuyLoading] = useState(false);
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
+  const [stripeAmount, setStripeAmount] = useState('25');
+  const [stripeLoading, setStripeLoading] = useState(false);
+  const [stripeStatus, setStripeStatus] = useState<string | null>(null);
+  const [stripePublishableKey, setStripePublishableKey] = useState('');
+  const [embeddedCheckoutClientSecret, setEmbeddedCheckoutClientSecret] = useState('');
+  const [autotopupEnabled, setAutotopupEnabled] = useState(false);
+  const [autotopupThreshold, setAutotopupThreshold] = useState('5');
+  const [autotopupAmount, setAutotopupAmount] = useState('25');
+  const [autotopupSaving, setAutotopupSaving] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [showApiKey, setShowApiKey] = useState(false);
   const [clientOrigin, setClientOrigin] = useState('');
+  const embeddedCheckoutElementRef = useRef<HTMLDivElement | null>(null);
+  const embeddedCheckoutRef = useRef<StripeEmbeddedCheckout | null>(null);
 
   useEffect(() => {
     setClientOrigin(window.location.origin);
-    const interval = setInterval(() => {
-      setBgIndex((prev) => (prev + 1) % BACKGROUNDS.length);
-    }, 6000);
-    return () => clearInterval(interval);
   }, []);
 
   // Fetch pricing on mount
@@ -107,6 +153,9 @@ export default function Home() {
       const data = await res.json();
       setBalance(data);
       setCutePrice(data.cute_price_usd || cutePrice);
+      setAutotopupEnabled(!!data.autotopup_enabled);
+      if (data.autotopup_threshold_usd) setAutotopupThreshold(String(data.autotopup_threshold_usd));
+      if (data.autotopup_amount_usd) setAutotopupAmount(String(data.autotopup_amount_usd));
     } catch {}
   }, [cutePrice]);
 
@@ -117,6 +166,53 @@ export default function Home() {
       setBillingHistory(data.events || []);
     } catch {}
   }, []);
+
+  useEffect(() => {
+    if (!embeddedCheckoutClientSecret || !stripePublishableKey || !embeddedCheckoutElementRef.current) return;
+
+    let cancelled = false;
+    const mountCheckout = async () => {
+      try {
+        embeddedCheckoutRef.current?.destroy();
+        embeddedCheckoutRef.current = null;
+
+        await loadStripeJS();
+        if (cancelled) return;
+        const stripe = window.Stripe?.(stripePublishableKey);
+        if (!stripe) throw new Error('Stripe.js did not initialize');
+
+        const checkout = await stripe.initEmbeddedCheckout({
+          clientSecret: embeddedCheckoutClientSecret,
+          onComplete: () => {
+            setStripeStatus('Payment complete. Credits will appear after Stripe confirms the checkout.');
+            setEmbeddedCheckoutClientSecret('');
+            if (walletAddress) {
+              fetchBalance(walletAddress);
+              fetchHistory(walletAddress);
+            }
+          },
+        });
+        if (cancelled) {
+          checkout.destroy();
+          return;
+        }
+        embeddedCheckoutRef.current = checkout;
+        checkout.mount(embeddedCheckoutElementRef.current!);
+        setStripeStatus(null);
+      } catch (err: any) {
+        setStripeStatus(err?.message || 'Failed to load embedded Stripe checkout');
+        setEmbeddedCheckoutClientSecret('');
+      }
+    };
+
+    mountCheckout();
+
+    return () => {
+      cancelled = true;
+      embeddedCheckoutRef.current?.destroy();
+      embeddedCheckoutRef.current = null;
+    };
+  }, [embeddedCheckoutClientSecret, stripePublishableKey, walletAddress, fetchBalance, fetchHistory]);
 
   useEffect(() => {
     if (walletAddress) {
@@ -139,6 +235,11 @@ export default function Home() {
     if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('test') === 'true') {
       setTestMode(true);
       runE2ETests();
+    }
+    if (typeof window !== 'undefined') {
+      const payment = new URLSearchParams(window.location.search).get('payment');
+      if (payment === 'success') setStripeStatus('Payment received. Credits will appear after Stripe confirms the checkout.');
+      if (payment === 'cancel') setStripeStatus('Stripe checkout was cancelled.');
     }
   }, []);
 
@@ -310,6 +411,72 @@ export default function Home() {
     }
   };
 
+  const createStripeCheckout = async () => {
+    if (!walletAddress || !stripeAmount) return;
+    setStripeLoading(true);
+    setStripeStatus(null);
+    try {
+      const amount = parseFloat(stripeAmount);
+      const res = await fetch(`${API_BASE}/stripe-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddress,
+          amount_usd: amount,
+          return_url: `${window.location.origin}/?payment=success&session_id={CHECKOUT_SESSION_ID}#credits`,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to start Stripe checkout');
+      }
+      if (data.client_secret && data.publishable_key) {
+        setStripePublishableKey(data.publishable_key);
+        setEmbeddedCheckoutClientSecret(data.client_secret);
+        setStripeStatus('Complete the secure Stripe checkout below.');
+        return;
+      }
+      if (data.url) {
+        window.location.href = data.url;
+        return;
+      }
+      throw new Error('Stripe checkout response did not include a client secret');
+    } catch (err: any) {
+      setStripeStatus(err?.message || 'Stripe checkout failed');
+    } finally {
+      setStripeLoading(false);
+    }
+  };
+
+  const saveAutotopupSettings = async () => {
+    if (!walletAddress) return;
+    setAutotopupSaving(true);
+    setStripeStatus(null);
+    try {
+      const res = await fetch(`${API_BASE}/autotopup-settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: walletAddress,
+          enabled: autotopupEnabled,
+          threshold_usd: parseFloat(autotopupThreshold || '5'),
+          amount_usd: parseFloat(autotopupAmount || '25'),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to save auto top-up');
+      setAutotopupEnabled(!!data.enabled);
+      setAutotopupThreshold(String(data.threshold_usd || 5));
+      setAutotopupAmount(String(data.amount_usd || 25));
+      setStripeStatus(data.enabled ? 'Auto top-up enabled.' : 'Auto top-up disabled.');
+      fetchBalance(walletAddress);
+    } catch (err: any) {
+      setStripeStatus(err?.message || 'Failed to save auto top-up');
+    } finally {
+      setAutotopupSaving(false);
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -432,29 +599,9 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen overflow-hidden relative selection:bg-pink-300 selection:text-pink-900">
-      {/* Auto-changing Background */}
-      <div className="fixed inset-0 -z-20 bg-slate-900">
-        {BACKGROUNDS.map((bg, i) => (
-          <div
-            key={bg}
-            className={`absolute inset-0 bg-cover bg-center transition-opacity duration-[3000ms] ease-in-out bg-transition-gpu ${
-              i === bgIndex ? 'opacity-40' : 'opacity-0'
-            }`}
-            style={{ backgroundImage: i === bgIndex || i === (bgIndex + 1) % BACKGROUNDS.length ? `url(${bg})` : undefined }}
-          />
-        ))}
-        {/* Gradient overlay to ensure text readability */}
-        <div className="absolute inset-0 bg-gradient-to-b from-pink-50/90 via-purple-50/80 to-cyan-50/90 backdrop-blur-[2px]" />
-      </div>
-
-      {/* Background Elements */}
-      <div className="fixed inset-0 -z-10 pointer-events-none">
-        <div className="absolute top-10 left-10 text-pink-400 animate-sparkle" style={{ animationDelay: '0s' }}><Star size={24} /></div>
-        <div className="absolute top-40 right-20 text-purple-400 animate-sparkle" style={{ animationDelay: '1s' }}><Sparkles size={32} /></div>
-        <div className="absolute bottom-20 left-1/4 text-cyan-400 animate-sparkle" style={{ animationDelay: '2s' }}><Star size={20} /></div>
-        <div className="absolute top-1/3 left-1/2 text-yellow-400 animate-sparkle" style={{ animationDelay: '0.5s' }}><Sparkles size={28} /></div>
-      </div>
+      <div className="min-h-screen overflow-hidden relative selection:bg-pink-300 selection:text-pink-900">
+        {/* CSS-only background avoids React timers and extra LCP-network contention. */}
+        <div className="fixed inset-0 -z-20 bg-[linear-gradient(135deg,#fff1f7_0%,#f5f3ff_48%,#ecfeff_100%)]" />
 
       {/* Navigation */}
       <header>
@@ -469,6 +616,7 @@ export default function Home() {
           <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
           <Link href="#training" className="hover:text-purple-500 transition-colors">Training</Link>
           <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
+          <Link href="/account" className="hover:text-emerald-600 transition-colors">Account</Link>
           <Link href="#token" className="hover:text-cyan-500 transition-colors">$CUTEDSL</Link>
           <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
           <Link href="/blog" className="hover:text-orange-500 transition-colors">Blog</Link>
@@ -476,50 +624,42 @@ export default function Home() {
         <div className="flex items-center gap-3">
           {walletAddress ? (
             <div className="flex items-center gap-3">
-              <a href="#account" onClick={(e) => { e.preventDefault(); setShowAccount(true); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="hidden sm:flex items-center gap-2 bg-white/80 backdrop-blur-sm px-4 py-2 rounded-full border border-pink-200 shadow-sm hover:shadow-md transition-all cursor-pointer">
+              <Link href="/account" className="hidden sm:flex items-center gap-2 bg-white/90 px-4 py-2 rounded-full border border-pink-200 shadow-sm hover:shadow-md transition-all cursor-pointer">
                 <Coins size={16} className="text-yellow-500" />
                 <span className="font-bold text-slate-700">{balance ? formatCute(balance.credits) : '...'} $CUTEDSL</span>
                 {balance && cutePrice > 0 && (
                   <span className="text-xs text-slate-400">(${(balance.credits * cutePrice).toFixed(2)})</span>
                 )}
-              </a>
-              <button
-                onClick={() => setShowAccount(true)}
+              </Link>
+              <Link
+                href="/account"
                 className="flex items-center gap-2 bg-white/80 text-slate-600 font-bold px-4 py-2 rounded-full shadow-sm hover:shadow-md transition-all border border-slate-200 text-sm"
                 title={walletAddress}
               >
                 <Wallet size={16} />
                 {email ? email.split('@')[0] : `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`}
-              </button>
+              </Link>
             </div>
           ) : (
-            <button
-              onClick={connectWallet}
-              disabled={connectingWallet}
+            <Link
+              href="/account"
               className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-2 rounded-full shadow-lg hover:shadow-pink-300/50 hover:scale-105 transition-all flex items-center gap-2"
             >
               <Wallet size={18} />
-              {connectingWallet ? 'Connecting...' : 'Connect Wallet'}
-            </button>
+              Login / Pay
+            </Link>
           )}
         </div>
       </nav>
       </header>
 
       {/* Account Panel */}
-      <AnimatePresence>
-        {showAccount && walletAddress && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-start justify-center pt-20 px-4"
+      {showAccount && walletAddress && (
+          <div
+            className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center pt-20 px-4"
             onClick={(e) => { if (e.target === e.currentTarget) setShowAccount(false); }}
           >
-            <motion.div
-              initial={{ opacity: 0, y: -20, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -20, scale: 0.95 }}
+            <div
               className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden"
             >
               {/* Header */}
@@ -634,29 +774,25 @@ export default function Home() {
                   Disconnect Wallet
                 </button>
               </div>
-            </motion.div>
-          </motion.div>
+            </div>
+          </div>
         )}
-      </AnimatePresence>
 
       {/* Hero Section */}
       <main className="max-w-7xl mx-auto px-6 pt-12 pb-24 relative z-10">
         <div className="flex flex-col lg:flex-row items-center gap-16">
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8 }}
+          <div
             className="flex-1 text-center lg:text-left relative"
           >
-            <div className="absolute -top-12 -left-12 animate-float hidden lg:block opacity-80">
+            <div className="absolute -top-12 -left-12 hidden lg:block opacity-80">
               <Image src={`${IMG_BASE}/avatar.webp`} alt="" width={100} height={100} loading="lazy" className="rounded-full border-4 border-pink-200 shadow-lg" />
             </div>
 
             <h1 className="font-fredoka text-6xl lg:text-8xl font-bold mb-6 leading-tight text-slate-800">
-              Make Your Models <span className="text-gradient-cute">Cute</span>
+              Fast AI APIs, <span className="text-gradient-cute">Cute</span> Pricing
             </h1>
-            <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/40 p-4 rounded-2xl backdrop-blur-sm">
-              Cute DSL accelerates AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, and more. Powered exclusively by $CUTEDSL on Solana.
+            <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/70 p-4 rounded-2xl border border-white/80">
+              CuteDSL is a developer API for image generation, forecasting, speech, chat, captioning, and custom LoRAs. Use card-funded credits or $CUTEDSL on Solana, with accelerated first-party models under the hood.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start flex-wrap">
               <a href="#models" className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
@@ -671,35 +807,37 @@ export default function Home() {
                 <Code size={20} className="text-blue-500" />
                 API Docs
               </a>
+              <Link href="/account" className="bg-slate-900 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
+                <CreditCard size={20} />
+                Account & Billing
+              </Link>
             </div>
-          </motion.div>
+          </div>
           
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.8, delay: 0.2 }}
+          <div
             className="flex-1 relative"
           >
-            <div className="relative w-full max-w-lg mx-auto aspect-square animate-float">
-              <div className="absolute inset-0 bg-gradient-to-tr from-pink-300 to-cyan-300 rounded-full blur-3xl opacity-50"></div>
+            <div className="relative w-full max-w-lg mx-auto aspect-square">
+              <div className="absolute inset-0 bg-gradient-to-tr from-pink-200 to-cyan-200 rounded-full opacity-60"></div>
               <Image
                 src={`${IMG_BASE}/hero.webp`}
                 alt="CuteDSL AI model acceleration platform"
                 fill
                 priority
+                sizes="(min-width: 1024px) 38vw, 90vw"
                 className="object-cover rounded-full border-8 border-white/50 shadow-2xl"
               />
               {/* Floating badges */}
-              <div className="absolute -top-6 -right-6 glass-card p-4 rounded-2xl flex items-center gap-3 animate-bounce" style={{ animationDuration: '3s' }}>
+              <div className="absolute -top-6 -right-6 glass-card p-4 rounded-2xl flex items-center gap-3">
                 <div className="bg-pink-100 p-2 rounded-full text-pink-500"><ImageIcon size={24} /></div>
                 <div className="font-bold text-slate-700">zimage</div>
               </div>
-              <div className="absolute -bottom-10 left-10 glass-card p-4 rounded-2xl flex items-center gap-3 animate-bounce" style={{ animationDuration: '4s', animationDelay: '1s' }}>
+              <div className="absolute -bottom-10 left-10 glass-card p-4 rounded-2xl flex items-center gap-3">
                 <div className="bg-cyan-100 p-2 rounded-full text-cyan-500"><LineChart size={24} /></div>
                 <div className="font-bold text-slate-700">chronos2</div>
               </div>
             </div>
-          </motion.div>
+          </div>
         </div>
       </main>
 
@@ -726,7 +864,7 @@ export default function Home() {
 
       {/* Models Section */}
       <section id="models" className="py-24 relative z-10">
-        <div className="absolute inset-0 bg-white/40 backdrop-blur-md -z-10"></div>
+        <div className="absolute inset-0 bg-white/55 -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16 relative">
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Our Models</h2>
@@ -735,7 +873,7 @@ export default function Home() {
 
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             <Link href="/docs/zimage">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-pink-100 w-14 h-14 rounded-2xl flex items-center justify-center text-pink-500 mb-4 shadow-inner">
                 <ImageIcon size={28} />
               </div>
@@ -746,11 +884,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-pink-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '1000 $CUTEDSL'} / gen
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/chronos2">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-cyan-100 w-14 h-14 rounded-2xl flex items-center justify-center text-cyan-500 mb-4 shadow-inner">
                 <LineChart size={28} />
               </div>
@@ -761,11 +899,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-cyan-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '500 $CUTEDSL'} / forecast
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/tts">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-purple-100 w-14 h-14 rounded-2xl flex items-center justify-center text-purple-500 mb-4 shadow-inner">
                 <Volume2 size={28} />
               </div>
@@ -776,11 +914,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-purple-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '100 $CUTEDSL'} / 100 chars
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/stt">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-blue-100 w-14 h-14 rounded-2xl flex items-center justify-center text-blue-500 mb-4 shadow-inner">
                 <Mic size={28} />
               </div>
@@ -791,11 +929,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-blue-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '200 $CUTEDSL'} / minute
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/gemma4">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-emerald-100 w-14 h-14 rounded-2xl flex items-center justify-center text-emerald-500 mb-4 shadow-inner">
                 <Cpu size={28} />
               </div>
@@ -806,11 +944,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-emerald-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('gemma4') > 0 ? `${formatCute(getServicePrice('gemma4'))} $CUTEDSL` : '50 $CUTEDSL'} / request
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/caption">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-orange-100 w-14 h-14 rounded-2xl flex items-center justify-center text-orange-500 mb-4 shadow-inner">
                 <Search size={28} />
               </div>
@@ -821,11 +959,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-orange-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('caption') > 0 ? `${formatCute(getServicePrice('caption'))} $CUTEDSL` : '50 $CUTEDSL'} / image
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/ltx_video">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-red-100 w-14 h-14 rounded-2xl flex items-center justify-center text-red-500 mb-4 shadow-inner">
                 <Gamepad2 size={28} />
               </div>
@@ -836,11 +974,11 @@ export default function Home() {
               <div className="flex items-center gap-2 text-red-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('ltx_video') > 0 ? `${formatCute(getServicePrice('ltx_video'))} $CUTEDSL` : '300 $CUTEDSL'} / video
               </div>
-            </motion.div>
+            </div>
             </Link>
 
             <Link href="/docs/flux_image">
-            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-indigo-100 w-14 h-14 rounded-2xl flex items-center justify-center text-indigo-500 mb-4 shadow-inner">
                 <Globe size={28} />
               </div>
@@ -851,7 +989,7 @@ export default function Home() {
               <div className="flex items-center gap-2 text-indigo-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('flux_image') > 0 ? `${formatCute(getServicePrice('flux_image'))} $CUTEDSL` : '40 $CUTEDSL'} / image
               </div>
-            </motion.div>
+            </div>
             </Link>
           </div>
         </div>
@@ -861,7 +999,7 @@ export default function Home() {
       {walletAddress && apiKey && (
         <section className="py-16 relative z-10">
           <div className="max-w-4xl mx-auto px-6">
-            <div className="bg-white/80 backdrop-blur-xl rounded-3xl p-8 border border-pink-200 shadow-lg">
+            <div className="bg-white/90 rounded-3xl p-8 border border-pink-200 shadow-lg">
               <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>
               <p className="text-slate-500 mb-6 text-sm">Generate an image with your API key. This calls <code className="bg-slate-100 px-1 rounded">POST /api/service</code> with your credits.</p>
               <div className="flex gap-3 mb-4">
@@ -898,7 +1036,7 @@ export default function Home() {
       {/* LoRA Training & Inference */}
       <section id="training" className="py-24 relative z-10">
         <div className="max-w-7xl mx-auto px-6">
-          <div className="glass-card rounded-3xl p-10 lg:p-16 flex flex-col lg:flex-row items-center gap-12 bg-gradient-to-r from-purple-100/90 to-pink-100/90 backdrop-blur-xl">
+          <div className="glass-card rounded-3xl p-10 lg:p-16 flex flex-col lg:flex-row items-center gap-12 bg-gradient-to-r from-purple-100/90 to-pink-100/90">
             <div className="flex-1 relative">
               <div className="bg-purple-200 w-16 h-16 rounded-2xl flex items-center justify-center text-purple-600 mb-6 shadow-inner">
                 <Wand2 size={32} />
@@ -940,7 +1078,7 @@ export default function Home() {
 
       {/* API Usage & Cloud Credits */}
       <section id="api" className="py-24 relative z-10">
-        <div className="absolute inset-0 bg-blue-50/60 backdrop-blur-md -z-10"></div>
+        <div className="absolute inset-0 bg-blue-50/70 -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Developer API</h2>
@@ -1014,6 +1152,12 @@ export default function Home() {
                   <div>
                     <div className="flex gap-1 mb-3 bg-slate-100 p-1 rounded-xl">
                       <button
+                        onClick={() => setBuyTab('card')}
+                        className={`flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all ${buyTab === 'card' ? 'bg-gradient-to-r from-pink-400 to-purple-400 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        Card
+                      </button>
+                      <button
                         onClick={() => setBuyTab('buy')}
                         className={`flex-1 py-2 px-3 rounded-lg text-sm font-bold transition-all ${buyTab === 'buy' ? 'bg-gradient-to-r from-pink-400 to-purple-400 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                       >
@@ -1027,7 +1171,119 @@ export default function Home() {
                       </button>
                     </div>
 
-                    {buyTab === 'buy' ? (
+                    {buyTab === 'card' ? (
+                      <div className="space-y-4">
+                        {embeddedCheckoutClientSecret ? (
+                          <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" data-testid="embedded-checkout-container">
+                            <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                              <div>
+                                <div className="text-sm font-bold text-slate-700">Secure card checkout</div>
+                                <div className="text-xs text-slate-400">Powered by Stripe</div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setEmbeddedCheckoutClientSecret('')}
+                                className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                                aria-label="Close Stripe checkout"
+                              >
+                                <X size={16} />
+                              </button>
+                            </div>
+                            <div ref={embeddedCheckoutElementRef} className="min-h-[440px]" />
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex gap-2">
+                              <div className="relative flex-1">
+                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="500"
+                                  value={stripeAmount}
+                                  onChange={(e) => setStripeAmount(e.target.value)}
+                                  className="w-full pl-7 pr-4 py-3 rounded-xl border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-lg"
+                                  placeholder="25"
+                                />
+                              </div>
+                              <button
+                                onClick={createStripeCheckout}
+                                disabled={stripeLoading || !stripeAmount}
+                                data-testid="stripe-checkout-btn"
+                                className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 inline-flex items-center gap-2"
+                              >
+                                {stripeLoading ? <RefreshCw size={20} className="animate-spin" /> : <CreditCard size={18} />}
+                                Pay
+                              </button>
+                            </div>
+                            {cutePrice > 0 && stripeAmount && (
+                              <div className="text-xs text-slate-400">
+                                Buys &asymp; {formatCute(parseFloat(stripeAmount || '0') / cutePrice)} $CUTEDSL. Stripe will save your card for optional auto top-up after checkout.
+                              </div>
+                            )}
+                          </>
+                        )}
+
+                        <div className="bg-white/70 rounded-2xl border border-slate-200 p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <div className="text-sm font-bold text-slate-700">Auto top-up</div>
+                              <div className="text-xs text-slate-400">Charge your saved Stripe card when your balance is low.</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setAutotopupEnabled(!autotopupEnabled)}
+                              className={`w-12 h-7 rounded-full p-1 transition-colors ${autotopupEnabled ? 'bg-pink-500' : 'bg-slate-300'}`}
+                              aria-pressed={autotopupEnabled}
+                            >
+                              <span className={`block h-5 w-5 rounded-full bg-white transition-transform ${autotopupEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <label className="text-xs font-bold text-slate-500">
+                              Threshold USD
+                              <input
+                                type="number"
+                                min="1"
+                                max="100"
+                                value={autotopupThreshold}
+                                onChange={(e) => setAutotopupThreshold(e.target.value)}
+                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm font-normal text-slate-700"
+                              />
+                            </label>
+                            <label className="text-xs font-bold text-slate-500">
+                              Top-up USD
+                              <input
+                                type="number"
+                                min="5"
+                                max="500"
+                                value={autotopupAmount}
+                                onChange={(e) => setAutotopupAmount(e.target.value)}
+                                className="mt-1 w-full px-3 py-2 rounded-lg border border-slate-200 focus:border-pink-400 focus:ring-2 focus:ring-pink-200 outline-none text-sm font-normal text-slate-700"
+                              />
+                            </label>
+                          </div>
+                          <button
+                            onClick={saveAutotopupSettings}
+                            disabled={autotopupSaving}
+                            className="w-full bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50"
+                          >
+                            {autotopupSaving ? 'Saving...' : 'Save auto top-up'}
+                          </button>
+                          {balance && !balance.has_payment_method && (
+                            <div className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
+                              Buy credits with Stripe once before enabling auto top-up.
+                            </div>
+                          )}
+                        </div>
+
+                        {stripeStatus && (
+                          <div className={`text-sm font-medium px-3 py-2 rounded-lg ${stripeStatus.includes('failed') || stripeStatus.includes('Failed') || stripeStatus.includes('cancelled') || stripeStatus.includes('before enabling') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                            {stripeStatus}
+                          </div>
+                        )}
+                      </div>
+                    ) : buyTab === 'buy' ? (
                       <div className="space-y-3">
                         <div className="flex gap-2">
                           <div className="relative flex-1">
@@ -1167,7 +1423,7 @@ export default function Home() {
 
       {/* API Docs */}
       <section id="api-docs" className="py-24 relative z-10">
-        <div className="absolute inset-0 bg-slate-50/80 backdrop-blur-md -z-10"></div>
+        <div className="absolute inset-0 bg-slate-50/90 -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">API Reference</h2>
@@ -1230,13 +1486,13 @@ export default function Home() {
         <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-transparent to-pink-900/80"></div>
         
         <div className="max-w-4xl mx-auto px-6 text-center relative z-10">
-          <Coins size={64} className="text-yellow-400 mx-auto mb-8 animate-bounce" />
+          <Coins size={64} className="text-yellow-400 mx-auto mb-8" />
           <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTEDSL</h2>
           <p className="text-xl text-slate-200 mb-10 font-medium">
             Pay for AI inference with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span> on Solana. First-party models (zimage, chronos2, TTS) are priced at the token&apos;s all-time high &mdash; so early holders get cheaper inference forever. The more $CUTEDSL grows, the better your rate locks in.
           </p>
           
-          <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-3xl p-8 mb-10">
+          <div className="bg-white/10 border border-white/20 rounded-3xl p-8 mb-10">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-8">
               <div>
                 <div className="text-4xl font-bold text-pink-400 mb-2 font-fredoka">
@@ -1272,7 +1528,7 @@ export default function Home() {
       </section>
 
       {/* Applied AI NZ Section */}
-      <section id="applied-ai-nz" className="py-24 relative z-10 bg-slate-50/90 backdrop-blur-lg border-t border-slate-200">
+      <section id="applied-ai-nz" className="py-24 relative z-10 bg-slate-50/95 border-t border-slate-200">
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
             <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="inline-block bg-indigo-100 text-indigo-700 px-4 py-1 rounded-full font-bold text-sm mb-4 hover:bg-indigo-200 transition-colors">Applied AI NZ</a>
@@ -1387,7 +1643,7 @@ export default function Home() {
       </section>
 
       {/* Footer */}
-      <footer className="bg-white/90 backdrop-blur-md border-t border-pink-200 py-12 relative z-10">
+      <footer className="bg-white/95 border-t border-pink-200 py-12 relative z-10">
         <div className="max-w-7xl mx-auto px-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
             <div className="col-span-1 md:col-span-2">

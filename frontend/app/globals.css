@@ -37,7 +37,16 @@
 }
 
 .glass-card {
-  @apply bg-white/40 backdrop-blur-md border border-white/60 shadow-xl shadow-pink-500/10;
+  @apply bg-white/70 border border-white/70 shadow-xl shadow-pink-500/10;
+}
+
+.card-hover {
+  transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 20px 36px rgb(236 72 153 / 0.12);
 }
 
 /* Reduce layout shift from font loading */
@@ -50,6 +59,21 @@ html {
 .bg-transition-gpu {
   will-change: opacity;
   contain: strict;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .card-hover:hover {
+    transform: none;
+  }
 }
 
 .hljs {
