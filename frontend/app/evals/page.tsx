@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { Wand2, Sparkles, LineChart, ImageIcon, Zap, Cpu, Timer, MemoryStick, ArrowLeft, Server, Search } from 'lucide-react';
+import { SiteFooter } from '../site-footer';
 
 const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
 
@@ -41,6 +42,53 @@ const zimagePipelineBenchmarks = [
   { name: 'Go+C (Python embed)', mode: 'CGO Bridge', latency: '~31,200 ms', speedup: '1.03x', memory: '~18 GB' },
   { name: 'Go+C (LibTorch native)', mode: 'Projected', latency: '~100 ms', speedup: '~320x', memory: '~14 GB' },
   { name: 'Go+C + NVFP4', mode: 'Projected', latency: '~60 ms', speedup: '~533x', memory: '~8 GB' },
+];
+
+const zimageVisualSweeps = [
+  {
+    title: 'Step Count Sweep',
+    subtitle: '4, 6, 8, 9, 10, 12, 16, 20 steps',
+    image: `${IMG_BASE}/zimage-steps-broad.jpg`,
+    imageWidth: 1360,
+    imageHeight: 760,
+    latency: '0.42s → 1.75s',
+    defaultChoice: '8 steps',
+    result: 'Best quality/time knee. 4-6 are fast but visibly thinner; 12+ adds little for normal prompts.',
+    tryNext: 'Try 6 steps for drafts, 8 for production, 12 only when detail is visibly missing.',
+  },
+  {
+    title: 'Default-Region Sweep',
+    subtitle: '6, 7, 8, 9, 10 steps',
+    image: `${IMG_BASE}/zimage-steps-narrow.jpg`,
+    imageWidth: 1560,
+    imageHeight: 620,
+    latency: '0.61s → 1.02s',
+    defaultChoice: '8 steps',
+    result: 'The jump from 7 to 8 is usually worth it; 9-10 is mostly polish.',
+    tryNext: 'Use this range when tuning API presets or adding a fast/quality toggle.',
+  },
+  {
+    title: 'Exact Teleport Replay',
+    subtitle: 'Start steps 1-7 at 8 total steps',
+    image: `${IMG_BASE}/zimage-teleport-exact-start-sweep.jpg`,
+    imageWidth: 1536,
+    imageHeight: 750,
+    latency: '0.74s → 0.14s',
+    defaultChoice: 'start step 7',
+    result: 'All replay settings were pixel-identical; later start wins because it reruns less denoising.',
+    tryNext: 'Keep exact-prompt cache hits at step 7 and track warm replay latency separately from first-run compile latency.',
+  },
+  {
+    title: 'Compositional Teleport',
+    subtitle: '4, 6, 8, 10, 12, 14 refinement steps',
+    image: `${IMG_BASE}/zimage-teleport-composition-sweep.jpg`,
+    imageWidth: 1536,
+    imageHeight: 738,
+    latency: '0.56s → 1.58s',
+    defaultChoice: 'research only',
+    result: 'Fast, but quality is not yet competitive with direct 8-step Z-Image.',
+    tryNext: 'Try better cache matching and learned combiners before exposing this path to users.',
+  },
 ];
 
 const loraSearchBenchmarks = [
@@ -130,6 +178,60 @@ export default function EvalsPage() {
             Performance benchmarks for every CuteDSL-accelerated model and a breakdown of each acceleration technique we&apos;re researching and shipping.
           </p>
         </div>
+
+        {/* Visual Image Sweeps */}
+        <section className="mb-20">
+          <div className="flex items-center gap-3 mb-8">
+            <div className="bg-pink-100 p-3 rounded-2xl text-pink-600"><Wand2 size={28} /></div>
+            <div>
+              <h2 className="font-fredoka text-3xl font-bold text-slate-800">Z-Image Settings Gallery</h2>
+              <p className="text-slate-500 font-medium">Side-by-side image sweeps showing what each setting changes and how much latency it costs</p>
+            </div>
+          </div>
+
+          <div className="grid lg:grid-cols-2 gap-6">
+            {zimageVisualSweeps.map((sweep) => (
+              <article key={sweep.title} className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+                <div className="relative w-full bg-slate-100" style={{ aspectRatio: `${sweep.imageWidth} / ${sweep.imageHeight}` }}>
+                  <Image
+                    src={sweep.image}
+                    alt={`${sweep.title}: ${sweep.subtitle}`}
+                    fill
+                    sizes="(min-width: 1024px) 50vw, calc(100vw - 48px)"
+                    className="object-cover"
+                  />
+                </div>
+                <div className="p-6">
+                  <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                    <div>
+                      <h3 className="font-fredoka text-2xl font-bold text-slate-800">{sweep.title}</h3>
+                      <p className="text-sm font-medium text-slate-500">{sweep.subtitle}</p>
+                    </div>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-pink-50 px-3 py-1 text-sm font-bold text-pink-700 border border-pink-100">
+                      <Timer size={14} />
+                      {sweep.latency}
+                    </span>
+                  </div>
+
+                  <div className="grid sm:grid-cols-3 gap-3 mb-4">
+                    <div className="rounded-xl bg-slate-50 border border-slate-100 p-3">
+                      <div className="text-[11px] uppercase font-bold text-slate-400 tracking-wide">Choice</div>
+                      <div className="text-sm font-bold text-slate-800">{sweep.defaultChoice}</div>
+                    </div>
+                    <div className="sm:col-span-2 rounded-xl bg-cyan-50 border border-cyan-100 p-3">
+                      <div className="text-[11px] uppercase font-bold text-cyan-600 tracking-wide">Observed</div>
+                      <p className="text-sm font-medium text-slate-700">{sweep.result}</p>
+                    </div>
+                  </div>
+
+                  <p className="text-sm text-slate-600">
+                    <span className="font-bold text-slate-800">Try next:</span> {sweep.tryNext}
+                  </p>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
 
         {/* CuteChronos2 Benchmarks */}
         <section className="mb-20">
@@ -530,16 +632,7 @@ export default function EvalsPage() {
         </section>
       </main>
 
-      {/* Footer */}
-      <footer className="bg-white/90 border-t border-pink-200 py-8">
-        <div className="max-w-7xl mx-auto px-6 flex justify-between items-center">
-          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied AI NZ</a></p>
-          <div className="flex gap-4 text-sm font-bold">
-            <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
-            <Link href="/blog" className="text-slate-500 hover:text-purple-500">Blog</Link>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

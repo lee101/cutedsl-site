@@ -9,6 +9,7 @@ import {
 import Image from 'next/image';
 import Link from 'next/link';
 import { CodeBlock } from '@/lib/code-block';
+import { SiteFooter } from './site-footer';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -361,7 +362,7 @@ export default function Home() {
       const res = await fetch(`${API_BASE}/service`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 4 }),
+        body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 8 }),
       });
       const data = await res.json();
       if (data.result?.image_base64) {
@@ -743,6 +744,7 @@ export default function Home() {
         <div className="hidden md:flex gap-5 font-bold text-slate-700">
           <Link href="#models" className="hover:text-pink-500 transition-colors">Models</Link>
           <Link href="/gallery" className="hover:text-pink-500 transition-colors">Gallery</Link>
+          <Link href="/playground" className="hover:text-pink-500 transition-colors">Playground</Link>
           <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
           <Link href="#training" className="hover:text-purple-500 transition-colors">Training</Link>
           <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
@@ -1869,55 +1871,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Footer */}
-      <footer className="bg-white/95 border-t border-pink-200 py-12 relative z-10">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-8">
-            <div className="col-span-1 md:col-span-2">
-              <div className="flex items-center gap-2 mb-4">
-                <Image src={`${IMG_BASE}/logo.webp`} alt="CuteDSL" width={32} height={32} className="rounded-lg" />
-                <span className="font-fredoka text-2xl font-bold text-slate-800">CuteDSL</span>
-              </div>
-              <p className="text-slate-500 font-medium max-w-sm">
-                SOTA model acceleration &amp; inference platform. Part of the <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-700 underline">Applied AI NZ</a> ecosystem.
-              </p>
-            </div>
-            
-            <div>
-              <h4 className="font-bold text-slate-800 mb-4">Explore</h4>
-              <ul className="space-y-2 text-slate-500 font-medium">
-                <li><Link href="/gallery" className="hover:text-pink-500 transition-colors">AI Art Gallery</Link></li>
-                <li><Link href="/search" className="hover:text-pink-500 transition-colors">Search Images</Link></li>
-                <li><Link href="#models" className="hover:text-pink-500 transition-colors">Models (zimage, chronos2)</Link></li>
-                <li><Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals & Benchmarks</Link></li>
-                <li><Link href="/blog" className="hover:text-purple-500 transition-colors">Blog</Link></li>
-                <li><Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link></li>
-                <li><a href="https://github.com/lee101/cutedsl" target="_blank" rel="noopener noreferrer" className="hover:text-slate-700 transition-colors">GitHub — lee101/cutedsl</a></li>
-              </ul>
-            </div>
-
-            <div>
-              <h4 className="font-bold text-slate-800 mb-4">Ecosystem</h4>
-              <ul className="space-y-2 text-slate-500 font-medium">
-                <li><a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">App.nz — Applied AI NZ</a></li>
-                <li><a href="https://netwrck.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Netwrck.com</a></li>
-                <li><a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">eBank.nz</a></li>
-                <li><a href="https://helix.app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Helix.app.nz</a></li>
-                <li><a href="https://bitbank.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">BitBank.nz</a></li>
-                <li><a href="https://dictatorflow.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Dictatorflow.com</a></li>
-              </ul>
-            </div>
-          </div>
-          
-          <div className="border-t border-slate-200 pt-8 flex flex-col md:flex-row justify-between items-center gap-4">
-            <p className="text-slate-400 font-medium text-sm">© 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Applied AI NZ</a>. All rights reserved.</p>
-            <div className="flex gap-4">
-              <a href="https://x.com/leeleepenkman" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-pink-500 transition-colors">X</a>
-              <a href="https://codex-infinity.com" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-cyan-500 transition-colors">Codex Infinity</a>
-            </div>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

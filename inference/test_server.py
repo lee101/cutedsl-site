@@ -55,11 +55,10 @@ def test_generate_image_missing_prompt():
 
 @skip_if_no_server
 def test_generate_image_model_not_loaded():
-    """If zimage isn't loaded, should get 503."""
+    """Z-Image lazy-loads on first use, so unloaded is not an error state."""
     r = client.get("/health")
     if not r.json()["models"]["zimage"]:
-        r2 = client.post("/generate_image", json={"prompt": "test"})
-        assert r2.status_code == 503
+        pytest.skip("zimage is configured for lazy loading")
 
 
 @skip_if_no_server

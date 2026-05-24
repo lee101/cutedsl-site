@@ -579,7 +579,33 @@ func handleStripeSubscriptionCheckoutCompleted(session stripeCheckoutSession, us
 		log.Printf("stripe subscription save error user=%s subscription=%s: %v", userID, subscriptionID, err)
 		return
 	}
+	grantSubscriptionAPICredits(session, userID, plan)
 	log.Printf("stripe subscription updated user=%s subscription=%s status=%s plan=%s", userID, subscriptionID, status, plan)
+}
+
+func grantSubscriptionAPICredits(session stripeCheckoutSession, userID, plan string) {
+	usdAmount := float64(session.AmountTotal) / 100
+	if usdAmount <= 0 {
+		if plan == "annual" {
+			usdAmount = 120
+		} else {
+			usdAmount = 12
+		}
+	}
+	cutePrice := getCUTEPriceUSD()
+	if cutePrice <= 0 {
+		log.Printf("stripe subscription %s cannot grant API credits: CUTE price unavailable", session.ID)
+		return
+	}
+	cuteAmount := usdAmount / cutePrice
+	credited, balance, err := dbConn.CreditStripeCheckout(userID, session.Customer, "subscription:"+session.ID, session.PaymentIntent, usdAmount, cuteAmount)
+	if err != nil {
+		log.Printf("stripe subscription %s credit grant error: %v", session.ID, err)
+		return
+	}
+	if credited {
+		log.Printf("stripe subscription credited user=%s session=%s usd=%.2f cute=%.2f balance=%.2f", userID, session.ID, usdAmount, cuteAmount, balance)
+	}
 }
 
 func handleStripeSubscriptionUpdated(raw json.RawMessage) {

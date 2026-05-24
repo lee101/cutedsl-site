@@ -8,6 +8,8 @@ import {
   Sparkles, Star, Heart, Search as SearchIcon,
 } from 'lucide-react';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
+import { SiteFooter } from '../site-footer';
+import { ArtGenerator } from '../art-generator';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -153,6 +155,7 @@ export default function GalleryPage() {
             <ArrowLeft size={16} /> Home
           </Link>
           <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
+          <Link href="/playground" className="hover:text-pink-500 transition-colors">Playground</Link>
           <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
           <Link href="/blog" className="hover:text-purple-500 transition-colors">Blog</Link>
           <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
@@ -187,7 +190,7 @@ export default function GalleryPage() {
               <SearchIcon size={16} /> Search prompts
             </Link>
             <Link
-              href="/#models"
+              href="/playground"
               className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 rounded-full font-bold shadow-md border border-pink-100 hover:scale-105 transition-all"
             >
               <Sparkles size={16} className="text-pink-500" /> Generate your own
@@ -383,29 +386,25 @@ export default function GalleryPage() {
                   {copied ? 'Copied!' : 'Copy prompt'}
                 </button>
               </div>
+
+              <div className="mt-5">
+                <ArtGenerator
+                  compact
+                  title="Make Similar Art"
+                  initialPrompt={selectedImage.prompt}
+                  onGenerated={(image) => {
+                    setImages(prev => [image, ...prev]);
+                    setTotal(prev => prev + 1);
+                    setImageCount(prev => prev + 1);
+                  }}
+                />
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Footer */}
-      <footer className="bg-white/90 border-t border-pink-200 py-8 relative z-10">
-        <div className="max-w-screen-2xl mx-auto px-6 flex flex-col sm:flex-row justify-between items-center gap-3">
-          <p className="text-slate-400 text-sm">
-            &copy; 2026{' '}
-            <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">
-              Applied AI NZ
-            </a>
-          </p>
-          <div className="flex flex-wrap gap-4 text-sm font-bold justify-center">
-            <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
-            <Link href="/search" className="text-slate-500 hover:text-pink-500">Search</Link>
-            <Link href="/evals" className="text-slate-500 hover:text-cyan-500">Evals</Link>
-            <Link href="/blog" className="text-slate-500 hover:text-purple-500">Blog</Link>
-            <Link href="/docs" className="text-slate-500 hover:text-blue-500">API Docs</Link>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

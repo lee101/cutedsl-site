@@ -83,7 +83,9 @@ AITUNE_ENGINES_PATH = os.getenv("AITUNE_ENGINES_PATH", "")
 ZIMAGE_MODEL_PATH = os.getenv("ZIMAGE_MODEL_PATH", "Tongyi-MAI/Z-Image-Turbo")
 CHRONOS_MODEL_PATH = os.getenv("CHRONOS_MODEL_PATH", "amazon/chronos-bolt-base")
 ZIMAGE_COMPILE_MODE = os.getenv("ZIMAGE_COMPILE_MODE", "reduce-overhead") or None
-CHRONOS_COMPILE_MODE = os.getenv("CHRONOS_COMPILE_MODE", "reduce-overhead") or None
+# Chronos has hit CUDA graph assertion failures under torch.compile in local
+# inference, so keep it eager by default unless explicitly enabled.
+CHRONOS_COMPILE_MODE = os.getenv("CHRONOS_COMPILE_MODE", "") or None
 
 # Text-generator.io backend for TTS, STT, captioning, gemma4
 TG_BACKEND_URL = os.getenv("TG_BACKEND_URL", "http://localhost:9080")
@@ -95,13 +97,13 @@ LOAD_CHRONOS = os.getenv("LOAD_CHRONOS", "1") == "1"
 ZIMAGE_USE_CUTE = os.getenv("ZIMAGE_USE_CUTE", "1") == "1"
 
 # Inference defaults
-ZIMAGE_DEFAULT_STEPS = int(os.getenv("ZIMAGE_DEFAULT_STEPS", "4"))
+ZIMAGE_DEFAULT_STEPS = int(os.getenv("ZIMAGE_DEFAULT_STEPS", "8"))
 ZIMAGE_DEFAULT_GUIDANCE = float(os.getenv("ZIMAGE_DEFAULT_GUIDANCE", "0.0"))
 ZIMAGE_DEFAULT_WIDTH = int(os.getenv("ZIMAGE_DEFAULT_WIDTH", "1024"))
 ZIMAGE_DEFAULT_HEIGHT = int(os.getenv("ZIMAGE_DEFAULT_HEIGHT", "1024"))
 LATENT_TELEPORT_ENABLED = os.getenv("LATENT_TELEPORT_ENABLED", "0") == "1"
 LATENT_TELEPORT_CACHE_DIR = os.getenv("LATENT_TELEPORT_CACHE_DIR", "/nvme0n1-disk/tmp/latentteleport-cache")
-LATENT_TELEPORT_START_STEP = int(os.getenv("LATENT_TELEPORT_START_STEP", "2"))
+LATENT_TELEPORT_START_STEP = int(os.getenv("LATENT_TELEPORT_START_STEP", "7"))
 
 # ---------------------------------------------------------------------------
 # Model memory manager — lazy load, LRU eviction, idle unload
@@ -1401,7 +1403,11 @@ def _forecast_sync(req: ChronosRequest):
 async def forecast(req: ChronosRequest):
     if not LOAD_CHRONOS:
         raise HTTPException(503, "chronos2 disabled")
-    model_manager.ensure_loaded("chronos2")
+    try:
+        model_manager.ensure_loaded("chronos2")
+    except Exception as e:
+        logger.exception("chronos2 load failed")
+        raise HTTPException(503, f"chronos2 model failed to load: {e}") from e
     if chronos_pipeline is None:
         raise HTTPException(503, "chronos2 model failed to load")
 
@@ -1479,7 +1485,11 @@ def _forecast_batch_sync(req: ChronosBatchRequest):
 async def forecast_batch(req: ChronosBatchRequest):
     if not LOAD_CHRONOS:
         raise HTTPException(503, "chronos2 disabled")
-    model_manager.ensure_loaded("chronos2")
+    try:
+        model_manager.ensure_loaded("chronos2")
+    except Exception as e:
+        logger.exception("chronos2 load failed")
+        raise HTTPException(503, f"chronos2 model failed to load: {e}") from e
     if chronos_pipeline is None:
         raise HTTPException(503, "chronos2 model failed to load")
 
@@ -1918,7 +1928,7 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
     result = {"path": url, "teleport": teleport_meta}
     if return_perf:
         result["perf"] = {
-            "cache_hit": False,
+            "cache_hit": teleport_meta["cache_hit"],
             "inference_time_ms": int(elapsed * 1000),
             "encode_time_ms": int(encode_elapsed * 1000),
             "upload_time_ms": int(upload_elapsed * 1000),

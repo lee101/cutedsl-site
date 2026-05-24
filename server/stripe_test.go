@@ -218,12 +218,19 @@ func TestStripeSubscriptionCheckoutActivatesUnlimitedAPI(t *testing.T) {
 	customerID := "cus_local_subscription"
 	subscriptionID := "sub_local_subscription"
 	priceID := "price_1TZQWbQda7Fr1LvlkbnwaYpg"
+	checkoutEmail := fmt.Sprintf("stripe-sub-%d@example.com", time.Now().UnixNano())
 	var checkoutPrice string
 
 	stripeMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/v1/customers":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse customer form: %v", err)
+			}
+			if got := r.Form.Get("email"); got != checkoutEmail {
+				t.Fatalf("customer email = %q, want %q", got, checkoutEmail)
+			}
 			_, _ = w.Write([]byte(`{"id":"` + customerID + `"}`))
 		case "/v1/checkout/sessions":
 			if err := r.ParseForm(); err != nil {
@@ -262,6 +269,19 @@ func TestStripeSubscriptionCheckoutActivatesUnlimitedAPI(t *testing.T) {
 	user, err := dbConn.GetUserByWallet(wallet)
 	if err != nil {
 		t.Fatalf("get user: %v", err)
+	}
+
+	status, body = doPost(t, "/api/auth/email", map[string]string{
+		"wallet_address": wallet,
+		"email":          checkoutEmail,
+		"password":       "stripe-sub-123",
+	})
+	if status != 200 {
+		t.Fatalf("save checkout email: status %d body %v", status, body)
+	}
+	user, err = dbConn.GetUserByWallet(wallet)
+	if err != nil {
+		t.Fatalf("get user after email: %v", err)
 	}
 
 	status, body = doPost(t, "/api/stripe-checkout", map[string]interface{}{

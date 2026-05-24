@@ -28,13 +28,13 @@ export const MODELS: ModelConfig[] = [
     description: 'Text-to-image generation powered by CuteZImage with fused Triton kernels. Generates high-quality 1024x1024 images in seconds.',
     category: 'image',
     responseType: 'image',
-    pricingNote: '$1.00 per generation',
+    pricingNote: '$0.04 per generation; $0.10 for 20+ steps',
     pricingTier: 'first-party',
     params: [
       { name: 'prompt', type: 'string', required: true, description: 'Text description of the image to generate', placeholder: 'a cute cat wearing a tiny top hat, watercolor style' },
       { name: 'width', type: 'int', required: false, default: 1024, description: 'Image width in pixels (must be divisible by 64)' },
       { name: 'height', type: 'int', required: false, default: 1024, description: 'Image height in pixels (must be divisible by 64)' },
-      { name: 'num_steps', type: 'int', required: false, default: 4, description: 'Number of denoising steps (more = higher quality, slower)' },
+      { name: 'num_steps', type: 'int', required: false, default: 8, description: 'Number of denoising steps (more = higher quality, slower)' },
       { name: 'guidance', type: 'float', required: false, default: 3.5, description: 'Guidance scale — how closely to follow the prompt' },
       { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
     ],
@@ -46,14 +46,14 @@ export const MODELS: ModelConfig[] = [
     "prompt": "a cute cat wearing a tiny top hat, watercolor style",
     "width": 1024,
     "height": 1024,
-    "num_steps": 4,
+    "num_steps": 8,
     "guidance": 3.5
   }'`,
     responseExample: {
       result: { image_base64: '<base64-encoded WebP image>', width: 1024, height: 1024, format: 'webp' },
       credits_used: 1000,
       credits_remain: 49000,
-      usd_equivalent: 1.0,
+      usd_equivalent: 0.04,
     },
   },
   {

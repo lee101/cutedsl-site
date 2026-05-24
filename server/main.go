@@ -870,6 +870,7 @@ func jsonError(ctx *fasthttp.RequestCtx, status int, msg string) {
 // handleImageSearch handles GET /api/images?q=query&page=1&per_page=48&allow_nsfw=false
 func handleImageSearch(ctx *fasthttp.RequestCtx) {
 	query := string(ctx.QueryArgs().Peek("q"))
+	wallet := strings.TrimSpace(string(ctx.QueryArgs().Peek("wallet")))
 	page, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("page")))
 	perPage, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("per_page")))
 	allowNSFW := string(ctx.QueryArgs().Peek("allow_nsfw")) == "true"
@@ -879,6 +880,21 @@ func handleImageSearch(ctx *fasthttp.RequestCtx) {
 	}
 	if perPage < 1 || perPage > 100 {
 		perPage = 48
+	}
+
+	if wallet != "" {
+		user, err := dbConn.GetUserByWallet(wallet)
+		if err != nil {
+			jsonError(ctx, 404, "wallet not registered")
+			return
+		}
+		result, err := dbConn.SearchImagesByUser(user.ID, page, perPage, allowNSFW)
+		if err != nil {
+			jsonError(ctx, 500, "search failed")
+			return
+		}
+		jsonResponse(ctx, 200, result)
+		return
 	}
 
 	result, err := dbConn.SearchImages(query, page, perPage, allowNSFW)

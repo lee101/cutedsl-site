@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,6 +30,9 @@ var servicePricesUSD = map[string]float64{
 	"flux_image":    0.04,  // per image via fal.ai or netwrck
 	"nsfw_detect":   0.001, // per image classification
 }
+
+var zimageDefaultSteps = 8
+var zimageHighStepPriceUSD = 0.10
 
 // First-party services run on our hardware — priced at ATH rate to reward early holders.
 // If you bought $CUTEDSL at $0.001 and ATH is $0.01, you pay 10x fewer tokens.
@@ -89,8 +96,17 @@ func initServices() {
 			servicePricesUSD[svc] = parseFloat(p)
 		}
 	}
+	if p := os.Getenv("ZIMAGE_20_40_STEPS_PRICE_USD"); p != "" {
+		zimageHighStepPriceUSD = parseFloat(p)
+	}
+	if steps := os.Getenv("ZIMAGE_DEFAULT_STEPS"); steps != "" {
+		if parsed := parseInt(steps); parsed > 0 {
+			zimageDefaultSteps = parsed
+		}
+	}
 
 	log.Printf("Service pricing loaded: %v", servicePricesUSD)
+	log.Printf("Z-Image default steps: %d, 20+ step price: $%.4f", zimageDefaultSteps, zimageHighStepPriceUSD)
 	log.Printf("Service backends: %v", serviceBackends)
 
 	// Initialize diffusionz C engine for direct GPU inference (optional)
@@ -120,12 +136,48 @@ func getServicePriceCUTE(service string) float64 {
 	return usdPrice / pricePerToken
 }
 
+func getRequestServicePriceUSD(req ServiceUsageRequest) float64 {
+	usdPrice, ok := servicePricesUSD[req.Service]
+	if !ok {
+		return 0
+	}
+	if req.Service == "zimage" && getZImageSteps(req) >= 20 {
+		return zimageHighStepPriceUSD
+	}
+	return usdPrice
+}
+
+func getRequestServicePriceCUTE(req ServiceUsageRequest) float64 {
+	usdPrice := getRequestServicePriceUSD(req)
+	if usdPrice <= 0 {
+		return 0
+	}
+
+	var pricePerToken float64
+	if firstPartyServices[req.Service] {
+		pricePerToken = getCUTEPriceATH()
+	} else {
+		pricePerToken = getCUTEPriceUSD()
+	}
+	if pricePerToken <= 0 {
+		return 0
+	}
+	return usdPrice / pricePerToken
+}
+
+func getZImageSteps(req ServiceUsageRequest) int {
+	if req.NumSteps > 0 {
+		return req.NumSteps
+	}
+	return zimageDefaultSteps
+}
+
 // handleGetPricing returns current pricing for all services
 func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	cutePrice := getCUTEPriceUSD()
 
 	units := map[string]string{
-		"zimage":        "per generation",
+		"zimage":        fmt.Sprintf("per generation (base); $%.2f for 20+ steps", zimageHighStepPriceUSD),
 		"chronos2":      "per forecast",
 		"tts":           "per 100 characters",
 		"stt":           "per minute",
@@ -198,7 +250,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Calculate cost in $CUTE
-	cuteCost := getServicePriceCUTE(req.Service)
+	cuteCost := getRequestServicePriceCUTE(req)
 	if cuteCost <= 0 {
 		jsonError(ctx, 503, "pricing unavailable")
 		return
@@ -294,15 +346,107 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		maybeTriggerAutoTopup(user.ID)
 	}
 
+	result, savedImage := persistGeneratedZImage(req, user, result)
+
 	// Return backend response with billing info
-	jsonResponse(ctx, 200, map[string]interface{}{
+	response := map[string]interface{}{
 		"result":          json.RawMessage(result),
 		"credits_used":    billableCost,
 		"credits_remain":  newBalance,
 		"usd_equivalent":  billableCost * cutePrice,
 		"unlimited_api":   user.UnlimitedAPI,
 		"metered_credits": cuteCost,
-	})
+	}
+	if savedImage != nil {
+		response["saved_image"] = savedImage
+	}
+	jsonResponse(ctx, 200, response)
+}
+
+func persistGeneratedZImage(req ServiceUsageRequest, user *User, result []byte) ([]byte, *GeneratedImage) {
+	if req.Service != "zimage" || req.Prompt == "" || user == nil {
+		return result, nil
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return result, nil
+	}
+	imageB64, _ := payload["image_base64"].(string)
+	if imageB64 == "" {
+		return result, nil
+	}
+	imageBytes, err := base64.StdEncoding.DecodeString(imageB64)
+	if err != nil || len(imageBytes) == 0 {
+		log.Printf("zimage persist decode failed: %v", err)
+		return result, nil
+	}
+
+	imageID := newUUID()
+	hash := sha1.Sum([]byte(req.Prompt))
+	fileName := fmt.Sprintf("%s_%s.webp", hex.EncodeToString(hash[:])[:16], imageID[:8])
+	relPath := filepath.ToSlash(filepath.Join("originals", fileName))
+	imageDir := getEnv("IMAGES_DIR", "/sdb-disk/cutedsl-images")
+	fullPath := filepath.Join(imageDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		log.Printf("zimage persist mkdir failed: %v", err)
+		return result, nil
+	}
+	if err := os.WriteFile(fullPath, imageBytes, 0644); err != nil {
+		log.Printf("zimage persist write failed: %v", err)
+		return result, nil
+	}
+
+	width := intFromPayload(payload, "width", req.Width)
+	if width <= 0 {
+		width = 1024
+	}
+	height := intFromPayload(payload, "height", req.Height)
+	if height <= 0 {
+		height = 1024
+	}
+	seed := int64(intFromPayload(payload, "seed", req.Seed))
+	steps := getZImageSteps(req)
+	img := &GeneratedImage{
+		ID:              imageID,
+		Prompt:          req.Prompt,
+		Width:           width,
+		Height:          height,
+		FilePath:        relPath,
+		ThumbPath:       relPath,
+		MedPath:         relPath,
+		FileSize:        int64(len(imageBytes)),
+		Model:           "zimage",
+		Seed:            seed,
+		Steps:           steps,
+		CreatedByUserID: user.ID,
+		CreatedAt:       time.Now(),
+	}
+	if err := dbConn.InsertGeneratedImage(img); err != nil {
+		log.Printf("zimage persist db insert failed: %v", err)
+		return result, nil
+	}
+
+	payload["gallery_image"] = img
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return result, img
+	}
+	return updated, img
+}
+
+func intFromPayload(payload map[string]interface{}, key string, fallback int) int {
+	switch v := payload[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case json.Number:
+		i, _ := v.Int64()
+		return int(i)
+	default:
+		return fallback
+	}
 }
 
 // settleLoraTrainingJob polls the inference server for a training job and
@@ -403,7 +547,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 			}
 			steps := req.NumSteps
 			if steps <= 0 {
-				steps = 4
+				steps = zimageDefaultSteps
 			}
 			guidance := req.Guidance
 			if guidance <= 0 {
@@ -438,9 +582,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		if req.Height > 0 {
 			payload["height"] = req.Height
 		}
-		if req.NumSteps > 0 {
-			payload["num_inference_steps"] = req.NumSteps
-		}
+		payload["num_inference_steps"] = getZImageSteps(req)
 		if req.Guidance > 0 {
 			payload["guidance_scale"] = req.Guidance
 		}

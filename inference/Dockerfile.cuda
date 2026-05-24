@@ -1,0 +1,44 @@
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
+FROM ${CUDA_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/models/hf \
+    TMPDIR=/tmp/cutedsl \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY cutedsl-site/inference/requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install --index-url https://download.pytorch.org/whl/cu128 "torch>=2.8.0" \
+    && grep -v '^torch[>=< =]' /tmp/requirements.txt > /tmp/requirements.no-torch.txt \
+    && python3 -m pip install -r /tmp/requirements.no-torch.txt
+
+COPY cutedsl-site/inference/ /app/inference/
+COPY cutedsl-site/scripts/cuda_doctor.py /app/scripts/cuda_doctor.py
+COPY cutedsl/ /app/cutedsl/
+ENV PYTHONPATH=/app/cutedsl
+
+WORKDIR /app/inference
+RUN chmod +x /app/inference/docker-entrypoint.sh
+
+EXPOSE 8100
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD python3 -c "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5)); raise SystemExit(0 if data.get('status') == 'ok' else 1)"
+
+ENTRYPOINT ["/app/inference/docker-entrypoint.sh"]

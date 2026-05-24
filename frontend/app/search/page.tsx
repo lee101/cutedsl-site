@@ -6,6 +6,7 @@ import Image from 'next/image';
 import { Search, ArrowLeft, X, Loader2, ImageIcon, Wand2, ChevronDown } from 'lucide-react';
 import { useAutocomplete } from '@/hooks/use-autocomplete';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
+import { SiteFooter } from '../site-footer';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -414,17 +415,7 @@ export default function SearchPage() {
         </div>
       )}
 
-      {/* Footer */}
-      <footer className="bg-white/90 border-t border-pink-200 py-8">
-        <div className="max-w-7xl mx-auto px-6 flex justify-between items-center">
-          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied AI NZ</a></p>
-          <div className="flex gap-4 text-sm font-bold">
-            <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
-            <Link href="/evals" className="text-slate-500 hover:text-cyan-500">Evals</Link>
-            <Link href="/blog" className="text-slate-500 hover:text-purple-500">Blog</Link>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Wand2, ArrowLeft, ArrowRight, Calendar, Tag } from 'lucide-react';
 import { CodeBlock } from '@/lib/code-block';
+import { SiteFooter } from '../site-footer';
 
 const IMG_BASE = '/images';
 const BAGS_CTA = `
@@ -29,6 +30,181 @@ interface BlogPost {
 }
 
 const posts: BlogPost[] = [
+  {
+    slug: 'zimage-teleportation-start-step-sweep',
+    title: 'Z-Image Teleportation: Why Exact Replay Now Starts at Step 7',
+    date: '2026-05-23',
+    tags: ['zimage', 'teleportation', 'latents', 'benchmarks', 'inference'],
+    image: `${IMG_BASE}/zimage-teleport-exact-start-sweep.jpg`,
+    excerpt: 'We swept Z-Image latent teleportation settings and found the useful production path: exact-prompt replay from step 7 is pixel-identical to a full 8-step generation while replaying only the final denoising step.',
+    content: `After moving Z-Image's normal default to 8 steps, the next question was teleportation. The site has a latent teleport path that can cache an intermediate latent and resume generation later. The parameter that matters most is where we resume.
+
+There are two different ideas under the same "teleportation" label:
+
+- **Exact-prompt replay**: cache a latent for the same prompt, seed, size, and step count, then resume that same denoising trajectory.
+- **Compositional unit teleport**: combine cached latents for prompt pieces, then refine the combined latent into a new image.
+
+The sweep showed a clean result: exact-prompt replay is production-useful, compositional unit teleport is still research.
+
+## Exact-prompt replay
+
+For the production path, we tested a full 8-step Z-Image generation and then replayed from cached latents captured after each earlier step. The prompt, seed, size, guidance, and step count stayed fixed.
+
+![Z-Image exact teleport start-step sweep](${IMG_BASE}/zimage-teleport-exact-start-sweep.jpg)
+
+| Resume step | Cached after step | Mean replay time at 512px | Quality vs full 8-step output | Verdict |
+|-------------|-------------------|---------------------------|--------------------------------|---------|
+| 1 | 0 | 0.745s | Pixel-identical | Correct, but too much replay |
+| 2 | 1 | 0.644s | Pixel-identical | Previous conservative default |
+| 3 | 2 | 0.544s | Pixel-identical | Correct |
+| 4 | 3 | 0.443s | Pixel-identical | Correct |
+| 5 | 4 | 0.344s | Pixel-identical | Correct |
+| 6 | 5 | 0.244s | Pixel-identical | Correct |
+| 7 | 6 | 0.142s | Pixel-identical | New default |
+
+Every exact replay setting produced the same pixels as the full 8-step generation. That is expected: we are not guessing a new latent; we are continuing the same trajectory from a cached point. Once the cache hit exists, starting at step 7 only reruns the final denoising step and VAE decode. On production, the first replay after a process restart can still pay a one-time compile warm-up; warmed replay measured 152 ms in the live API check.
+
+So the production setting changed from:
+
+\`\`\`bash
+LATENT_TELEPORT_START_STEP=2
+\`\`\`
+
+to:
+
+\`\`\`bash
+LATENT_TELEPORT_START_STEP=7
+\`\`\`
+
+With the current 8-step Z-Image default, that means the server stores the latent after step 6 and resumes at step 7 on cache hits.
+
+## Compositional teleport
+
+We also tested the more ambitious version: tokenize a new prompt into visual units, load cached unit latents, combine them with the tree combiner, then refine for 4, 6, 8, 10, 12, or 14 steps on a 20-step schedule.
+
+![Z-Image compositional teleport refinement sweep](${IMG_BASE}/zimage-teleport-composition-sweep.jpg)
+
+| Mode | Mean time at 512px | Mean SSIM vs 20-step reference | What happened |
+|------|--------------------|--------------------------------|---------------|
+| Direct 8-step generation | 0.974s | 0.803 | Strong baseline |
+| Teleport, 4 refine steps | 0.563s | 0.319 | Fast, but visually wrong |
+| Teleport, 6 refine steps | 0.768s | 0.320 | Still not enough structure |
+| Teleport, 8 refine steps | 0.964s | 0.311 | As slow as direct 8 and worse |
+| Teleport, 10 refine steps | 1.163s | 0.305 | More time, no useful gain |
+| Teleport, 12 refine steps | 1.366s | 0.306 | Still weak |
+| Teleport, 14 refine steps | 1.577s | 0.328 | Best compositional result, still not production-ready |
+
+The image sheet makes the problem obvious. Unit-level teleport can preserve pieces of cached concepts, but it does not yet compose them into the requested scene reliably. On the car prompt, it teleports into a plate-of-food latent. On the fairy and dragon prompts, it often creates overlays and mixed compositions instead of a clean target image.
+
+## Code changes from the sweep
+
+The sweep found two implementation issues in the research path:
+
+- Z-Image \`encode_prompt\` returns prompt embeddings as a list, so cache population needed to normalize list outputs before storing embeddings.
+- \`CombinerConfig.refinement_steps\` existed in the ablation grid but was not actually controlling the refinement count; fixed refinement now lines up the cached latent step with the denoising resume step.
+
+Those fixes make the compositional benchmark honest, but they do not make compositional teleport a production default yet.
+
+## Decision
+
+For production exact-prompt teleportation:
+
+- Use \`LATENT_TELEPORT_START_STEP=7\`.
+- Keep 8 total Z-Image steps as the normal generation default.
+- Treat teleport cache hits as exact replay acceleration, not creative regeneration.
+
+For compositional unit teleportation:
+
+- Keep it experimental.
+- Do not route normal user generations through it.
+- Use direct 8-step Z-Image for quality per second until the latent combiner learns prompt-level composition instead of just blending cached unit trajectories.
+
+The practical win is simple: exact-prompt replay can make repeated prompt/seed requests much faster without changing the image. The broader teleportation idea still needs model work before it beats direct generation.`,
+  },
+  {
+    slug: 'zimage-step-settings-8-default',
+    title: 'Z-Image Step Settings: Why 8 Is the New Default',
+    date: '2026-05-23',
+    tags: ['zimage', 'image-generation', 'settings', 'benchmarks', 'quality'],
+    image: `${IMG_BASE}/zimage-steps-narrow.jpg`,
+    excerpt: 'We generated the same Z-Image prompts from 4 to 20 denoising steps and compared actual output quality against latency. The best default is 8 steps.',
+    content: `We changed the default Z-Image setting after looking at actual generated images, not just timing charts. The question was simple: if users do not pass a step count, where does quality peak relative to latency?
+
+The old fast path used 4 steps. It was quick, but the output could look under-settled: softer edges, flatter textures, and more frequent quality retries from our bumpy-image detector. We briefly considered 20 steps, but the visual gains did not justify the time cost for normal API use.
+
+The result: **8 denoising steps is now the default**. Z-Image still supports explicit higher step counts, and 20+ step requests are priced separately at $0.10. The normal default path remains $0.04 per generation.
+
+## The setup
+
+We tested Z-Image Turbo on the local RTX 5090 inference server with fixed prompt, seed, resolution, guidance, and LoRA settings. That makes the comparison mostly about the denoising step count rather than prompt randomness.
+
+- Model: Z-Image Turbo
+- Resolution: 768x768 for the sweep, with production gallery checks at 1024x1024
+- Guidance: 0
+- Auto LoRA: disabled
+- Seeds: fixed per prompt
+- Step values: 4, 5, 6, 7, 8, 9, then broader checks at 10, 12, 16, 20
+
+![Z-Image step comparison from 4 to 9 steps](${IMG_BASE}/zimage-steps-narrow.jpg)
+
+## What changes as steps increase
+
+At low step counts the composition arrives early. Even at 4 steps, Z-Image usually knows the subject, framing, palette, and major shapes. The differences are in refinement.
+
+| Steps | What it looks like | Warm server time at 768px | Recommendation |
+|-------|--------------------|---------------------------|----------------|
+| 4 | Coherent, but softer and more likely to show unsettled texture | ~1.0s | Good for drafts only |
+| 5 | Slightly cleaner than 4, still not fully settled | ~1.2s | Still draft-quality |
+| 6 | Main forms sharpen; small details improve | ~1.4s | Usable when speed matters |
+| 7 | Good overall image with a little remaining softness | ~1.6s | Fast quality mode |
+| 8 | Edges, small structures, and foreground details look settled | ~1.8s | New default |
+| 9 | Very close to 8, with minor polish | ~2.0s | Fine for explicit requests |
+| 12 | Diminishing returns | ~2.7s | Rarely worth it |
+| 16 | Mostly slower, not meaningfully better | ~3.5s | Not a default candidate |
+| 20 | About 2.4x slower than 8 in this sweep | ~4.35s | Premium/manual setting |
+
+## The broader sweep
+
+The first pass covered 4, 6, 8, 9, 10, 12, 16, and 20 steps on the same robot greenhouse prompt. Once the model was warm, the time curve was roughly linear after 8 steps, while visual quality flattened quickly.
+
+![Z-Image broader step comparison from 4 to 20 steps](${IMG_BASE}/zimage-steps-broad.jpg)
+
+The 8-step and 9-step images were almost indistinguishable side by side. 10, 12, 16, and 20 did not add enough visible improvement to make them good defaults. In some cases, higher steps simply changed small local details rather than making the whole image better.
+
+## Why not keep 4?
+
+4 steps is attractive because it is fast. But the actual output told us it is too aggressive for the default user experience.
+
+On production-sized 1024x1024 gallery generations, 4-step outputs repeatedly triggered the bumpy-image heuristic and retried. A retry erases the apparent speed advantage, and users get less predictable results. After restarting the gallery generator with the 8-step default, new generated images started coming through at 8 steps with the expected steadier look.
+
+## Why not make 20 the default?
+
+20 steps is useful as an explicit choice, especially if someone wants to spend more time and money on a single image. It is not the right default.
+
+In this sweep, 20 steps took about 4.35 seconds of server inference at 768px versus about 1.82 seconds for 8 steps. The image was not 2.4x better. For the default API path, that is the wrong tradeoff: users pay in latency, queue time, and GPU capacity without getting a proportional quality gain.
+
+## The default we shipped
+
+The default is now:
+
+\`\`\`json
+{
+  "service": "zimage",
+  "num_steps": 8
+}
+\`\`\`
+
+If you omit num_steps, the backend sends 8 to the inference server. If you explicitly request 20 or more steps, the request uses the premium 20+ step pricing tier.
+
+## Practical guidance
+
+- Use **4-6 steps** for throwaway drafts or internal experiments.
+- Use **8 steps** for normal API calls and production defaults.
+- Use **9-12 steps** when you want a small polish pass and can tolerate the extra latency.
+- Use **20+ steps** only when the request is worth premium latency and pricing.
+
+The important part is that this is based on actual generated images. Z-Image reaches composition early, but the visible quality knee lands around 8 steps. That is the setting we want most users to hit by default.`,
+  },
   {
     slug: 'go-c-migration-zimage',
     title: 'From Python to Go+C: Migrating Z-Image Inference',
@@ -2199,16 +2375,7 @@ export default function BlogPage() {
         ))}
       </main>
 
-      {/* Footer */}
-      <footer className="bg-white/90 border-t border-pink-200 py-8">
-        <div className="max-w-7xl mx-auto px-6 flex justify-between items-center">
-          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied AI NZ</a></p>
-          <div className="flex gap-4 text-sm font-bold">
-            <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
-            <Link href="/evals" className="text-slate-500 hover:text-cyan-500">Evals</Link>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

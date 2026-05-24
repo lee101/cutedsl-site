@@ -105,6 +105,41 @@ class RunPodClient:
         self.request("GET", "/pods")
 
 
+class RunPodServerlessClient:
+    base_url = "https://api.runpod.ai/v2"
+
+    def __init__(self, api_key: str):
+        if not api_key:
+            raise RunPodConfigError("RUNPOD_API_KEY is not configured")
+        self.api_key = api_key
+
+    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        data = None
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.base_url + path, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=45) as resp:
+                payload = resp.read()
+                if not payload:
+                    return {}
+                return json.loads(payload)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"RunPod serverless API {method} {path} failed: HTTP {exc.code} {detail}") from exc
+
+    def run(self, endpoint_id: str, payload: dict[str, Any]) -> Any:
+        return self.request("POST", f"/{endpoint_id}/run", {"input": payload})
+
+    def status(self, endpoint_id: str, runpod_job_id: str) -> Any:
+        return self.request("GET", f"/{endpoint_id}/status/{runpod_job_id}")
+
+    def cancel(self, endpoint_id: str, runpod_job_id: str) -> Any:
+        return self.request("POST", f"/{endpoint_id}/cancel/{runpod_job_id}")
+
+
 def _worker_script_b64() -> str:
     path = Path(__file__).with_name("runpod_lora_worker.py")
     return base64.b64encode(path.read_bytes()).decode("ascii")
@@ -125,7 +160,59 @@ def _bootstrap_command() -> str:
     )
 
 
+def _runpod_backend() -> str:
+    backend = os.getenv("RUNPOD_LORA_BACKEND", "").strip().lower()
+    if backend:
+        return backend
+    if os.getenv("RUNPOD_LORA_ENDPOINT_ID", "").strip():
+        return "serverless"
+    return "pod"
+
+
 def start_runpod_training(jobs: dict[str, dict], job_id: str, payload: dict[str, Any]) -> dict:
+    backend = _runpod_backend()
+    if backend == "serverless":
+        return _start_runpod_serverless_training(jobs, job_id, payload)
+    if backend != "pod":
+        raise RunPodConfigError("RUNPOD_LORA_BACKEND must be 'serverless' or 'pod'")
+    return _start_runpod_pod_training(jobs, job_id, payload)
+
+
+def _start_runpod_serverless_training(jobs: dict[str, dict], job_id: str, payload: dict[str, Any]) -> dict:
+    key = _runpod_key()
+    endpoint_id = os.getenv("RUNPOD_LORA_ENDPOINT_ID", "").strip()
+    if not endpoint_id:
+        raise RunPodConfigError("RUNPOD_LORA_ENDPOINT_ID is required for serverless RunPod training")
+    _r2_env()  # validate local status polling credentials before charging for work
+
+    status_prefix = os.getenv("LORA_TRAINING_STATUS_PREFIX", "cutedsl/training-jobs")
+    job_payload = {
+        **payload,
+        "job_id": job_id,
+        "status_prefix": status_prefix,
+    }
+    run = RunPodServerlessClient(key).run(endpoint_id, job_payload)
+    runpod_job_id = run.get("id") or run.get("jobId")
+    if not runpod_job_id:
+        raise RuntimeError(f"RunPod serverless did not return a job id: {run}")
+
+    job = update_job(
+        jobs,
+        job_id,
+        backend="runpod",
+        runpod_backend="serverless",
+        runpod_endpoint_id=endpoint_id,
+        runpod_job_id=runpod_job_id,
+        runpod_zero_scale=True,
+        status="starting",
+        progress=0.0,
+        status_key=f"{status_prefix}/{job_id}.json",
+    )
+    threading.Thread(target=monitor_runpod_training, args=(jobs, job_id), daemon=True).start()
+    return job
+
+
+def _start_runpod_pod_training(jobs: dict[str, dict], job_id: str, payload: dict[str, Any]) -> dict:
     key = _runpod_key()
     client = RunPodClient(key)
     client.validate()
@@ -176,6 +263,7 @@ def start_runpod_training(jobs: dict[str, dict], job_id: str, payload: dict[str,
         jobs,
         job_id,
         backend="runpod",
+        runpod_backend="pod",
         runpod_pod_id=pod_id,
         status="starting",
         progress=0.0,
@@ -205,7 +293,34 @@ def refresh_runpod_status(jobs: dict[str, dict], job_id: str) -> dict:
     remote = _get_status_from_r2(job.get("status_key", ""))
     if remote:
         update_job(jobs, job_id, **remote, worker_seen_at=time.time())
+        job = jobs.get(job_id, {})
+    if job.get("runpod_backend") == "serverless" and job.get("runpod_job_id"):
+        _refresh_serverless_status(jobs, job_id)
     return jobs.get(job_id, {})
+
+
+def _refresh_serverless_status(jobs: dict[str, dict], job_id: str) -> None:
+    job = jobs.get(job_id, {})
+    endpoint_id = job.get("runpod_endpoint_id", "")
+    runpod_job_id = job.get("runpod_job_id", "")
+    if not endpoint_id or not runpod_job_id:
+        return
+    status = RunPodServerlessClient(_runpod_key()).status(endpoint_id, runpod_job_id)
+    state = str(status.get("status") or status.get("state") or "").upper()
+    updates: dict[str, Any] = {"runpod_state": state, "runpod_status_checked_at": time.time()}
+    output = status.get("output")
+    if isinstance(output, dict):
+        updates.update({k: v for k, v in output.items() if k not in {"input"}})
+    if state in {"IN_QUEUE", "QUEUED"} and job.get("status") in {"queued", "starting", None}:
+        updates.update(status="queued", progress=max(float(job.get("progress") or 0), 0.01))
+    elif state in {"IN_PROGRESS", "RUNNING"} and job.get("status") not in {"completed", "failed"}:
+        updates.update(status=job.get("status") if job.get("worker_seen_at") else "running")
+    elif state == "COMPLETED":
+        updates.setdefault("status", "completed")
+        updates.setdefault("progress", 1.0)
+    elif state in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+        updates.update(status="failed", progress=1.0, error=job.get("error") or f"RunPod serverless job {state.lower()}")
+    update_job(jobs, job_id, **updates)
 
 
 def terminate_runpod_pod(pod_id: str) -> None:
@@ -217,7 +332,20 @@ def terminate_runpod_pod(pod_id: str) -> None:
         pass
 
 
+def cancel_runpod_serverless_job(endpoint_id: str, runpod_job_id: str) -> None:
+    if not endpoint_id or not runpod_job_id:
+        return
+    try:
+        RunPodServerlessClient(_runpod_key()).cancel(endpoint_id, runpod_job_id)
+    except Exception:
+        pass
+
+
 def monitor_runpod_training(jobs: dict[str, dict], job_id: str) -> None:
+    if jobs.get(job_id, {}).get("runpod_backend") == "serverless":
+        monitor_runpod_serverless_training(jobs, job_id)
+        return
+
     timeout = float(os.getenv("RUNPOD_LORA_TIMEOUT_SECONDS", "7200"))
     boot_timeout = float(os.getenv("RUNPOD_LORA_BOOT_TIMEOUT_SECONDS", "600"))
     started = time.time()
@@ -250,3 +378,23 @@ def monitor_runpod_training(jobs: dict[str, dict], job_id: str) -> None:
     pod_id = job.get("runpod_pod_id", pod_id)
     terminate_runpod_pod(pod_id)
     update_job(jobs, job_id, status="failed", error="RunPod training timed out; pod termination requested", runpod_pod_terminated=True)
+
+
+def monitor_runpod_serverless_training(jobs: dict[str, dict], job_id: str) -> None:
+    timeout = float(os.getenv("RUNPOD_LORA_TIMEOUT_SECONDS", "7200"))
+    started = time.time()
+    while time.time() - started < timeout:
+        time.sleep(float(os.getenv("RUNPOD_LORA_POLL_SECONDS", "10")))
+        job = refresh_runpod_status(jobs, job_id)
+        if job.get("status") in {"completed", "failed"}:
+            return
+    job = jobs.get(job_id, {})
+    cancel_runpod_serverless_job(job.get("runpod_endpoint_id", ""), job.get("runpod_job_id", ""))
+    update_job(
+        jobs,
+        job_id,
+        status="failed",
+        progress=1.0,
+        error="RunPod serverless training timed out; cancellation requested",
+        runpod_cancel_requested=True,
+    )

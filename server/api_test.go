@@ -334,6 +334,44 @@ func TestPricing(t *testing.T) {
 	}
 }
 
+func TestZImageRequestPricingTiers(t *testing.T) {
+	prevDefaultSteps := zimageDefaultSteps
+	prevHighStepPrice := zimageHighStepPriceUSD
+	prevBasePrice := servicePricesUSD["zimage"]
+	t.Cleanup(func() {
+		zimageDefaultSteps = prevDefaultSteps
+		zimageHighStepPriceUSD = prevHighStepPrice
+		servicePricesUSD["zimage"] = prevBasePrice
+	})
+
+	zimageDefaultSteps = 8
+	zimageHighStepPriceUSD = 0.10
+	servicePricesUSD["zimage"] = 0.04
+
+	cases := []struct {
+		name  string
+		steps int
+		want  float64
+	}{
+		{name: "default", steps: 0, want: 0.04},
+		{name: "below high tier", steps: 19, want: 0.04},
+		{name: "twenty steps", steps: 20, want: 0.10},
+		{name: "forty steps", steps: 40, want: 0.10},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getRequestServicePriceUSD(ServiceUsageRequest{
+				Service:  "zimage",
+				NumSteps: tc.steps,
+			})
+			if got != tc.want {
+				t.Fatalf("expected zimage USD price %.2f, got %.2f", tc.want, got)
+			}
+		})
+	}
+}
+
 // ---- CUTE Price ----
 
 func TestCutePrice(t *testing.T) {

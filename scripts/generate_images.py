@@ -377,7 +377,7 @@ def main():
     parser.add_argument("--limit", type=int, default=1000, help="Max images to generate (0 = all)")
     parser.add_argument("--width", type=int, default=1024, help="Image width")
     parser.add_argument("--height", type=int, default=1024, help="Image height")
-    parser.add_argument("--steps", type=int, default=4, help="Inference steps (4 for Z-Image Turbo)")
+    parser.add_argument("--steps", type=int, default=8, help="Inference steps (8 for Z-Image Turbo)")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N prompts")
     parser.add_argument("--dry-run", action="store_true", help="Just count pending, don't generate")
     args = parser.parse_args()

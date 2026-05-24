@@ -152,20 +152,21 @@ type ServicePricing struct {
 
 // GeneratedImage represents an AI-generated image in the gallery
 type GeneratedImage struct {
-	ID         string    `json:"id"`
-	Prompt     string    `json:"prompt"`
-	Width      int       `json:"width"`
-	Height     int       `json:"height"`
-	FilePath   string    `json:"file_path"`  // relative path under images/
-	ThumbPath  string    `json:"thumb_path"` // thumbnail path
-	MedPath    string    `json:"med_path"`   // medium size path
-	FileSize   int64     `json:"file_size"`  // bytes
-	Model      string    `json:"model"`      // zimage, flux, etc.
-	Seed       int64     `json:"seed"`
-	Steps      int       `json:"steps"`
-	IsNSFW     *bool     `json:"is_nsfw"`     // nil = not yet classified
-	LatentPath string    `json:"latent_path"` // path to saved latent tensor
-	CreatedAt  time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	Prompt          string    `json:"prompt"`
+	Width           int       `json:"width"`
+	Height          int       `json:"height"`
+	FilePath        string    `json:"file_path"`  // relative path under images/
+	ThumbPath       string    `json:"thumb_path"` // thumbnail path
+	MedPath         string    `json:"med_path"`   // medium size path
+	FileSize        int64     `json:"file_size"`  // bytes
+	Model           string    `json:"model"`      // zimage, flux, etc.
+	Seed            int64     `json:"seed"`
+	Steps           int       `json:"steps"`
+	IsNSFW          *bool     `json:"is_nsfw"`     // nil = not yet classified
+	LatentPath      string    `json:"latent_path"` // path to saved latent tensor
+	CreatedByUserID string    `json:"created_by_user_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // ImageSearchResult is returned from the search API

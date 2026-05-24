@@ -332,6 +332,12 @@ func parseFloat(s string) float64 {
 	return f
 }
 
+func parseInt(s string) int {
+	var i int
+	fmt.Sscanf(s, "%d", &i)
+	return i
+}
+
 // --- RPC Calls ---
 
 func robustRPCCall(method string, params interface{}, timeout time.Duration) ([]byte, error) {

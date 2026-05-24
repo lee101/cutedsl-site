@@ -24,9 +24,19 @@ def _env_json(name: str) -> dict:
     return json.loads(base64.b64decode(value).decode("utf-8"))
 
 
-JOB = _env_json("LORA_TRAINING_JOB_JSON_B64")
-JOB_ID = JOB.get("job_id") or os.getenv("LORA_TRAINING_JOB_ID") or "unknown"
+JOB: dict = {}
+JOB_ID = "unknown"
 STATUS_PREFIX = os.getenv("LORA_TRAINING_STATUS_PREFIX", "cutedsl/training-jobs")
+
+
+def configure_job(job: dict | None = None) -> None:
+    global JOB, JOB_ID, STATUS_PREFIX
+    JOB = job or _env_json("LORA_TRAINING_JOB_JSON_B64")
+    JOB_ID = JOB.get("job_id") or os.getenv("LORA_TRAINING_JOB_ID") or "unknown"
+    STATUS_PREFIX = JOB.get("status_prefix") or os.getenv("LORA_TRAINING_STATUS_PREFIX", "cutedsl/training-jobs")
+
+
+configure_job()
 
 
 def _s3_client():
@@ -219,7 +229,7 @@ def _upload_artifacts(out_dir: Path) -> dict[str, str]:
     return urls
 
 
-def main() -> int:
+def run_training() -> dict:
     workdir = Path(os.getenv("LORA_WORKDIR", "/workspace/cutedsl-lora-worker"))
     workdir.mkdir(parents=True, exist_ok=True)
     status(status="starting", progress=0.0)
@@ -230,11 +240,28 @@ def main() -> int:
         out_dir = _train_zimage(workdir, dataset)
         urls = _upload_artifacts(out_dir)
         status(status="completed", progress=1.0, **urls)
-        return 0
+        return {"job_id": JOB_ID, "status": "completed", "progress": 1.0, **urls}
     except Exception as exc:
-        status(status="failed", progress=1.0, error=str(exc), traceback=traceback.format_exc()[-4000:])
-        return 1
+        error = str(exc)
+        trace = traceback.format_exc()[-4000:]
+        status(status="failed", progress=1.0, error=error, traceback=trace)
+        return {"job_id": JOB_ID, "status": "failed", "progress": 1.0, "error": error, "traceback": trace}
+
+
+def handler(event) -> dict:
+    configure_job((event or {}).get("input") or {})
+    return run_training()
+
+
+def main() -> int:
+    result = run_training()
+    return 0 if result.get("status") == "completed" else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if os.getenv("RUNPOD_SERVERLESS", "0") == "1":
+        import runpod
+
+        runpod.serverless.start({"handler": handler})
+    else:
+        raise SystemExit(main())

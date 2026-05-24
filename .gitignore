@@ -23,6 +23,8 @@ server/cutedsl-site
 Thumbs.db
 *.zip
 images/
+!frontend/public/images/
+!frontend/public/images/**
 
 # Inference runtime data
 inference/.lora_cache/
@@ -41,6 +43,8 @@ screenshots/
 swap_test.py
 .runlogs/
 images
+!frontend/public/images/
+!frontend/public/images/**
 frontend/tsconfig.tsbuildinfo
 visualbench
 frontend/test-results/
