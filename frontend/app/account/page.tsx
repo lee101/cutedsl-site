@@ -129,6 +129,10 @@ interface AutotopupResponse {
   enabled?: boolean;
 }
 
+interface UpdateEmailResponse {
+  user: UserPayload;
+}
+
 type CheckoutKind = 'credits' | 'monthly' | 'annual';
 type AccountTestStatus = 'running' | 'passed' | 'failed' | 'skipped';
 
@@ -225,8 +229,12 @@ export default function AccountPage() {
     setEmail(user.email || null);
     localStorage.setItem('cutedsl_wallet', user.wallet_address);
     localStorage.setItem('cutedsl_api_key', key);
-    if (user.email) localStorage.setItem('cutedsl_email', user.email);
-    else localStorage.removeItem('cutedsl_email');
+    if (user.email) {
+      setEmailInput(user.email);
+      localStorage.setItem('cutedsl_email', user.email);
+    } else {
+      localStorage.removeItem('cutedsl_email');
+    }
   }, []);
 
   const refreshAccount = useCallback(async (wallet: string) => {
@@ -389,6 +397,26 @@ export default function AccountPage() {
     }
   };
 
+  const saveEmailForStripe = async () => {
+    if (!walletAddress || !apiKey || !isValidEmail(emailInput)) return;
+    if (password && password.length < 8) return;
+    setLoadingAuth(true);
+    setStatus(null);
+    try {
+      const data = await postJSON<UpdateEmailResponse>('/auth/email', {
+        wallet_address: walletAddress,
+        email: emailInput.trim(),
+        password: password || undefined,
+      }, 'Failed to save email');
+      storeAuth(data.user, apiKey);
+      setStatus('Email saved. Card checkout is ready.');
+    } catch (err: unknown) {
+      setStatus(errorMessage(err, 'Failed to save email'));
+    } finally {
+      setLoadingAuth(false);
+    }
+  };
+
   const logout = useCallback(() => {
     embeddedCheckoutRef.current?.destroy();
     embeddedCheckoutRef.current = null;
@@ -486,6 +514,10 @@ export default function AccountPage() {
 
   const startCheckout = async (kind: CheckoutKind) => {
     if (!walletAddress) return;
+    if (!email) {
+      setStatus('Add an email to this wallet before starting Stripe checkout.');
+      return;
+    }
     setCheckoutKind(kind);
     setCheckoutLoading(true);
     setStatus(null);
@@ -688,6 +720,46 @@ export default function AccountPage() {
                   <div className="mt-1 truncate text-sm font-bold text-slate-900">{email || walletAddress}</div>
                   <div className="mt-1 truncate font-mono text-xs text-slate-500">{walletAddress}</div>
                 </div>
+
+                {!email && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-4" data-testid="account-add-email-card">
+                    <div className="mb-3 text-sm font-bold text-slate-800">Add email for card checkout</div>
+                    <div className="space-y-3">
+                      <label className="block text-xs font-bold text-slate-600">
+                        Email
+                        <input
+                          type="email"
+                          value={emailInput}
+                          data-testid="account-link-email"
+                          onChange={(e) => setEmailInput(e.target.value)}
+                          placeholder="you@example.com"
+                          className={inputClassName}
+                        />
+                      </label>
+                      <label className="block text-xs font-bold text-slate-600">
+                        Password for email login
+                        <input
+                          type="password"
+                          value={password}
+                          data-testid="account-link-password"
+                          onChange={(e) => setPassword(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && saveEmailForStripe()}
+                          placeholder="Optional, at least 8 characters"
+                          className={inputClassName}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={saveEmailForStripe}
+                        disabled={loadingAuth || !isValidEmail(emailInput) || (!!password && password.length < 8)}
+                        className={primaryButtonClassName}
+                      >
+                        {loadingAuth ? <RefreshCw size={16} className="animate-spin" /> : <Mail size={16} />}
+                        Save email and enable Stripe
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="rounded-lg border border-pink-100 bg-white p-4">

@@ -3,6 +3,9 @@ const { test, expect } = require('@playwright/test');
 const TEST_EMAIL = 'account-flow@cutedsl.local';
 const TEST_PASSWORD = 'cute-test-123';
 const RESET_PASSWORD = 'cute-test-456';
+const WALLET_FIRST_ADDRESS = 'WalletFirstAccount111111111111111111111111111';
+const WALLET_FIRST_EMAIL = 'wallet-first-account@cutedsl.local';
+const WALLET_FIRST_PASSWORD = 'wallet-first-123';
 
 async function installAccountMocks(page) {
   let user = null;
@@ -73,6 +76,41 @@ async function installAccountMocks(page) {
     });
   });
 
+  await page.route('**/api/auth/wallet', async route => {
+    const req = route.request().postDataJSON();
+    if (!req.wallet_address || req.wallet_address.length < 20) {
+      await route.fulfill({ status: 400, json: { error: 'wallet_address required' } });
+      return;
+    }
+    user = {
+      id: 'user_account_flow',
+      wallet_address: req.wallet_address,
+      email: req.email || user?.email || '',
+      api_key: 'cutedsl_account_flow_test_key',
+    };
+    await route.fulfill({ status: 200, json: { user, api_key: user.api_key, linked: !!req.api_key } });
+  });
+
+  await page.route('**/api/auth/email', async route => {
+    const req = route.request().postDataJSON();
+    if (!req.wallet_address || !req.email || !req.email.includes('@')) {
+      await route.fulfill({ status: 400, json: { error: 'wallet_address and email required' } });
+      return;
+    }
+    if (req.password && req.password.length < 8) {
+      await route.fulfill({ status: 400, json: { error: 'password must be at least 8 characters' } });
+      return;
+    }
+    user = {
+      id: 'user_account_flow',
+      wallet_address: req.wallet_address,
+      email: req.email,
+      api_key: user?.api_key || 'cutedsl_account_flow_test_key',
+    };
+    password = req.password || password;
+    await route.fulfill({ status: 200, json: { success: true, user, email: req.email, has_password: !!req.password } });
+  });
+
   await page.route('**/api/auth/forgot-password', async route => {
     await route.fulfill({ status: 200, json: { success: true, reset_token: resetToken } });
   });
@@ -118,6 +156,10 @@ async function installAccountMocks(page) {
     const req = route.request().postDataJSON();
     if (!req.wallet_address) {
       await route.fulfill({ status: 400, json: { error: 'wallet_address required' } });
+      return;
+    }
+    if (!user?.email) {
+      await route.fulfill({ status: 400, json: { error: 'email required before stripe checkout' } });
       return;
     }
     await route.fulfill({
@@ -171,6 +213,33 @@ test('signup, logout, login, reset password, and embedded checkout work on /acco
   await expect(checkout.getByText('Plan: monthly')).toBeVisible();
   await expect(page.getByTestId('mock-stripe-checkout')).toBeVisible();
   await expect(page.locator('iframe[title="Mock Stripe Checkout Frame"]')).toHaveCount(1);
+});
+
+test('wallet-first users can add email and then pay with Stripe on /account', async ({ page }) => {
+  await installAccountMocks(page);
+
+  await page.goto('/account');
+  page.once('dialog', async dialog => {
+    await dialog.accept(WALLET_FIRST_ADDRESS);
+  });
+  await page.getByRole('button', { name: /Connect Solana wallet/i }).click();
+  await expect(page.getByText('Wallet connected.')).toBeVisible();
+  await expect(page.getByTestId('account-add-email-card')).toBeVisible();
+
+  await page.getByRole('button', { name: /^Choose/i }).first().click();
+  await expect(page.getByText('Add an email to this wallet before starting Stripe checkout.')).toBeVisible();
+
+  await page.getByTestId('account-link-email').fill(WALLET_FIRST_EMAIL);
+  await page.getByTestId('account-link-password').fill(WALLET_FIRST_PASSWORD);
+  await page.getByRole('button', { name: /Save email and enable Stripe/i }).click();
+  await expect(page.getByText('Email saved. Card checkout is ready.')).toBeVisible();
+  await expect(page.getByTestId('account-add-email-card')).toHaveCount(0);
+
+  await page.getByRole('button', { name: /^Choose/i }).first().click();
+  const checkout = page.getByTestId('embedded-checkout-container');
+  await expect(checkout).toBeVisible();
+  await expect(checkout.getByText('Plan: monthly')).toBeVisible();
+  await expect(page.getByTestId('mock-stripe-checkout')).toBeVisible();
 });
 
 test('/account?test=true runs the built-in account self-test and opens checkout', async ({ page }) => {
