@@ -14,7 +14,7 @@ import { ArtGenerator } from '../art-generator';
 const API_BASE = '/api';
 const IMG_BASE = '/images';
 const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
-const PER_PAGE = 96;
+const PER_PAGE = 72;
 
 interface GeneratedImage {
   id: string;
@@ -83,12 +83,14 @@ export default function GalleryPage() {
   const fetchImages = useCallback(async (p: number, append = false) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(p), per_page: String(PER_PAGE) });
+      const params = new URLSearchParams({ page: String(p), per_page: String(PER_PAGE), skip_total: 'true' });
       const res = await fetch(`${API_BASE}/images?${params}`);
       const data = await res.json();
       const imgs: GeneratedImage[] = data.images || [];
       setImages(prev => append ? [...prev, ...imgs] : imgs);
-      setTotal(data.total || 0);
+      if (typeof data.total === 'number' && data.total > 0) {
+        setTotal(data.total);
+      }
       setPage(p);
       setInitialLoad(false);
     } catch {
@@ -136,7 +138,7 @@ export default function GalleryPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-cyan-50 relative">
       {/* Floating sparkles (decorative, aria-hidden) */}
-      <div aria-hidden className="fixed inset-0 pointer-events-none overflow-hidden">
+      <div aria-hidden className="fixed inset-0 pointer-events-none hidden overflow-hidden lg:block">
         <div className="absolute top-16 left-8 text-pink-300 animate-sparkle" style={{ animationDelay: '0s' }}><Sparkles size={22} /></div>
         <div className="absolute top-48 right-12 text-purple-300 animate-sparkle" style={{ animationDelay: '1s' }}><Star size={26} /></div>
         <div className="absolute top-1/3 left-1/4 text-cyan-300 animate-sparkle" style={{ animationDelay: '2s' }}><Sparkles size={18} /></div>
@@ -225,17 +227,18 @@ export default function GalleryPage() {
         </section>
 
         {/* Image grid */}
-        {initialLoad ? (
-          <div className="flex items-center justify-center py-24">
-            <Loader2 className="animate-spin text-pink-400" size={48} />
-          </div>
-        ) : images.length === 0 ? (
-          <div className="text-center py-24">
-            <ImageIcon className="mx-auto mb-4 text-slate-300" size={64} />
-            <p className="text-xl text-slate-500 font-medium">No images yet.</p>
-          </div>
-        ) : (
-          <>
+        <section aria-label="Gallery results" className="min-h-[75vh]">
+          {initialLoad ? (
+            <div className="flex items-center justify-center py-24">
+              <Loader2 className="animate-spin text-pink-400" size={48} />
+            </div>
+          ) : images.length === 0 ? (
+            <div className="text-center py-24">
+              <ImageIcon className="mx-auto mb-4 text-slate-300" size={64} />
+              <p className="text-xl text-slate-500 font-medium">No images yet.</p>
+            </div>
+          ) : (
+            <>
             <div className="grid grid-cols-[repeat(auto-fill,minmax(128px,1fr))] sm:grid-cols-[repeat(auto-fill,minmax(148px,1fr))] lg:grid-cols-[repeat(auto-fill,minmax(168px,1fr))] 2xl:grid-cols-[repeat(auto-fill,minmax(188px,1fr))] gap-1.5 sm:gap-2 items-start">
               {images.map((img, idx) => (
                 <a
@@ -247,15 +250,15 @@ export default function GalleryPage() {
                     e.preventDefault();
                     setSelectedImage(img);
                   }}
-                  className="group relative rounded-md overflow-hidden bg-white border border-pink-100 shadow-sm hover:shadow-xl hover:border-pink-300 hover:-translate-y-0.5 transition-all duration-200 cursor-pointer block"
+                  className="content-visibility-auto group relative block cursor-pointer overflow-hidden rounded-md border border-pink-100 bg-white shadow-sm transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-0.5 hover:border-pink-300 hover:shadow-lg"
                   title={img.prompt}
                 >
                   <img
                     src={`${IMG_BASE}/${img.thumb_path || img.med_path || img.file_path}`}
                     alt={img.prompt}
-                    loading={idx < 12 ? 'eager' : 'lazy'}
+                    loading={idx < 8 ? 'eager' : 'lazy'}
                     decoding="async"
-                    fetchPriority={idx < 6 ? 'high' : 'auto'}
+                    fetchPriority={idx < 4 ? 'high' : 'auto'}
                     width={img.width}
                     height={img.height}
                     className="w-full h-auto block"
@@ -283,11 +286,12 @@ export default function GalleryPage() {
             <p className="text-center text-slate-400 text-sm mt-4">
               Showing {images.length.toLocaleString()} of {total.toLocaleString()} images
             </p>
-          </>
-        )}
+            </>
+          )}
+        </section>
 
         {/* Crawlable intro / about section — gives SEO text content for the page shell */}
-        <section aria-labelledby="about-gallery" className="max-w-3xl mx-auto mt-12 bg-white/70 backdrop-blur-sm rounded-3xl p-8 border border-pink-100 shadow-sm">
+        <section aria-labelledby="about-gallery" className="content-visibility-auto max-w-3xl mx-auto mt-12 bg-white/80 rounded-3xl p-8 border border-pink-100 shadow-sm">
           <h2 id="about-gallery" className="font-fredoka text-3xl font-bold text-slate-800 mb-4 flex items-center gap-2">
             <Sparkles className="text-pink-500" size={24} /> About the Gallery
           </h2>

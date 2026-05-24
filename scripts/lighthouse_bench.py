@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROUTES = [
     "/",
+    "/gallery",
     "/blog",
     "/evals",
     "/search",
@@ -84,6 +85,11 @@ def run_lighthouse(url: str, out_json: Path, chrome_path: str | None) -> dict | 
         "--only-categories=performance,seo,accessibility,best-practices",
     ]
     env = os.environ.copy()
+    repo = Path(__file__).parent.parent
+    bench_tmp = repo / ".perf-tmp"
+    bench_tmp.mkdir(exist_ok=True)
+    env.setdefault("TMPDIR", str(bench_tmp))
+    env.setdefault("npm_config_cache", str(bench_tmp / "npm-cache"))
     if chrome_path:
         env["CHROME_PATH"] = chrome_path
     try:

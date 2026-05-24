@@ -1170,6 +1170,44 @@ func (db *DB) SearchImagesByUser(userID string, page, perPage int, allowNSFW boo
 	}, nil
 }
 
+// ListImages returns one gallery page without a COUNT(*). The gallery already
+// fetches /api/images/count separately, so this keeps infinite scroll cheap.
+func (db *DB) ListImages(page, perPage int, allowNSFW bool) ([]GeneratedImage, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	offset := (page - 1) * perPage
+	nsfwFilter := ""
+	if !allowNSFW {
+		nsfwFilter = " AND (is_nsfw = FALSE OR is_nsfw IS NULL)"
+	}
+
+	rows, err := db.conn.Query(
+		`SELECT id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, is_nsfw, latent_path, created_at
+		 FROM generated_images WHERE 1=1`+nsfwFilter+` ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+		perPage, offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	images := make([]GeneratedImage, 0, perPage)
+	for rows.Next() {
+		var img GeneratedImage
+		if err := rows.Scan(&img.ID, &img.Prompt, &img.Width, &img.Height, &img.FilePath,
+			&img.ThumbPath, &img.MedPath, &img.FileSize, &img.Model, &img.Seed, &img.Steps,
+			&img.IsNSFW, &img.LatentPath, &img.CreatedAt); err != nil {
+			return nil, err
+		}
+		images = append(images, img)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return images, nil
+}
+
 // StreamAllImagePrompts scans every row in generated_images and feeds (id, prompt)
 // into the callback. Used by the semantic indexer at startup. Keeps memory low
 // by using a streaming cursor — no LIMIT, no ORDER BY, no cache.

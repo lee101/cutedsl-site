@@ -874,6 +874,7 @@ func handleImageSearch(ctx *fasthttp.RequestCtx) {
 	page, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("page")))
 	perPage, _ := strconv.Atoi(string(ctx.QueryArgs().Peek("per_page")))
 	allowNSFW := string(ctx.QueryArgs().Peek("allow_nsfw")) == "true"
+	skipTotal := string(ctx.QueryArgs().Peek("skip_total")) == "true"
 
 	if page < 1 {
 		page = 1
@@ -894,6 +895,21 @@ func handleImageSearch(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		jsonResponse(ctx, 200, result)
+		return
+	}
+
+	if query == "" && skipTotal {
+		images, err := dbConn.ListImages(page, perPage, allowNSFW)
+		if err != nil {
+			jsonError(ctx, 500, "search failed")
+			return
+		}
+		jsonResponse(ctx, 200, &ImageSearchResult{
+			Images:  images,
+			Total:   0,
+			Page:    page,
+			PerPage: perPage,
+		})
 		return
 	}
 

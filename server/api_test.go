@@ -334,6 +334,33 @@ func TestPricing(t *testing.T) {
 	}
 }
 
+func TestImageSearchSkipTotal(t *testing.T) {
+	img := &GeneratedImage{
+		ID:       "test-skip-total-image",
+		Prompt:   "benchmark fairy gallery image",
+		Width:    1024,
+		Height:   1024,
+		FilePath: "test/skip-total.webp",
+		Model:    "zimage",
+		Steps:    8,
+	}
+	if err := dbConn.InsertGeneratedImage(img); err != nil {
+		t.Fatalf("insert image: %v", err)
+	}
+
+	status, body := doGet(t, "/api/images?page=1&per_page=1&skip_total=true")
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %#v", status, body)
+	}
+	if body["total"].(float64) != 0 {
+		t.Fatalf("skip_total should avoid COUNT(*) and return total 0, got %#v", body["total"])
+	}
+	images, ok := body["images"].([]interface{})
+	if !ok || len(images) != 1 {
+		t.Fatalf("expected one image, got %#v", body["images"])
+	}
+}
+
 func TestZImageRequestPricingTiers(t *testing.T) {
 	prevDefaultSteps := zimageDefaultSteps
 	prevHighStepPrice := zimageHighStepPriceUSD

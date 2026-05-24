@@ -34,6 +34,12 @@
 
 .animate-sparkle {
   animation: sparkle 3s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+
+.content-visibility-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 220px 220px;
 }
 
 .glass-card {
