@@ -6,10 +6,11 @@ import Link from 'next/link';
 import { ArrowLeft, Image as ImageIcon, Loader2, Search, Sparkles } from 'lucide-react';
 import { ArtGenerator, type GalleryImage } from '../art-generator';
 import { SiteFooter } from '../site-footer';
+import { staticAssetPath } from '@/lib/static-assets';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
-const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
+const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
 function slugify(s: string): string {
   return s
@@ -88,7 +89,7 @@ export default function PlaygroundPage() {
 
         <section className="grid gap-6 lg:grid-cols-[minmax(0,520px)_1fr]">
           <div className="lg:sticky lg:top-4 lg:self-start">
-            <ArtGenerator title="Generate Art" onGenerated={handleGenerated} />
+            <ArtGenerator title="Generate Art" showPlaygroundLink={false} onGenerated={handleGenerated} />
           </div>
 
           <div className="min-h-[520px] rounded-2xl border border-pink-100 bg-white/80 p-4 shadow-sm sm:p-5">

@@ -5,9 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODE_ROOT="$(cd "$ROOT/.." && pwd)"
 IMAGE="${CUTEDSL_INFERENCE_IMAGE:-cutedsl-inference:cuda12.8}"
 CUDA_IMAGE="${CUDA_IMAGE:-nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04}"
+PYTORCH_VERSION="${PYTORCH_VERSION:-2.8.0+cu128}"
 BUILD_CONTEXT="$(mktemp -d)"
 trap 'rm -rf "$BUILD_CONTEXT"' EXIT
-export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}"
+if docker buildx version >/dev/null 2>&1; then
+  export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-1}"
+else
+  export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}"
+fi
 
 mkdir -p "$BUILD_CONTEXT/cutedsl-site" "$BUILD_CONTEXT/cutedsl"
 rsync -a \
@@ -40,6 +45,7 @@ fi
 docker build \
   --pull \
   --build-arg "CUDA_IMAGE=${CUDA_IMAGE}" \
+  --build-arg "PYTORCH_VERSION=${PYTORCH_VERSION}" \
   -f "$BUILD_CONTEXT/cutedsl-site/inference/Dockerfile.cuda" \
   -t "$IMAGE" \
   "$BUILD_CONTEXT"

@@ -112,6 +112,7 @@ type ServiceUsageRequest struct {
 	Prompt   string `json:"prompt,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	Text     string `json:"text,omitempty"`
+	Input    string `json:"input,omitempty"`
 	AudioURL string `json:"audio_url,omitempty"`
 	// zimage fields
 	Width    int     `json:"width,omitempty"`
@@ -124,8 +125,10 @@ type ServiceUsageRequest struct {
 	PredictionLength int       `json:"prediction_length,omitempty"`
 	QuantileLevels   []float64 `json:"quantile_levels,omitempty"`
 	// tts fields
-	Voice string  `json:"voice,omitempty"`
-	Speed float64 `json:"speed,omitempty"`
+	Voice    string  `json:"voice,omitempty"`
+	Language string  `json:"language,omitempty"`
+	Speed    float64 `json:"speed,omitempty"`
+	Steps    int     `json:"steps,omitempty"`
 	// gemma4 fields
 	Messages    []map[string]interface{} `json:"messages,omitempty"`
 	MaxTokens   int                      `json:"max_tokens,omitempty"`

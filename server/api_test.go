@@ -41,7 +41,7 @@ func TestMain(m *testing.M) {
 	os.Setenv("STT_PRICE_USD_PER_MINUTE", "0.02")
 	os.Setenv("GEMMA4_PRICE_USD", "0.01")
 	os.Setenv("CAPTION_PRICE_USD", "0.01")
-	os.Setenv("LORA_TRAINING_PRICE_USD", "10")
+	os.Setenv("LORA_TRAINING_PRICE_USD", "5")
 	os.Setenv("LTX_VIDEO_PRICE_USD", "0.30")
 	os.Setenv("FLUX_IMAGE_PRICE_USD", "0.04")
 	os.Setenv("NSFW_DETECT_PRICE_USD", "0.001")

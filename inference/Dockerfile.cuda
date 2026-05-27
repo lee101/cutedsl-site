@@ -1,5 +1,6 @@
 ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 FROM ${CUDA_IMAGE}
+ARG PYTORCH_VERSION=2.8.0+cu128
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -25,7 +26,7 @@ WORKDIR /app
 
 COPY cutedsl-site/inference/requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --upgrade pip setuptools wheel \
-    && python3 -m pip install --index-url https://download.pytorch.org/whl/cu128 "torch>=2.8.0" \
+    && python3 -m pip install --index-url https://download.pytorch.org/whl/cu128 "torch==${PYTORCH_VERSION}" \
     && grep -v '^torch[>=< =]' /tmp/requirements.txt > /tmp/requirements.no-torch.txt \
     && python3 -m pip install -r /tmp/requirements.no-torch.txt
 

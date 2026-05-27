@@ -25,7 +25,7 @@ var servicePricesUSD = map[string]float64{
 	"stt":           0.02,  // per minute
 	"gemma4":        0.01,  // per request
 	"caption":       0.01,  // per image
-	"lora_training": 10.00,
+	"lora_training": 5.00,
 	"ltx_video":     0.30,  // per ~6s 1080p video via fal.ai
 	"flux_image":    0.04,  // per image via fal.ai or netwrck
 	"nsfw_detect":   0.001, // per image classification
@@ -44,6 +44,7 @@ var firstPartyServices = map[string]bool{
 
 // FAL API key for third-party proxied services
 var falAPIKey string
+var textGeneratorAPIKey string
 
 // Reusable HTTP client with connection pooling
 var backendClient = &http.Client{
@@ -62,10 +63,11 @@ var serviceBackends = map[string]string{}
 func initServices() {
 	// CuteDSL inference server serves zimage, chronos2, tts, stt, caption, gemma4
 	inferenceURL := getEnv("INFERENCE_BACKEND_URL", "http://localhost:8100")
+	textGeneratorURL := getEnv("TG_BACKEND_URL", "http://localhost:9080")
 
 	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", inferenceURL)
 	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", inferenceURL)
-	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", inferenceURL)
+	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", textGeneratorURL)
 	serviceBackends["stt"] = getEnv("STT_BACKEND_URL", inferenceURL)
 	serviceBackends["gemma4"] = getEnv("GEMMA4_BACKEND_URL", inferenceURL)
 	serviceBackends["caption"] = getEnv("CAPTION_BACKEND_URL", inferenceURL)
@@ -76,6 +78,10 @@ func initServices() {
 	falAPIKey = getEnv("FAL_KEY", getEnv("FAL_API_KEY", ""))
 	if falAPIKey != "" {
 		log.Printf("FAL API key configured for ltx_video and flux_image services")
+	}
+	textGeneratorAPIKey = getEnv("TG_API_KEY", getEnv("TEXT_GENERATOR_API_KEY", getEnv("TEXT_GENERATOR_SECRET", "")))
+	if textGeneratorAPIKey != "" {
+		log.Printf("Text-generator API key configured for tts service")
 	}
 
 	// Load custom prices from env
@@ -256,9 +262,9 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// For TTS, scale by text length
-	if req.Service == "tts" && req.Text != "" {
-		chars := float64(len(req.Text))
+	// For TTS, scale by text length.
+	if req.Service == "tts" {
+		chars := float64(len(getTTSText(req)))
 		cuteCost = cuteCost * (chars / 100.0)
 		if cuteCost < getServicePriceCUTE("tts")*0.1 {
 			cuteCost = getServicePriceCUTE("tts") * 0.1 // Minimum charge
@@ -607,18 +613,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		body = strings.NewReader(string(jsonBody))
 
 	case "tts":
-		endpoint = fmt.Sprintf("%s/synthesize", backendURL)
-		payload := map[string]interface{}{
-			"text": req.Text,
-		}
-		if req.Voice != "" {
-			payload["voice"] = req.Voice
-		}
-		if req.Speed > 0 {
-			payload["speed"] = req.Speed
-		}
-		jsonBody, _ := json.Marshal(payload)
-		body = strings.NewReader(string(jsonBody))
+		return proxyTextGeneratorSpeech(req, backendURL)
 
 	case "stt":
 		endpoint = fmt.Sprintf("%s/transcribe", backendURL)
@@ -730,6 +725,106 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	}
 
 	return respBody, nil
+}
+
+func getTTSText(req ServiceUsageRequest) string {
+	if strings.TrimSpace(req.Text) != "" {
+		return req.Text
+	}
+	return req.Input
+}
+
+func getTTSSteps(req ServiceUsageRequest) int {
+	if req.Steps > 0 {
+		return req.Steps
+	}
+	if req.NumSteps > 0 {
+		return req.NumSteps
+	}
+	return 4
+}
+
+func speechFormatFromContentType(contentType string) string {
+	contentType = strings.ToLower(contentType)
+	switch {
+	case strings.Contains(contentType, "mpeg"), strings.Contains(contentType, "mp3"):
+		return "mp3"
+	case strings.Contains(contentType, "ogg"):
+		return "ogg"
+	case strings.Contains(contentType, "webm"):
+		return "webm"
+	case strings.Contains(contentType, "wav"), strings.Contains(contentType, "wave"):
+		return "wav"
+	default:
+		return "wav"
+	}
+}
+
+func proxyTextGeneratorSpeech(req ServiceUsageRequest, backendURL string) ([]byte, error) {
+	text := strings.TrimSpace(getTTSText(req))
+	if text == "" {
+		return nil, fmt.Errorf("text or input is required for tts")
+	}
+
+	voice := strings.TrimSpace(req.Voice)
+	if voice == "" {
+		voice = "M1"
+	}
+	language := strings.TrimSpace(req.Language)
+	if language == "" {
+		language = "en"
+	}
+	speed := req.Speed
+	if speed <= 0 {
+		speed = 1
+	}
+	steps := getTTSSteps(req)
+
+	payload := map[string]interface{}{
+		"text":     text,
+		"voice":    voice,
+		"language": language,
+		"speed":    speed,
+		"steps":    steps,
+	}
+	jsonBody, _ := json.Marshal(payload)
+	endpoint := fmt.Sprintf("%s/api/v1/generate_speech", strings.TrimRight(backendURL, "/"))
+
+	httpReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if textGeneratorAPIKey != "" {
+		httpReq.Header.Set("secret", textGeneratorAPIKey)
+	}
+
+	resp, err := backendClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("text-generator speech returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"audio_base64":  base64.StdEncoding.EncodeToString(respBody),
+		"format":        speechFormatFromContentType(resp.Header.Get("Content-Type")),
+		"content_type":  resp.Header.Get("Content-Type"),
+		"voice":         voice,
+		"language":      language,
+		"speed":         speed,
+		"steps":         steps,
+		"characters":    len(text),
+		"backend":       "text-generator.io",
+		"provider_path": "/api/v1/generate_speech",
+	})
 }
 
 // handleTrainStatus proxies training job status from inference server

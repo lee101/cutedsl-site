@@ -18,9 +18,11 @@ import {
   X,
   Zap,
 } from 'lucide-react';
+import { parseJSONResponse as parseHTTPJSONResponse } from '@/lib/http';
+import { STATIC_BASE_URL } from '@/lib/static-assets';
 
 const API_BASE = '/api';
-const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
+const IMG_BASE = `${STATIC_BASE_URL}/images`;
 
 interface StripeEmbeddedCheckout {
   mount: (target: string | HTMLElement) => void;
@@ -171,14 +173,7 @@ function errorMessage(err: unknown, fallback: string) {
 }
 
 async function parseResponse<T>(res: Response, fallback: string): Promise<T> {
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const message = typeof data === 'object' && data && 'error' in data && typeof data.error === 'string'
-      ? data.error
-      : fallback;
-    throw new Error(message);
-  }
-  return data as T;
+  return parseHTTPJSONResponse<T>(res, fallback);
 }
 
 async function postJSON<T>(path: string, payload: Record<string, unknown>, fallback: string): Promise<T> {
@@ -265,7 +260,7 @@ export default function AccountPage() {
 
     const payment = params.get('payment');
     const token = params.get('reset_token');
-    if (payment === 'success') setStatus('Stripe checkout completed. Your account will update after confirmation.');
+    if (payment === 'success') setStatus('Checkout completed. Your account will update after confirmation.');
     if (token) {
       setResetToken(token);
       setForgotMode(false);
@@ -515,7 +510,7 @@ export default function AccountPage() {
   const startCheckout = async (kind: CheckoutKind) => {
     if (!walletAddress) return;
     if (!email) {
-      setStatus('Add an email to this wallet before starting Stripe checkout.');
+      setStatus('Add an email to this wallet before starting checkout.');
       return;
     }
     setCheckoutKind(kind);
@@ -852,13 +847,13 @@ export default function AccountPage() {
 
             {!signedIn ? (
               <div className="rounded-lg border border-dashed border-pink-200 bg-pink-50/40 p-8 text-center">
-                <p className="text-sm font-medium text-slate-600">Login first to create a Stripe checkout tied to your account.</p>
+                <p className="text-sm font-medium text-slate-600">Login first to checkout.</p>
               </div>
             ) : embeddedSecret ? (
               <div className="rounded-lg border border-pink-100 bg-white p-3" data-testid="embedded-checkout-container">
                 <div className="mb-3 flex items-center justify-between px-1">
                   <div>
-                    <div className="text-sm font-bold text-slate-800">Secure Stripe checkout</div>
+                    <div className="text-sm font-bold text-slate-800">Secure checkout</div>
                     <div className="text-xs text-slate-500">Plan: {checkoutKind}</div>
                   </div>
                   <button onClick={() => setEmbeddedSecret('')} className="rounded-md p-2 text-slate-500 hover:bg-slate-100" aria-label="Close checkout">

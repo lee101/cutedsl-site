@@ -7,10 +7,11 @@ import { Search, ArrowLeft, X, Loader2, ImageIcon, Wand2, ChevronDown } from 'lu
 import { useAutocomplete } from '@/hooks/use-autocomplete';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
 import { SiteFooter } from '../site-footer';
+import { staticAssetPath } from '@/lib/static-assets';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
-const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
+const LOGO_IMG = staticAssetPath('/images/logo.webp');
 const PER_PAGE = 48;
 
 function slugify(s: string): string {
@@ -105,7 +106,6 @@ export default function SearchPage() {
     } finally {
       setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allowNSFW]);
 
   // Initial load

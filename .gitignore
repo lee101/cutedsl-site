@@ -38,6 +38,7 @@ inference.log
 
 # Screenshots / benchmarks output
 screenshots/
+evals/
 
 # Temp files
 swap_test.py
@@ -52,3 +53,6 @@ frontend/playwright-report/
 monitoring/cutedsl_frontend_autofix_cron.log
 monitoring/cutedsl_frontend_autofix_monitor.log
 monitoring/cutedsl_inference_autofix_monitor.log
+inference/server.out
+frontend/public/lora-test-3d-white/
+frontend/.env.example

@@ -2,7 +2,8 @@
 """Start one tiny RunPod LoRA training job and wait for a terminal status.
 
 This is intentionally conservative: one RTX 4090 by default, one image,
-one training step, and an unconditional terminate request in the cleanup path.
+and one training step. Pod-mode jobs request termination in the cleanup path;
+serverless jobs rely on the endpoint scaling settings.
 """
 
 from __future__ import annotations
@@ -49,8 +50,14 @@ def main() -> int:
 
     try:
         job = start_runpod_training(jobs, job_id, payload)
+        backend = job.get("runpod_backend", "pod")
         pod_id = job.get("runpod_pod_id", "")
-        print(f"started job={job_id} pod={pod_id} cost_per_hr={job.get('runpod_cost_per_hr')}", flush=True)
+        print(
+            f"started job={job_id} backend={backend} "
+            f"pod={pod_id} endpoint={job.get('runpod_endpoint_id', '')} "
+            f"cost_per_hr={job.get('runpod_cost_per_hr')}",
+            flush=True,
+        )
         deadline = time.time() + float(os.getenv("RUNPOD_LORA_SMOKE_WAIT_SECONDS", "1800"))
         last_status = ""
         while time.time() < deadline:

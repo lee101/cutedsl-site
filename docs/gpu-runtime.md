@@ -39,20 +39,48 @@ sudo systemctl restart docker
 docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu22.04 nvidia-smi
 ```
 
+For this host, Docker image layers live on NVMe storage. Keep the NVIDIA runtime
+configured, but avoid Docker's `vfs` storage driver for CUDA images; it is slow
+and space-heavy.
+
+```json
+{
+  "data-root": "/nvme0n1-disk/docker",
+  "storage-driver": "overlay2",
+  "runtimes": {
+    "nvidia": {
+      "args": [],
+      "path": "nvidia-container-runtime"
+    }
+  }
+}
+```
+
+After changing `/etc/docker/daemon.json`, restart Docker and confirm:
+
+```bash
+docker info --format 'Driver={{.Driver}} DockerRootDir={{.DockerRootDir}}'
+```
+
 ## Build and run
 
 ```bash
 scripts/build_inference_image.sh
+RUNPOD_LORA_DOCKER_IMAGE=your-registry/cutedsl-inference:cuda12.8 scripts/push_inference_image.sh
 scripts/run_inference_docker.sh
 curl -s http://127.0.0.1:8100/health
 ```
 
 Defaults are intentionally conservative:
 
+- `torch==2.8.0+cu128` in the CUDA image for reproducible installs.
 - `PRELOAD_MODELS=0` to reduce boot and idle memory pressure.
 - `MODEL_IDLE_TIMEOUT=300` so heavy models unload after idle periods.
 - `--ipc=host` and CUDA allocator expandable segments for fewer allocation
   stalls and less fragmentation.
+
+Set `RUNPOD_LORA_DOCKER_IMAGE` to the same pushed image tag before creating or
+updating the RunPod endpoint.
 
 ## RunPod training
 

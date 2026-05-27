@@ -10,10 +10,11 @@ import {
 import { linkifyPrompt } from '@/lib/prompt-linkify';
 import { SiteFooter } from '../site-footer';
 import { ArtGenerator } from '../art-generator';
+import { staticAssetPath } from '@/lib/static-assets';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
-const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
+const LOGO_IMG = staticAssetPath('/images/logo.webp');
 const PER_PAGE = 72;
 
 interface GeneratedImage {

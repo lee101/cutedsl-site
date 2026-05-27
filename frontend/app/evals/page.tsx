@@ -4,8 +4,9 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Wand2, Sparkles, LineChart, ImageIcon, Zap, Cpu, Timer, MemoryStick, ArrowLeft, Server, Search } from 'lucide-react';
 import { SiteFooter } from '../site-footer';
+import { STATIC_BASE_URL } from '@/lib/static-assets';
 
-const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
+const IMG_BASE = `${STATIC_BASE_URL}/images`;
 
 const chronosBenchmarks = [
   { name: 'Original Chronos2Pipeline', latency: '41.98 ms', speedup: '1.0x', memory: '248 MB', mode: 'Baseline' },

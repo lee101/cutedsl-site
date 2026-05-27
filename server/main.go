@@ -74,6 +74,17 @@ func main() {
 func requestHandler(ctx *fasthttp.RequestCtx) {
 	path := string(ctx.Path())
 	method := string(ctx.Method())
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("request panic: method=%s path=%s error=%v", method, path, r)
+			if strings.HasPrefix(path, "/api/") {
+				jsonError(ctx, 500, "internal server error")
+				return
+			}
+			ctx.SetStatusCode(500)
+			ctx.SetBodyString("internal server error")
+		}
+	}()
 
 	// CORS headers
 	setCORSHeaders(ctx)

@@ -9,10 +9,12 @@ import {
 import Image from 'next/image';
 import Link from 'next/link';
 import { CodeBlock } from '@/lib/code-block';
+import { parseJSONResponse as parseHTTPJSONResponse } from '@/lib/http';
+import { STATIC_BASE_URL } from '@/lib/static-assets';
 import { SiteFooter } from './site-footer';
 
 const API_BASE = '/api';
-const IMG_BASE = '/images';
+const IMG_BASE = `${STATIC_BASE_URL}/images`;
 
 interface StripeEmbeddedCheckout {
   mount: (target: string | HTMLElement) => void;
@@ -114,12 +116,7 @@ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isValidEmail = (value: string) => emailPattern.test(value.trim());
 
 async function parseJSONResponse<T>(res: Response, fallback: string): Promise<T> {
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const message = typeof data?.error === 'string' ? data.error : fallback;
-    throw new Error(message);
-  }
-  return data as T;
+  return parseHTTPJSONResponse<T>(res, fallback);
 }
 
 export default function Home() {
@@ -364,7 +361,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 8 }),
       });
-      const data = await res.json();
+      const data = await parseJSONResponse<any>(res, 'Failed to generate image');
       if (data.result?.image_base64) {
         setDemoResult(`data:image/webp;base64,${data.result.image_base64}`);
       } else {

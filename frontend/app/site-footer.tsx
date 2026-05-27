@@ -2,8 +2,9 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
+import { STATIC_BASE_URL } from '@/lib/static-assets';
 
-const IMG_BASE = '/images';
+const IMG_BASE = `${STATIC_BASE_URL}/images`;
 
 const exploreLinks = [
   { label: 'Home', href: '/' },

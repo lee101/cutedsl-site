@@ -4,9 +4,10 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Wand2, ArrowLeft, ArrowRight, Calendar, Tag } from 'lucide-react';
 import { CodeBlock } from '@/lib/code-block';
+import { STATIC_BASE_URL } from '@/lib/static-assets';
 import { SiteFooter } from '../site-footer';
 
-const IMG_BASE = '/images';
+const IMG_BASE = `${STATIC_BASE_URL}/images`;
 const BAGS_CTA = `
 
 ---
@@ -1973,7 +1974,7 @@ CuteDSL uses a dual pricing system:
 | Gemma4 Chat | $0.01/request | 26B multimodal LLM |
 | STT | $0.02/minute | Speech-to-text transcription |
 | Image Caption | $0.01/image | Automated image descriptions |
-| LoRA Training | $10.00/job | Custom model fine-tuning |
+| LoRA Training | $5.00/job | Custom model fine-tuning |
 
 **Third-party proxies** (LTX Video, Flux Image) are priced at current market rate since we pay per-request to upstream providers.
 
