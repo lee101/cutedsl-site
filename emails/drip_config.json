@@ -1,6 +1,6 @@
 {
   "campaign": "new_user_onboarding",
-  "description": "20-email drip campaign for new CuteDSL users over 90 days — API-first AI platform with simple prepaid credits",
+  "description": "20-email drip campaign for new CuteDSL users over 90 days - API-first AI platform with simple prepaid credits",
   "from_email": "lee@cutedsl.com",
   "from_name": "CuteDSL",
   "base_url": "https://cutedsl.com",
@@ -8,140 +8,140 @@
     {
       "id": 1,
       "delay_days": 0,
-      "subject": "Welcome to CuteDSL — Fast AI APIs With Simple Credits",
+      "subject": "Welcome to CuteDSL - Fast AI APIs With Simple Credits",
       "template": "01-welcome.html",
       "description": "Welcome email with platform overview: API services, account setup, and simple credits"
     },
     {
       "id": 2,
       "delay_days": 1,
-      "subject": "Your API Key Is Ready — Start Making Requests in 60 Seconds",
+      "subject": "Your API Key Is Ready - Start Making Requests in 60 Seconds",
       "template": "02-api-quickstart.html",
       "description": "API quickstart guide with curl examples for each service"
     },
     {
       "id": 3,
       "delay_days": 3,
-      "subject": "Z-Image Turbo — Generate Images 4x Faster With Fused Triton Kernels",
+      "subject": "Z-Image Turbo - Generate Images With One API",
       "template": "03-zimage.html",
-      "description": "Deep dive on Z-Image Turbo text-to-image with CuteZImageTransformer"
+      "description": "Z-Image Turbo text-to-image API overview"
     },
     {
       "id": 4,
       "delay_days": 7,
-      "subject": "Chronos-2 Forecasting — 24x Faster Time Series Predictions",
+      "subject": "Chronos-2 Forecasting - Time Series Predictions by API",
       "template": "04-chronos2.html",
-      "description": "CuteChronos2Pipeline for time series forecasting with acceleration"
+      "description": "Chronos-2 time series forecasting API overview"
     },
     {
       "id": 5,
       "delay_days": 10,
-      "subject": "Text-to-Speech With Kokoro — 20+ Voices at $0.005/100 chars",
+      "subject": "Text-to-Speech With Kokoro - 20+ Voices by API",
       "template": "05-tts.html",
       "description": "Kokoro TTS API with voice samples and code examples"
     },
     {
       "id": 6,
       "delay_days": 14,
-      "subject": "Gemma4 26B — Multimodal Chat & Vision at $0.01/Request",
+      "subject": "Gemma4 26B - Multimodal Chat and Vision",
       "template": "06-gemma4.html",
       "description": "Gemma4 multimodal LLM for chat, vision, and reasoning"
     },
     {
       "id": 7,
       "delay_days": 18,
-      "subject": "Speech-to-Text — Transcribe Audio With Gemma4 STT",
+      "subject": "Speech-to-Text - Transcribe Audio With Gemma4 STT",
       "template": "07-stt.html",
       "description": "Speech-to-text transcription API powered by Gemma4"
     },
     {
       "id": 8,
       "delay_days": 21,
-      "subject": "Image Captioning — Auto-Describe Any Image via API",
+      "subject": "Image Captioning - Describe Any Image via API",
       "template": "08-caption.html",
       "description": "GitBase image captioning API for automated descriptions"
     },
     {
       "id": 9,
       "delay_days": 25,
-      "subject": "How CuteChronos2 Achieves 24x Speedup — Applied AI NZ",
+      "subject": "Chronos-2 Forecasting - How the Faster Path Works",
       "template": "09-chronos-deep-dive.html",
-      "description": "Technical deep dive on CuteChronos2 acceleration techniques"
+      "description": "Technical deep dive on Chronos-2 acceleration"
     },
     {
       "id": 10,
       "delay_days": 28,
       "subject": "CuteZImage: Fused Attention Kernels Explained",
       "template": "10-zimage-deep-dive.html",
-      "description": "Technical deep dive on CuteZImageTransformer fused Triton kernels"
+      "description": "Technical deep dive on Z-Image fused Triton kernels"
     },
     {
       "id": 11,
       "delay_days": 35,
-      "subject": "Latent Teleportation & TurboQuant — Cutting-Edge Acceleration",
+      "subject": "Latent Teleportation and TurboQuant - Faster Inference",
       "template": "11-acceleration-techniques.html",
       "description": "Overview of Latent Teleportation and TurboQuant techniques"
     },
     {
       "id": 12,
       "delay_days": 40,
-      "subject": "NVFP4 Quantization — RTX 5090 Native 4-Bit Inference",
+      "subject": "NVFP4 Quantization - RTX 5090 Native 4-Bit Inference",
       "template": "12-nvfp4.html",
       "description": "NVFP4 quantization for next-gen GPU inference via torchao"
     },
     {
       "id": 13,
       "delay_days": 45,
-      "subject": "stable-diffusion.cpp — CPU/Mobile Inference Without Python",
+      "subject": "stable-diffusion.cpp - CPU and Mobile Inference",
       "template": "13-sd-cpp.html",
       "description": "stable-diffusion.cpp for lightweight cross-platform inference"
     },
     {
       "id": 14,
       "delay_days": 50,
-      "subject": "LoRA Fine-Tuning via API — Train Custom Models for $50",
+      "subject": "LoRA Fine-Tuning via API - Train Custom Models",
       "template": "14-lora-training.html",
       "description": "LoRA training API for Z-Image and Chronos-2 custom models"
     },
     {
       "id": 15,
       "delay_days": 55,
-      "subject": "CuteDSL Credits — Simple Ways to Pay",
+      "subject": "CuteDSL Credits - Simple Ways to Pay",
       "template": "15-token-credits.html",
       "description": "How CuteDSL credits, card payments, $CUTEDSL deposits, and usage pricing work"
     },
     {
       "id": 16,
       "delay_days": 60,
-      "subject": "Benchmarks & Evals — See How CuteDSL Stacks Up",
+      "subject": "Benchmarks and Evals - See How CuteDSL Performs",
       "template": "16-benchmarks.html",
       "description": "Performance benchmarks and evaluation results"
     },
     {
       "id": 17,
       "delay_days": 65,
-      "subject": "Build a Full App With CuteDSL API — Tutorial",
+      "subject": "Build a Full App With the CuteDSL API",
       "template": "17-tutorial.html",
       "description": "Step-by-step tutorial building an app with multiple CuteDSL services"
     },
     {
       "id": 18,
       "delay_days": 70,
-      "subject": "Blog Highlights — Deep Dives Into AI Acceleration",
+      "subject": "Blog Highlights - AI API Guides and Benchmarks",
       "template": "18-blog-roundup.html",
       "description": "Best blog posts on acceleration research and techniques"
     },
     {
       "id": 19,
       "delay_days": 80,
-      "subject": "What's Next — Upcoming Models & Features on CuteDSL",
+      "subject": "What's Next - Upcoming CuteDSL Models and Features",
       "template": "19-roadmap.html",
       "description": "Roadmap preview: upcoming models, features, and acceleration work"
     },
     {
       "id": 20,
       "delay_days": 90,
-      "subject": "You're a CuteDSL Power User — Tips, Tricks & What's Ahead",
+      "subject": "CuteDSL Power User Tips and What's Ahead",
       "template": "20-power-user.html",
       "description": "Power user guide, advanced API tips, and staying connected"
     }

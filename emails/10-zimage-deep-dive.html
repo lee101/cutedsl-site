@@ -26,7 +26,7 @@
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">The Problem with Standard Attention</h2>
 
-<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">In a typical diffusion transformer, attention involves separate kernel launches for Q/K/V projections, the scaled dot-product, softmax normalization, and the output projection. Each kernel launch incurs overhead, and intermediate tensors (the full attention matrix) consume significant GPU memory — especially at higher resolutions.</p>
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">In a typical diffusion transformer, attention involves separate kernel launches for Q/K/V projections, the scaled dot-product, softmax normalization, and the output projection. Each kernel launch incurs overhead, and intermediate tensors (the full attention matrix) consume significant GPU memory - especially at higher resolutions.</p>
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">CuteZImageTransformer: Fused Triton Kernels</h2>
 
@@ -79,7 +79,7 @@
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Throughput Gains</h2>
 
-<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Fewer kernel launches, no intermediate memory allocations, and better GPU occupancy add up. On an A100, CuteZImage generates 1024x1024 images approximately <strong>2.5x faster</strong> than the default attention path, with no quality degradation — the outputs are numerically identical.</p>
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Fewer kernel launches, no intermediate memory allocations, and better GPU occupancy add up. On an A100, CuteZImage generates 1024x1024 images approximately <strong>2.5x faster</strong> than the default attention path, with no quality degradation - the outputs are numerically identical.</p>
 
 <pre style="background:#1e1e2e; color:#cdd6f4; padding:16px; border-radius:8px; font-size:13px; overflow-x:auto; line-height:1.5;">from cutedsl import CuteZImageTransformer
 

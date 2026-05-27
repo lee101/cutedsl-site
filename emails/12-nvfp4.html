@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NVFP4 Quantization — RTX 5090 Native 4-Bit Inference</title>
+<title>NVFP4 Quantization - RTX 5090 Native 4-Bit Inference</title>
 </head>
 <body style="margin:0; padding:0; background-color:#f0f0f5; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f0f5;">
@@ -22,11 +22,11 @@
 <td style="padding:36px 40px;">
 <p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">Hey {{.WalletShort}},</p>
 
-<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">NVIDIA's Blackwell architecture (RTX 5090 and beyond) introduces native hardware support for <strong>FP4 — 4-bit floating point</strong> computation. CuteDSL already supports it. Here is what that means for inference performance.</p>
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">NVIDIA's Blackwell architecture (RTX 5090 and beyond) introduces native hardware support for <strong>FP4 - 4-bit floating point</strong> computation. CuteDSL already supports it. Here is what that means for inference performance.</p>
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">What is NVFP4?</h2>
 
-<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">NVFP4 is NVIDIA's 4-bit floating point format, supported natively by the Blackwell GPU tensor cores. Unlike software-emulated INT4 quantization, NVFP4 operations run at full hardware speed with dedicated FP4 tensor core instructions. Each value uses just 4 bits — half the size of INT8 — while the floating point format preserves more dynamic range than fixed-point alternatives.</p>
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">NVFP4 is NVIDIA's 4-bit floating point format, supported natively by the Blackwell GPU tensor cores. Unlike software-emulated INT4 quantization, NVFP4 operations run at full hardware speed with dedicated FP4 tensor core instructions. Each value uses just 4 bits - half the size of INT8 - while the floating point format preserves more dynamic range than fixed-point alternatives.</p>
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">Benefits</h2>
 
@@ -53,7 +53,7 @@
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">torchao Integration</h2>
 
-<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">CuteDSL uses <strong>torchao</strong> (PyTorch Architecture Optimization) to handle NVFP4 quantization. The integration is seamless — torchao quantizes model weights to FP4 at load time, and the Blackwell tensor cores handle the rest. No changes to model code are required.</p>
+<p style="margin:0 0 16px; color:#2d2d3f; font-size:15px; line-height:1.6;">CuteDSL uses <strong>torchao</strong> (PyTorch Architecture Optimization) to handle NVFP4 quantization. The integration is seamless - torchao quantizes model weights to FP4 at load time, and the Blackwell tensor cores handle the rest. No changes to model code are required.</p>
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">How to Enable</h2>
 
@@ -70,7 +70,7 @@ python inference/server.py</pre>
 
 <h2 style="margin:28px 0 12px; color:#2d2d3f; font-size:18px; font-weight:700;">CuteDSL is Ready for Next-Gen Hardware</h2>
 
-<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">As Blackwell GPUs become available in data centers, CuteDSL will progressively migrate inference workloads to NVFP4. This means faster generation, lower costs, and the same quality you expect — all passed directly to you through $CUTEDSL pricing.</p>
+<p style="margin:0 0 24px; color:#2d2d3f; font-size:15px; line-height:1.6;">As Blackwell GPUs become available in data centers, CuteDSL will progressively migrate inference workloads to NVFP4. This means faster generation, lower costs, and the same quality you expect - all passed directly to you through $CUTEDSL pricing.</p>
 
 <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;">
 <tr>
