@@ -11,29 +11,41 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import threading
 import time
 import uuid
 import hashlib
 import contextlib
+import ipaddress
 import traceback
+import socket
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
+import requests
 import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
-from PIL import Image
-from pydantic import BaseModel
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field, field_validator
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from image_quality import bumpy_metrics, compact_prompt, detect_too_bumpy, retry_prompt
+from aesthetic_score import score_images as aesthetic_score_images
+from image_quality import (
+    bumpy_metrics,
+    compact_prompt,
+    detect_too_bumpy,
+    enhance_prompt,
+    retry_prompt,
+)
 from training_store import load_jobs, save_job, update_job, upload_training_artifacts
 from runpod_lora_manager import refresh_runpod_status, runpod_enabled, start_runpod_training
 
@@ -45,6 +57,10 @@ logger = logging.getLogger("cutedsl-inference")
 # ---------------------------------------------------------------------------
 
 IMAGE_API_SECRET = os.getenv("IMAGE_API_SECRET", "")
+# Comma-separated additional accepted secrets (e.g. rotated keys, NETWRCK_API_KEY)
+IMAGE_API_SECRETS = {s.strip() for s in os.getenv("IMAGE_API_SECRETS", "").split(",") if s.strip()}
+if IMAGE_API_SECRET:
+    IMAGE_API_SECRETS.add(IMAGE_API_SECRET)
 ERROR_LOG_PATH = os.getenv("ERROR_LOG_PATH", "/nvme0n1-disk/tmp/cutedsl-inference-errors.jsonl")
 
 DEVICE = os.getenv("DEVICE", "cuda")
@@ -70,9 +86,13 @@ def _chronos_device_dtype() -> tuple[str, torch.dtype]:
         return "cpu", torch.float32
     return DEVICE, DTYPE
 
-# NVFP4 quantization (RTX 5090 Blackwell) - uses torchao NVFP4InferenceConfig
-# Block size is fixed at 16 in the NVFP4 spec (float4_e2m1fn_x2 + float8_e4m3fn scales)
-ENABLE_NVFP4 = os.getenv("ENABLE_NVFP4", "0") == "1"
+# NVFP4 quantization (Blackwell sm_100+). ENABLE_NVFP4: "1" force on, "0" force
+# off, unset = auto (autotune file > per-GPU capability heuristic). Resolved at
+# startup by _resolve_precision(); PRECISION holds the full decision.
+import precision as _precision_mod
+
+ENABLE_NVFP4 = os.getenv("ENABLE_NVFP4", "") == "1"
+PRECISION: dict | None = None
 
 # AITune: ahead-of-time TensorRT optimization for text_encoder + VAE.
 # Run inference/aitune_experiment.py --tune first to generate the engine file.
@@ -81,7 +101,11 @@ AITUNE_ENGINES_PATH = os.getenv("AITUNE_ENGINES_PATH", "")
 
 # Model paths
 ZIMAGE_MODEL_PATH = os.getenv("ZIMAGE_MODEL_PATH", "Tongyi-MAI/Z-Image-Turbo")
-CHRONOS_MODEL_PATH = os.getenv("CHRONOS_MODEL_PATH", "amazon/chronos-bolt-base")
+# Default to the real Chronos-2 (the model we own/host): 8192-step context,
+# forecasts up to 1024 steps ahead in a single pass, 21 quantile levels. The
+# CuteChronos2Pipeline is built for the Chronos-2 architecture; chronos-bolt is
+# a different (T5-encoder-only) family and is not what this pipeline expects.
+CHRONOS_MODEL_PATH = os.getenv("CHRONOS_MODEL_PATH", "amazon/chronos-2")
 ZIMAGE_COMPILE_MODE = os.getenv("ZIMAGE_COMPILE_MODE", "default") or None
 _zimage_compile_mode = ZIMAGE_COMPILE_MODE
 _zimage_compile_mode_lock = threading.Lock()
@@ -91,7 +115,10 @@ CHRONOS_COMPILE_MODE = os.getenv("CHRONOS_COMPILE_MODE", "") or None
 
 # Text-generator.io backend for TTS, STT, captioning, gemma4
 TG_BACKEND_URL = os.getenv("TG_BACKEND_URL", "http://localhost:9080")
-TG_API_KEY = os.getenv("TG_API_KEY", "")
+CAPTION_BACKEND_API_KEY = os.getenv("CAPTION_BACKEND_API_KEY", "")
+# A deployment may retain the historical caption-specific variable while the
+# same scoped partner credential is used by all text-generator proxy routes.
+TG_API_KEY = os.getenv("TG_API_KEY", "") or CAPTION_BACKEND_API_KEY
 
 # Which models to load on startup
 LOAD_ZIMAGE = os.getenv("LOAD_ZIMAGE", "1") == "1"
@@ -106,10 +133,28 @@ ZIMAGE_DEFAULT_HEIGHT = int(os.getenv("ZIMAGE_DEFAULT_HEIGHT", "1024"))
 LATENT_TELEPORT_ENABLED = os.getenv("LATENT_TELEPORT_ENABLED", "0") == "1"
 LATENT_TELEPORT_CACHE_DIR = os.getenv("LATENT_TELEPORT_CACHE_DIR", "/nvme0n1-disk/tmp/latentteleport-cache")
 LATENT_TELEPORT_START_STEP = int(os.getenv("LATENT_TELEPORT_START_STEP", "7"))
+ZIMAGE_LATENT_CACHE_VERSION = os.getenv("ZIMAGE_LATENT_CACHE_VERSION", "v2")
+LATENT_SAVE = os.getenv("LATENT_SAVE", "1") == "1"
+ZIMAGE_EARLY_EXIT = float(os.getenv("ZIMAGE_EARLY_EXIT", "0") or 0)
+ZIMAGE_EARLY_EXIT_MIN_STEPS = int(os.getenv("ZIMAGE_EARLY_EXIT_MIN_STEPS", "4"))
+ZIMAGE_SKIP_NOOP_STEPS = os.getenv("ZIMAGE_SKIP_NOOP_STEPS", "1") == "1"
+ZIMAGE_EARLY_EXIT_CONSECUTIVE = int(os.getenv("ZIMAGE_EARLY_EXIT_CONSECUTIVE", "2"))
+DX0_LOG = os.getenv("DX0_LOG", "1") == "1"
+DX0_CORPUS_PATH = os.getenv("DX0_CORPUS_PATH", "/nvme0n1-disk/tmp/dx0-corpus.jsonl")
+STEP_TRACE_DIR = os.getenv("STEP_TRACE_DIR", "/nvme0n1-disk/tmp/step-trace")
 LATENT_TELEPORT_APPROX_MIN_SIM = float(os.getenv("LATENT_TELEPORT_APPROX_MIN_SIM", "0.92"))
 LATENT_TELEPORT_MIN_FREE_MB = int(os.getenv("LATENT_TELEPORT_MIN_FREE_MB", "512"))
 ZIMAGE_NO_OFFLOAD_MIN_FREE_MB = int(os.getenv("ZIMAGE_NO_OFFLOAD_MIN_FREE_MB", "24576"))
-ZIMAGE_FAST_LORA_CPU_OFFLOAD = os.getenv("ZIMAGE_FAST_LORA_CPU_OFFLOAD", "1") == "1"
+ZIMAGE_DIRECT_DEVICE_MAP = os.getenv("ZIMAGE_DIRECT_DEVICE_MAP", "1") == "1"
+ZIMAGE_LOAD_MIN_FREE_MB = int(os.getenv("ZIMAGE_LOAD_MIN_FREE_MB", "9216"))
+ZIMAGE_RUNTIME_MIN_FREE_MB = int(os.getenv("ZIMAGE_RUNTIME_MIN_FREE_MB", "768"))
+ZIMAGE_OOM_RECOVERY_WAIT_SECONDS = float(os.getenv("ZIMAGE_OOM_RECOVERY_WAIT_SECONDS", "10"))
+ZIMAGE_OOM_RECOVERY_POLL_SECONDS = float(os.getenv("ZIMAGE_OOM_RECOVERY_POLL_SECONDS", "0.5"))
+ALLOW_PRIVATE_IMAGE_URLS = os.getenv("ALLOW_PRIVATE_IMAGE_URLS", "0") == "1"
+REMOTE_IMAGE_TIMEOUT_SECONDS = float(os.getenv("REMOTE_IMAGE_TIMEOUT_SECONDS", "15"))
+REMOTE_IMAGE_MAX_BYTES = int(os.getenv("REMOTE_IMAGE_MAX_BYTES", str(20 * 1024 * 1024)))
+ZIMAGE_PROMPT_CACHE_SIZE = max(0, int(os.getenv("ZIMAGE_PROMPT_CACHE_SIZE", "64")))
+ZIMAGE_ENHANCE_PROMPT = os.getenv("ZIMAGE_ENHANCE_PROMPT", "1") == "1"
 
 # ---------------------------------------------------------------------------
 # Model memory manager — lazy load, LRU eviction, idle unload
@@ -132,6 +177,133 @@ gpu_semaphore = None
 lora_engine = None
 latent_teleport_cache = None
 _zimage_effective_cpu_offload: bool | None = None
+_zimage_load_strategy: str | None = None
+_zimage_prompt_cache: OrderedDict[tuple, tuple[list[torch.Tensor], list[torch.Tensor] | None]] = OrderedDict()
+_zimage_prompt_cache_lock = threading.Lock()
+_zimage_prompt_cache_hits = 0
+_zimage_prompt_cache_misses = 0
+
+
+def _clear_torch_cuda_caches():
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+        try:
+            torch._C._cuda_clearCublasWorkspaces()
+        except Exception:
+            pass
+
+
+def _embedding_list(value) -> list[torch.Tensor] | None:
+    if value is None:
+        return None
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def _cpu_embedding_copy(value) -> list[torch.Tensor] | None:
+    tensors = _embedding_list(value)
+    if tensors is None:
+        return None
+    return [tensor.detach().to(device="cpu").contiguous() for tensor in tensors]
+
+
+def _device_embedding_copy(value, *, device, dtype) -> list[torch.Tensor] | None:
+    tensors = _embedding_list(value)
+    if tensors is None:
+        return None
+    return [tensor.to(device=device, dtype=dtype, non_blocking=True) for tensor in tensors]
+
+
+def _clear_zimage_prompt_cache() -> None:
+    global _zimage_prompt_cache_hits, _zimage_prompt_cache_misses
+    with _zimage_prompt_cache_lock:
+        _zimage_prompt_cache.clear()
+        _zimage_prompt_cache_hits = 0
+        _zimage_prompt_cache_misses = 0
+
+
+def _zimage_prompt_cache_snapshot() -> dict:
+    with _zimage_prompt_cache_lock:
+        size_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for positive, negative in _zimage_prompt_cache.values()
+            for tensor in positive + (negative or [])
+        )
+        return {
+            "enabled": ZIMAGE_PROMPT_CACHE_SIZE > 0,
+            "max_entries": ZIMAGE_PROMPT_CACHE_SIZE,
+            "entries": len(_zimage_prompt_cache),
+            "size_mib": round(size_bytes / (1024 * 1024), 2),
+            "hits": _zimage_prompt_cache_hits,
+            "misses": _zimage_prompt_cache_misses,
+        }
+
+
+def _prepare_zimage_prompt_embeddings(pipe, pipe_kwargs: dict) -> tuple[dict, dict]:
+    """Replace prompt text with reusable CPU-cached embeddings.
+
+    The cache is independent of image size, seed, step count, and transformer
+    LoRAs. Cached tensors live on CPU so a useful cache does not consume scarce
+    serving VRAM; each hit transfers only the conditioning tensors.
+    """
+    global _zimage_prompt_cache_hits, _zimage_prompt_cache_misses
+    prompt = pipe_kwargs.get("prompt")
+    if ZIMAGE_PROMPT_CACHE_SIZE <= 0 or not isinstance(prompt, str):
+        return pipe_kwargs, {"enabled": False, "hit": False, "encode_ms": 0}
+
+    guidance = float(pipe_kwargs.get("guidance_scale", 0.0))
+    negative_prompt = pipe_kwargs.get("negative_prompt")
+    do_cfg = guidance > 0
+    key = (ZIMAGE_MODEL_PATH, DTYPE_STR, prompt, negative_prompt, do_cfg)
+    with _zimage_prompt_cache_lock:
+        cached = _zimage_prompt_cache.pop(key, None)
+        if cached is not None:
+            _zimage_prompt_cache[key] = cached
+            _zimage_prompt_cache_hits += 1
+
+    target_device = DEVICE if not str(DEVICE).startswith("cuda") or torch.cuda.is_available() else "cpu"
+    target_dtype = getattr(getattr(pipe, "transformer", None), "dtype", DTYPE)
+    started = time.perf_counter()
+    if cached is None:
+        positive, negative = pipe.encode_prompt(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            do_classifier_free_guidance=do_cfg,
+            device=target_device,
+        )
+        positive_cpu = _cpu_embedding_copy(positive)
+        negative_cpu = _cpu_embedding_copy(negative)
+        if positive_cpu is None:
+            raise RuntimeError("Z-Image encode_prompt returned no prompt embeddings")
+        with _zimage_prompt_cache_lock:
+            _zimage_prompt_cache[key] = (positive_cpu, negative_cpu)
+            _zimage_prompt_cache_misses += 1
+            while len(_zimage_prompt_cache) > ZIMAGE_PROMPT_CACHE_SIZE:
+                _zimage_prompt_cache.popitem(last=False)
+        positive_device = _embedding_list(positive)
+        negative_device = _embedding_list(negative)
+        hit = False
+    else:
+        positive_device = _device_embedding_copy(cached[0], device=target_device, dtype=target_dtype)
+        negative_device = _device_embedding_copy(cached[1], device=target_device, dtype=target_dtype)
+        hit = True
+
+    prepared = dict(pipe_kwargs)
+    prepared["prompt"] = None
+    prepared["prompt_embeds"] = positive_device
+    if do_cfg:
+        prepared["negative_prompt_embeds"] = negative_device
+    return prepared, {
+        "enabled": True,
+        "hit": hit,
+        "encode_ms": int((time.perf_counter() - started) * 1000),
+    }
 
 
 class PriorityGPUSemaphore:
@@ -298,17 +470,7 @@ class ModelManager:
                             model_name, now - self._last_access.get(model_name, 0))
                 self._drop_locked(model_name)
             if not self._loaded and torch.cuda.is_available():
-                import gc
-                gc.collect()
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-                # Release the cuBLAS workspace pool — the caching allocator
-                # otherwise pins ~600 MB-1 GB across the lifetime of the proc.
-                try:
-                    torch._C._cuda_clearCublasWorkspaces()
-                except Exception:
-                    pass
+                _clear_torch_cuda_caches()
                 free, total = torch.cuda.mem_get_info()
                 logger.info("All models unloaded → %.2f GB free / %.2f GB total",
                             free / 1e9, total / 1e9)
@@ -320,9 +482,9 @@ class ModelManager:
             zimage_pipeline = None
             _zimage_effective_cpu_offload = None
             _clear_zimage_external_caches()
-            # Active LoRA metadata must be cleared with the pipeline. We avoid
-            # caching full transformer weights because that doubles GPU memory.
-            _active_lora_cache.clear()
+            # Swapper holds references to the dropped transformer; discard with it.
+            global _lora_swapper
+            _lora_swapper = None
         elif model_name == "chronos2":
             chronos_pipeline = None
         self._loaded.discard(model_name)
@@ -331,11 +493,12 @@ class ModelManager:
     def force_unload(self, model_name: str | None = None) -> list[str]:
         """Immediately unload a model (or all) and free GPU cache."""
         global nsfw_classifier
-        import gc
         with self._lock:
             targets = [model_name] if model_name else list(self._loaded)
             dropped = []
             for m in targets:
+                if m is None:
+                    continue
                 if self._in_use.get(m, 0) > 0:
                     logger.info("Skip force-unload of %s: in_use=%d", m, self._in_use[m])
                     continue
@@ -343,15 +506,18 @@ class ModelManager:
                     logger.info("Force unloading model: %s", m)
                     self._drop_locked(m)
                     dropped.append(m)
+                elif m == "zimage":
+                    # A failed cold load never reaches _loaded, but can still
+                    # leave partially constructed CUDA modules and module-level
+                    # CuteZImage caches alive. Clear the same state anyway.
+                    logger.info("Force clearing partial model state: %s", m)
+                    self._drop_locked(m)
             if not self._loaded and self._idle_timer:
                 self._idle_timer.cancel()
                 self._idle_timer = None
         if model_name is None:
             nsfw_classifier = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
+        _clear_torch_cuda_caches()
         return dropped
 
     def ensure_loaded(self, model_name: str):
@@ -379,11 +545,17 @@ class ModelManager:
 
             # Load requested model
             logger.info("Loading model: %s", model_name)
-            if model_name == "zimage":
-                _load_zimage()
-                _init_lora_engine()
-            elif model_name == "chronos2":
-                _load_chronos()
+            try:
+                if model_name == "zimage":
+                    _load_zimage()
+                    _init_lora_engine()
+                elif model_name == "chronos2":
+                    _load_chronos()
+            except Exception:
+                logger.exception("Failed to load model: %s; clearing partial model state", model_name)
+                self._drop_locked(model_name)
+                _clear_torch_cuda_caches()
+                raise
 
             self._loaded.add(model_name)
             self.touch(model_name)
@@ -399,38 +571,45 @@ nsfw_classifier = None
 nsfw_lock = None
 
 
+def _resolve_precision():
+    global ENABLE_NVFP4, PRECISION
+    PRECISION = _precision_mod.resolve_precision()
+    ENABLE_NVFP4 = PRECISION["mode"] != "bf16"
+    source = PRECISION["source"]
+    if PRECISION.get("config_name"):
+        source = f"{source}:{PRECISION['config_name']}"
+    logger.info(
+        "precision: gpu=%s cap=%s mode=%s source=%s skip=%s first_last_skip=%s",
+        PRECISION["gpu"], PRECISION["capability"], PRECISION["mode"], source,
+        ",".join(PRECISION["skip_patterns"]) if PRECISION["mode"] == "nvfp4" else "-",
+        PRECISION["skip_first_last"] if PRECISION["mode"] == "nvfp4" else "-",
+    )
+
+
 def _apply_nvfp4_quantization(model: torch.nn.Module) -> torch.nn.Module:
-    """Apply NVFP4 quantization for RTX 5090 Blackwell architecture.
-
-    NVFP4 uses 4-bit floating point with per-block scaling, giving ~2x
-    memory reduction and faster matmuls on SM100+ GPUs.
-
-    Uses torchao's NVFP4InferenceConfig (prototype.mx_formats) with the
-    DYNAMIC mm_config for hardware-accelerated FP4 matmuls.
-    """
-    if not ENABLE_NVFP4:
+    """Apply the resolved weight-only quantization (nvfp4 or int8wo) selectively."""
+    if PRECISION is None:
+        _resolve_precision()
+    if PRECISION["mode"] == "bf16":
         return model
 
     try:
-        from torchao.quantization import quantize_
-        from torchao.prototype.mx_formats import NVFP4WeightOnlyConfig
-
-        logger.info("Applying NVFP4 weight-only quantization...")
-        quantize_(model, NVFP4WeightOnlyConfig())
-        logger.info("NVFP4 quantization applied successfully")
-    except ImportError:
-        logger.warning(
-            "torchao not available for NVFP4 quantization. "
-            "Install with: pip install torchao"
+        _precision_mod.apply_quant(
+            model, PRECISION["mode"],
+            skip_patterns=PRECISION["skip_patterns"],
+            skip_first_last=PRECISION["skip_first_last"],
         )
+        logger.info("%s quantization applied", PRECISION["mode"])
+    except ImportError:
+        logger.warning("torchao not available for %s quantization. pip install torchao", PRECISION["mode"])
     except Exception as e:
-        logger.warning("NVFP4 quantization failed (may not be supported on this GPU): %s", e)
+        logger.warning("%s quantization failed: %s", PRECISION["mode"], e)
 
     return model
 
 
 def _optimize_for_inference():
-    """Apply global PyTorch inference optimizations for 5090."""
+    """Apply global PyTorch inference optimizations."""
     if torch.cuda.is_available():
         # Enable TF32 for faster matmuls on Ampere+
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -444,6 +623,7 @@ def _optimize_for_inference():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         logger.info("GPU: %s (%.1f GB)", gpu_name, gpu_mem)
+    _resolve_precision()
 
 
 def _get_zimage_compile_mode() -> str | None:
@@ -476,6 +656,7 @@ def _downgrade_zimage_compile_mode(reason: str) -> bool:
 
 def _clear_zimage_external_caches():
     """Drop CuteZImage's module-level pipeline cache during server unloads."""
+    _clear_zimage_prompt_cache()
     try:
         from cutezimage.pipeline import clear_pipeline_caches
     except Exception:
@@ -533,6 +714,34 @@ def _cuda_free_mb() -> int | None:
         return None
 
 
+def _zimage_memory_pressure_detail(min_free_mb: int, operation_name: str) -> str | None:
+    if min_free_mb <= 0:
+        return None
+    free_mb = _cuda_free_mb()
+    if free_mb is None or free_mb >= min_free_mb:
+        return None
+    return (
+        f"{operation_name} needs at least {min_free_mb} MB free CUDA memory "
+        f"before starting Z-Image; only {free_mb} MB is free"
+    )
+
+
+def _raise_if_zimage_memory_pressure(min_free_mb: int, operation_name: str):
+    detail = _zimage_memory_pressure_detail(min_free_mb, operation_name)
+    if detail:
+        raise HTTPException(503, detail, headers={"Retry-After": "10"})
+
+
+def _wait_for_zimage_memory_headroom(min_free_mb: int, operation_name: str) -> bool:
+    deadline = time.monotonic() + max(0.0, ZIMAGE_OOM_RECOVERY_WAIT_SECONDS)
+    while True:
+        if _zimage_memory_pressure_detail(min_free_mb, operation_name) is None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.1, ZIMAGE_OOM_RECOVERY_POLL_SECONDS))
+
+
 def _pipeline_execution_device(pipe) -> torch.device:
     try:
         device = getattr(pipe, "_execution_device", None)
@@ -566,16 +775,19 @@ def _load_zimage():
     subclasses. The trained PEFT LoRAs are saved against this same vanilla
     base so they load cleanly on top.
     """
-    global zimage_pipeline, _zimage_effective_cpu_offload
+    global zimage_pipeline, _zimage_effective_cpu_offload, _zimage_load_strategy
 
     import sys
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "cutedsl")))
 
+    if PRECISION is None:
+        _resolve_precision()
+
     compile_mode = _get_zimage_compile_mode()
     logger.info(
-        "Loading Z-Image from %s (NVFP4=%s, CuteZImage=%s, compile_mode=%s)...",
+        "Loading Z-Image from %s (quant=%s, CuteZImage=%s, compile_mode=%s)...",
         ZIMAGE_MODEL_PATH,
-        ENABLE_NVFP4,
+        PRECISION["mode"],
         ZIMAGE_USE_CUTE,
         compile_mode or "eager",
     )
@@ -590,24 +802,33 @@ def _load_zimage():
         # swaps stock nn.Linear modules; it is also useful as a production
         # fallback when CuteZImage conversion/compilation is being benchmarked.
         from diffusers import ZImagePipeline, ZImageImg2ImgPipeline
-        text2img_pipe = ZImagePipeline.from_pretrained(
-            ZIMAGE_MODEL_PATH,
-            torch_dtype=DTYPE,
-        )
+        load_kwargs = {"torch_dtype": DTYPE}
+        if not enable_offload and not ENABLE_NVFP4 and ZIMAGE_DIRECT_DEVICE_MAP:
+            load_kwargs["device_map"] = DEVICE
+        try:
+            text2img_pipe = ZImagePipeline.from_pretrained(ZIMAGE_MODEL_PATH, **load_kwargs)
+            _zimage_load_strategy = (
+                "direct-device-map"
+                if "device_map" in load_kwargs
+                else ("cpu-model-offload" if enable_offload else "cpu-then-cuda")
+            )
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            if "device_map" not in load_kwargs:
+                raise
+            logger.warning("direct-to-device Z-Image load unsupported; retrying via CPU: %s", exc)
+            load_kwargs.pop("device_map")
+            text2img_pipe = ZImagePipeline.from_pretrained(ZIMAGE_MODEL_PATH, **load_kwargs)
+            _zimage_load_strategy = "cpu-then-cuda"
 
         if ENABLE_NVFP4:
             # Quantize the heavyweights BEFORE moving to GPU so peak load memory
-            # stays low. NVFP4 weight-only swaps the .weight tensor in-place.
-            if hasattr(text2img_pipe, "transformer") and text2img_pipe.transformer is not None:
-                logger.info("NVFP4: quantizing transformer (%.1f GB → ~%.1f GB)",
-                            sum(p.numel() for p in text2img_pipe.transformer.parameters()) * 2 / 1e9,
-                            sum(p.numel() for p in text2img_pipe.transformer.parameters()) * 0.5 / 1e9)
-                _apply_nvfp4_quantization(text2img_pipe.transformer)
-            if hasattr(text2img_pipe, "text_encoder") and text2img_pipe.text_encoder is not None:
-                logger.info("NVFP4: quantizing text encoder (Qwen3, %.1f GB → ~%.1f GB)",
-                            sum(p.numel() for p in text2img_pipe.text_encoder.parameters()) * 2 / 1e9,
-                            sum(p.numel() for p in text2img_pipe.text_encoder.parameters()) * 0.5 / 1e9)
-                _apply_nvfp4_quantization(text2img_pipe.text_encoder)
+            # stays low. Weight-only quant swaps the .weight tensor in-place.
+            for comp_name in ("transformer", "text_encoder"):
+                comp = getattr(text2img_pipe, comp_name, None)
+                if comp is not None:
+                    logger.info("quant(%s): %s (%.1f GB bf16)", PRECISION["mode"], comp_name,
+                                sum(p.numel() for p in comp.parameters()) * 2 / 1e9)
+                    _apply_nvfp4_quantization(comp)
 
         if enable_offload and not ENABLE_NVFP4 and hasattr(text2img_pipe, "enable_model_cpu_offload"):
             text2img_pipe.enable_model_cpu_offload()
@@ -617,10 +838,11 @@ def _load_zimage():
             # Accelerate's CPU offload breaks NVFP4 tensor subclasses, so keep
             # those components resident on the target device.
             try:
-                for comp_name in ("transformer", "vae", "text_encoder"):
-                    comp = getattr(text2img_pipe, comp_name, None)
-                    if comp is not None:
-                        comp.to(DEVICE)
+                if not getattr(text2img_pipe, "hf_device_map", None):
+                    for comp_name in ("transformer", "vae", "text_encoder"):
+                        comp = getattr(text2img_pipe, comp_name, None)
+                        if comp is not None:
+                            comp.to(DEVICE)
             except Exception as e:
                 if (
                     str(DEVICE).startswith("cuda")
@@ -635,6 +857,7 @@ def _load_zimage():
                     text2img_pipe.enable_model_cpu_offload()
                     enable_offload = True
                     _zimage_effective_cpu_offload = True
+                    _zimage_load_strategy = "cpu-model-offload-fallback"
                 else:
                     raise RuntimeError(f"Z-Image component .to({DEVICE}) failed") from e
 
@@ -786,12 +1009,23 @@ def _sanitize_query(query_string: bytes) -> str:
 
 
 def _request_prompt_info(request: Request) -> dict:
-    prompt = request.query_params.get("prompt", "")
+    prompt = getattr(request.state, "prompt_text", None)
+    if prompt is None:
+        prompt = request.query_params.get("prompt", "")
     return {
         "prompt_len": len(prompt),
         "prompt_words": len(prompt.split()) if prompt else 0,
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16] if prompt else "",
     }
+
+
+def _remember_request_prompt(request: Request, prompt: str):
+    request.state.prompt_text = prompt
+
+
+def _require_nonempty_prompt(prompt: str, field_name: str = "prompt"):
+    if not prompt or not prompt.strip():
+        raise HTTPException(400, f"{field_name} must not be empty")
 
 
 def _write_error_event(event: dict):
@@ -861,7 +1095,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 def _check_secret(secret: str = ""):
-    if IMAGE_API_SECRET and secret != IMAGE_API_SECRET:
+    if IMAGE_API_SECRETS and secret not in IMAGE_API_SECRETS:
         raise HTTPException(403, "invalid secret")
 
 
@@ -869,6 +1103,75 @@ def _require_http_url(value: str, field_name: str = "url"):
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(400, f"{field_name} must be an http(s) URL")
+
+
+def _is_public_ip_address(host: str) -> bool:
+    try:
+        addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise HTTPException(400, "image_url host could not be resolved")
+
+    for address in addresses:
+        ip_text = address[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_text)
+        except ValueError:
+            raise HTTPException(400, "image_url resolved to an invalid address")
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+    return True
+
+
+def _validate_remote_image_url(value: str, field_name: str = "image_url"):
+    _require_http_url(value, field_name)
+    parsed = urlparse(value)
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(400, f"{field_name} must include a host")
+    if not ALLOW_PRIVATE_IMAGE_URLS and not _is_public_ip_address(host):
+        raise HTTPException(400, f"{field_name} must resolve to a public address")
+
+
+def _load_remote_image(image_url: str) -> Image.Image:
+    _validate_remote_image_url(image_url, "image_url")
+    try:
+        with requests.get(
+            image_url,
+            stream=True,
+            timeout=REMOTE_IMAGE_TIMEOUT_SECONDS,
+            headers={"User-Agent": "CuteDSL inference image fetcher"},
+        ) as response:
+            if response.status_code >= 400:
+                raise HTTPException(400, f"image_url returned HTTP {response.status_code}")
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type and not content_type.startswith("image/"):
+                raise HTTPException(400, "image_url did not return an image")
+
+            buf = io.BytesIO()
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                buf.write(chunk)
+                if buf.tell() > REMOTE_IMAGE_MAX_BYTES:
+                    raise HTTPException(413, "image_url image is too large")
+            if buf.tell() == 0:
+                raise HTTPException(400, "image_url returned an empty response")
+
+        buf.seek(0)
+        return Image.open(buf).convert("RGB")
+    except HTTPException:
+        raise
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(400, f"image_url could not be fetched: {type(e).__name__}") from e
+    except (UnidentifiedImageError, OSError) as e:
+        raise HTTPException(400, "image_url did not contain a valid image") from e
 
 
 # ---------------------------------------------------------------------------
@@ -908,10 +1211,13 @@ def health():
         },
         "gpu_queue": gpu_queue,
         "nvfp4": ENABLE_NVFP4,
+        "precision": PRECISION,
         "zimage_use_cute": ZIMAGE_USE_CUTE,
         "zimage_cpu_offload": _zimage_cpu_offload_enabled(),
         "zimage_cpu_offload_mode": _zimage_cpu_offload_mode(),
         "zimage_effective_cpu_offload": _zimage_effective_cpu_offload,
+        "zimage_load_strategy": _zimage_load_strategy,
+        "zimage_direct_device_map": ZIMAGE_DIRECT_DEVICE_MAP,
         "zimage_no_offload_min_free_mb": ZIMAGE_NO_OFFLOAD_MIN_FREE_MB,
         "zimage_compile_mode": _get_zimage_compile_mode() or "eager",
         "latent_teleport": {
@@ -920,7 +1226,9 @@ def health():
             "start_step": LATENT_TELEPORT_START_STEP,
             "approx_min_similarity": LATENT_TELEPORT_APPROX_MIN_SIM,
             "min_free_mb": LATENT_TELEPORT_MIN_FREE_MB,
+            "latent_save": LATENT_SAVE,
         },
+        "prompt_embedding_cache": _zimage_prompt_cache_snapshot(),
         "device": DEVICE,
         "dtype": DTYPE_STR,
     }
@@ -1070,12 +1378,39 @@ def nsfw_unload():
     return {"status": "unloaded"}
 
 
+class AestheticRequest(BaseModel):
+    image_base64: Optional[str] = None
+    image_url: Optional[str] = None
+
+
+@app.post("/aesthetic_score")
+async def aesthetic_score(req: AestheticRequest):
+    """Score image aesthetics (LAION predictor, ~1-10). CPU by default."""
+    if req.image_base64:
+        img_bytes = base64.b64decode(req.image_base64)
+    elif req.image_url:
+        import httpx as hx
+        async with hx.AsyncClient() as client:
+            resp = await client.get(req.image_url, timeout=30)
+            resp.raise_for_status()
+        img_bytes = resp.content
+    else:
+        raise HTTPException(400, "image_url or image_base64 required")
+    image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    scores = await asyncio.get_event_loop().run_in_executor(
+        None, aesthetic_score_images, [image]
+    )
+    if not scores:
+        raise HTTPException(503, "aesthetic scorer unavailable")
+    return {"aesthetic_score": round(scores[0], 3)}
+
+
 # ---------------------------------------------------------------------------
 # Z-Image (text-to-image) with auto LoRA selection
 # ---------------------------------------------------------------------------
 
 class ZImageRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., min_length=1)
     width: int = ZIMAGE_DEFAULT_WIDTH
     height: int = ZIMAGE_DEFAULT_HEIGHT
     seed: int = 0
@@ -1085,179 +1420,67 @@ class ZImageRequest(BaseModel):
     auto_lora: bool = True
     lora_scale: float = 1.0
     low_priority: bool = False
+    quality_retry: bool = True
+    enhance_prompt: bool = True
+    best_of: int = Field(1, ge=1, le=4)
+    score_aesthetic: bool = False
+    early_exit: Optional[float] = Field(None, ge=0.0, le=1.0)
+    early_exit_min_steps: Optional[int] = Field(None, ge=1)
+
+    @field_validator("prompt")
+    @classmethod
+    def _validate_prompt(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("prompt must not be empty")
+        return value
 
 
 _lora_cache_dir = os.path.join(os.path.dirname(__file__), ".lora_cache")
 
 
-def _download_lora(url: str) -> str:
-    """Download LoRA weights to local cache, return local path."""
-    os.makedirs(_lora_cache_dir, exist_ok=True)
-    from urllib.parse import unquote
-    filename = unquote(url.split("/")[-1])
-    local_path = os.path.join(_lora_cache_dir, filename)
-    if os.path.exists(local_path):
-        return local_path
-    import urllib.request
-    logger.info("downloading LoRA: %s", url)
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req) as resp:
-        with open(local_path, "wb") as f:
-            while True:
-                chunk = resp.read(1024 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-    logger.info("cached LoRA at %s (%d bytes)", local_path, os.path.getsize(local_path))
-    return local_path
+_lora_swapper = None
+_lora_swapper_lock = threading.Lock()
 
 
-def _first_parameter_device(module) -> torch.device:
-    try:
-        return next(module.parameters()).device
-    except StopIteration:
-        return torch.device("cpu")
+def _get_lora_swapper(transformer):
+    """Lazily build a cuteloras swapper over the fixtures catalog (sticky hot-swapping)."""
+    global _lora_swapper
+    with _lora_swapper_lock:
+        if _lora_swapper is None or _lora_swapper.transformer is not transformer:
+            from cuteloras import LoRARecord, LoRARegistry, LoRASwapper
+            from lora_fixtures import get_all_zimage_loras
+
+            registry = LoRARegistry(cache_dir=_lora_cache_dir)
+            for lora in get_all_zimage_loras():
+                registry.add(LoRARecord(
+                    id=lora.id,
+                    name=lora.name,
+                    url=lora.url,
+                    trigger_word=lora.trigger_word,
+                    template=lora.template or "{prompt}",
+                    keywords=lora.keywords,
+                    negative_keywords=lora.negative_keywords,
+                    is_adult=lora.is_adult,
+                    scale=lora.scale,
+                ))
+            _lora_swapper = LoRASwapper(transformer, registry)
+        return _lora_swapper
 
 
-@contextlib.contextmanager
-def _lora_apply_device(transformer):
-    original_device = _first_parameter_device(transformer)
-    moved = False
-    should_move = (
-        ZIMAGE_FAST_LORA_CPU_OFFLOAD
-        and torch.cuda.is_available()
-        and str(DEVICE).startswith("cuda")
-        and original_device.type == "cpu"
-    )
-
-    if should_move:
-        try:
-            transformer.to(device=DEVICE)
-            moved = True
-        except Exception as exc:
-            logger.warning("LoRA GPU staging failed; applying on %s: %s", original_device, exc)
-
-    try:
-        yield
-    finally:
-        if moved:
-            try:
-                transformer.to(device=original_device)
-                torch.cuda.empty_cache()
-            except Exception as exc:
-                logger.warning("LoRA GPU staging cleanup failed: %s", exc)
+def _activate_lora(pipe, lora, lora_scale: float = 1.0):
+    """Activate a single LoRA on the pipeline transformer; sticky across requests."""
+    swapper = _get_lora_swapper(pipe.transformer)
+    if lora.id not in swapper.registry:
+        from cuteloras import LoRARecord
+        swapper.registry.add(LoRARecord(id=lora.id, name=lora.name, url=lora.url,
+                                        scale=getattr(lora, "scale", 1.0)))
+    return swapper.activate([(lora.id, lora_scale)])
 
 
-def _apply_lora_weights_direct(transformer, lora_path: str, scale: float = 1.0):
-    """Apply Z-Image LoRA weights directly to transformer parameters.
-
-    Z-Image LoRAs use keys like: diffusion_model.layers.N.attention.to_q.lora_A/B.weight
-    Our CuteZImageTransformer uses: main_blocks[N].attn.q_proj etc.
-    """
-    from safetensors import safe_open
-
-    key_map = {
-        "attention.to_q": "q_proj",
-        "attention.to_k": "k_proj",
-        "attention.to_v": "v_proj",
-        "attention.to_out.0": "o_proj",
-        "feed_forward.w1": "feed_forward.w1",
-        "feed_forward.w2": "feed_forward.w2",
-        "feed_forward.w3": "feed_forward.w3",
-        "adaLN_modulation.0": "adaLN_modulation.1",
-    }
-
-    with _lora_apply_device(transformer):
-        with safe_open(lora_path, framework="pt", device="cpu") as sf:
-            applied = 0
-            for key in sf.keys():
-                if not key.startswith("diffusion_model.layers."):
-                    continue
-                parts = key.replace("diffusion_model.layers.", "").split(".")
-                layer_idx = int(parts[0])
-                rest = ".".join(parts[1:])
-
-                is_lora_a = rest.endswith(".lora_A.weight")
-                is_lora_b = rest.endswith(".lora_B.weight")
-                if not (is_lora_a or is_lora_b):
-                    continue
-
-                module_key = rest.replace(".lora_A.weight", "").replace(".lora_B.weight", "")
-                mapped = key_map.get(module_key)
-                if not mapped:
-                    continue
-
-                if layer_idx >= len(transformer.layers):
-                    continue
-
-                block = transformer.layers[layer_idx]
-                param_parts = mapped.split(".")
-                target = block
-                for p in param_parts:
-                    target = getattr(target, p, None)
-                    if target is None:
-                        break
-                if target is None:
-                    continue
-
-                target_device = target.weight.device
-                target_dtype = target.weight.dtype
-                with torch.no_grad():
-                    if is_lora_b:
-                        lora_a_key = key.replace("lora_B", "lora_A")
-                        lora_weight = sf.get_tensor(key).to(device=target_device, dtype=target_dtype)
-                        lora_a = sf.get_tensor(lora_a_key).to(device=target_device, dtype=target_dtype)
-                        delta = (lora_weight @ lora_a) * scale
-                        target.weight.add_(delta.to(device=target_device, dtype=target_dtype))
-                        applied += 1
-
-    logger.info("applied %d LoRA layers from %s (scale=%.2f)", applied, os.path.basename(lora_path), scale)
-    return applied > 0
-
-
-_active_lora_cache: dict[int, list[tuple[str, float]]] = {}
-
-
-def _restore_original_weights(transformer):
-    """Undo directly-applied LoRA weights after generation."""
-    cache_key = id(transformer)
-    active = _active_lora_cache.pop(cache_key, [])
-    if not active:
-        return
-    for lora_path, scale in reversed(active):
-        try:
-            _apply_lora_weights_direct(transformer, lora_path, scale=-scale)
-        except Exception as e:
-            logger.warning("LoRA restore failed for %s: %s", os.path.basename(lora_path), e)
-
-
-def _detect_lora_format(path: str) -> str:
-    """Detect if LoRA is zimage-native or sdxl-kohya format."""
-    from safetensors import safe_open
-    with safe_open(path, framework="pt") as sf:
-        keys = list(sf.keys())[:128]
-        if any(k.startswith("diffusion_model") for k in keys):
-            return "zimage-native"
-        return "sdxl-kohya"
-
-
-def _load_lora_onto_pipe(pipe, lora_url: str, lora_scale: float = 1.0):
-    """Load Z-Image LoRA weights onto pipeline transformer."""
-    if lora_url.startswith("http"):
-        local_path = _download_lora(lora_url)
-    else:
-        local_path = lora_url
-
-    fmt = _detect_lora_format(local_path)
-
-    if fmt == "sdxl-kohya":
-        # Use diffusers native loader for SDXL/Kohya format LoRAs
-        logger.info("loading sdxl-kohya format LoRA: %s", os.path.basename(local_path))
-        return
-
-    transformer = pipe.transformer
-    _apply_lora_weights_direct(transformer, local_path, scale=lora_scale)
-    _active_lora_cache.setdefault(id(transformer), []).append((local_path, lora_scale))
+def _deactivate_loras(pipe):
+    """Restore pristine base weights if any LoRA is active."""
+    if _lora_swapper is not None and _lora_swapper.transformer is pipe.transformer:
+        _lora_swapper.deactivate()
 
 
 def _effective_lora_scale(lora, requested_scale: float | None = None) -> float:
@@ -1280,6 +1503,10 @@ def _reset_zimage_scheduler(pipe):
 def _resolve_lora(req: ZImageRequest):
     """Resolve LoRA from explicit ID or auto-select from prompt."""
     if not lora_engine:
+        return None, req.prompt
+    if ENABLE_NVFP4:
+        if req.lora_id:
+            logger.warning("lora_id '%s' skipped because NVFP4 direct LoRA mutation is unsupported", req.lora_id)
         return None, req.prompt
 
     from lora_fixtures import get_lora_by_id, apply_lora_template
@@ -1337,24 +1564,53 @@ def _generate_image_once_sync(req: ZImageRequest):
         guidance_scale=req.guidance_scale,
         generator=generator,
     )
+    pipe_kwargs, prompt_cache_meta = _prepare_zimage_prompt_embeddings(text2img_pipe, pipe_kwargs)
 
+    early_exit_threshold = req.early_exit if req.early_exit is not None else (ZIMAGE_EARLY_EXIT or None)
+    early_exit_min_steps = req.early_exit_min_steps or ZIMAGE_EARLY_EXIT_MIN_STEPS
+    exit_info: dict = {}
+    captured = {}
+    pipeline_timing = {}
     if lora:
         try:
-            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=_effective_lora_scale(lora, req.lora_scale))
-            try:
-                result = text2img_pipe(**pipe_kwargs)
-            finally:
-                _restore_original_weights(text2img_pipe.transformer)
+            _activate_lora(text2img_pipe, lora, lora_scale=_effective_lora_scale(lora, req.lora_scale))
+            result, _ = _run_zimage_capture_multi(
+                text2img_pipe, pipe_kwargs, (), pipeline_timing,
+                early_exit=early_exit_threshold,
+                early_exit_min_steps=early_exit_min_steps,
+                exit_info=exit_info,
+                log_prompt=final_prompt,
+            )
         except Exception as e:
-            logger.warning("LoRA load failed (%s), generating without: %s", lora.id, e)
-            _restore_original_weights(text2img_pipe.transformer)
-            result = text2img_pipe(**pipe_kwargs)
+            logger.warning("LoRA generation failed (%s), retrying without: %s", lora.id, e)
+            _deactivate_loras(text2img_pipe)
+            pipeline_timing = {}
+            result, _ = _run_zimage_capture_multi(text2img_pipe, pipe_kwargs, (), pipeline_timing)
             lora = None
     else:
-        result = text2img_pipe(**pipe_kwargs)
+        _deactivate_loras(text2img_pipe)
+        capture = _capture_steps_for(req.num_inference_steps) if _latent_save_active() else ()
+        result, captured = _run_zimage_capture_multi(
+            text2img_pipe, pipe_kwargs, capture, pipeline_timing,
+            early_exit=early_exit_threshold,
+            early_exit_min_steps=early_exit_min_steps,
+            exit_info=exit_info,
+            log_prompt=final_prompt,
+        )
 
     image = result.images[0]
     elapsed = time.time() - t0
+
+    if exit_info.get("exited_after_step"):
+        # threshold early-exit produces an approximate final latent; do not
+        # poison the exact-replay teleport cache with it. noop-step skips are
+        # bitwise-identical, so their captures stay valid.
+        captured = {}
+    if captured and not lora:
+        cached_conditioning = (pipe_kwargs.get("prompt_embeds") or [None])[0]
+        _persist_generation_latents(final_prompt, req.seed, req.num_inference_steps,
+                                    width, height, req.guidance_scale, captured,
+                                    text_embedding=cached_conditioning)
 
     buf = io.BytesIO()
     image.save(buf, format="WEBP", quality=90)
@@ -1375,6 +1631,9 @@ def _generate_image_once_sync(req: ZImageRequest):
         "seed": req.seed,
         "prompt_used": final_prompt,
         "lora": lora_info,
+        "prompt_embedding_cache": prompt_cache_meta,
+        "pipeline_timing": pipeline_timing,
+        "early_exit": exit_info or None,
     }
 
 
@@ -1384,9 +1643,68 @@ def _copy_zimage_request(req: ZImageRequest, prompt: str) -> ZImageRequest:
     return req.copy(update={"prompt": prompt})
 
 
+def _decode_result_image(result: dict) -> Image.Image | None:
+    try:
+        return Image.open(io.BytesIO(base64.b64decode(result["image_base64"]))).convert("RGB")
+    except Exception as e:
+        logger.warning("zimage result decode failed: %s", e)
+        return None
+
+
+def _attach_aesthetic_score(result: dict, image: Image.Image | None = None) -> None:
+    if image is None:
+        image = _decode_result_image(result)
+    if image is None:
+        return
+    scores = aesthetic_score_images([image])
+    if scores:
+        result["aesthetic_score"] = round(scores[0], 3)
+
+
+def _generate_best_of_sync(req: ZImageRequest, prompt: str) -> dict:
+    """Generate best_of candidates and return the highest aesthetic scorer pick."""
+    candidates = []
+    for i in range(req.best_of):
+        attempt_req = _copy_zimage_request(req, prompt)
+        attempt_req.seed = req.seed + i
+        result = _generate_image_once_sync(attempt_req)
+        image = _decode_result_image(result)
+        bumpy = detect_too_bumpy(image) if image is not None else True
+        candidates.append({"result": result, "image": image, "bumpy": bumpy})
+
+    images = [c["image"] for c in candidates if c["image"] is not None]
+    scores = aesthetic_score_images(images) if images else None
+    score_iter = iter(scores) if scores else None
+    for cand in candidates:
+        raw = next(score_iter) if (score_iter and cand["image"] is not None) else 0.0
+        cand["score"] = raw
+        cand["ranked"] = raw - (100.0 if cand["bumpy"] else 0.0)
+
+    best_index = max(range(len(candidates)), key=lambda i: candidates[i]["ranked"])
+    best = candidates[best_index]["result"]
+    if scores:
+        best["aesthetic_score"] = round(candidates[best_index]["score"], 3)
+    best["best_of"] = {
+        "candidates": req.best_of,
+        "best_index": best_index,
+        "scores": [round(c["score"], 3) for c in candidates],
+        "bumpy": [c["bumpy"] for c in candidates],
+    }
+    return best
+
+
 def _generate_image_sync(req: ZImageRequest):
     """Generate an image and retry once if deterministic quality checks fail."""
     first_prompt = compact_prompt(req.prompt)
+    if ZIMAGE_ENHANCE_PROMPT and req.enhance_prompt:
+        first_prompt = enhance_prompt(first_prompt)
+    if req.best_of > 1:
+        return _generate_best_of_sync(req, first_prompt)
+    if not req.quality_retry:
+        result = _generate_image_once_sync(_copy_zimage_request(req, first_prompt))
+        if req.score_aesthetic:
+            _attach_aesthetic_score(result)
+        return result
     prompts = [first_prompt, retry_prompt(first_prompt)]
 
     last_result = None
@@ -1396,10 +1714,8 @@ def _generate_image_sync(req: ZImageRequest):
         result = _generate_image_once_sync(attempt_req)
         last_result = result
 
-        try:
-            image = Image.open(io.BytesIO(base64.b64decode(result["image_base64"]))).convert("RGB")
-        except Exception as e:
-            logger.warning("zimage quality decode failed: %s", e)
+        image = _decode_result_image(result)
+        if image is None:
             return result
 
         if not detect_too_bumpy(image):
@@ -1409,6 +1725,8 @@ def _generate_image_sync(req: ZImageRequest):
                     "prompt_used": prompt,
                     "attempts": attempt + 1,
                 }
+            if req.score_aesthetic:
+                _attach_aesthetic_score(result, image)
             return result
 
         metrics = bumpy_metrics(image)
@@ -1467,18 +1785,27 @@ def _with_zimage_model_retry(operation_name: str, fn):
     last_exc = None
     for attempt in range(3):
         try:
+            if not model_manager.is_loaded("zimage"):
+                _raise_if_zimage_memory_pressure(ZIMAGE_LOAD_MIN_FREE_MB, operation_name)
             with model_manager.use("zimage"):
                 if zimage_pipeline is None:
                     raise HTTPException(503, "zimage model failed to load")
+                _raise_if_zimage_memory_pressure(ZIMAGE_RUNTIME_MIN_FREE_MB, operation_name)
                 return fn()
         except Exception as e:
             last_exc = e
             if _is_cuda_oom(e):
-                if attempt > 0:
-                    _recover_from_cuda_oom()
-                    raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery")
                 logger.warning("%s hit CUDA OOM; reloading model and retrying once", operation_name)
                 _recover_from_cuda_oom()
+                if attempt > 0:
+                    raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery")
+                if not _wait_for_zimage_memory_headroom(ZIMAGE_LOAD_MIN_FREE_MB, operation_name):
+                    detail = _zimage_memory_pressure_detail(ZIMAGE_LOAD_MIN_FREE_MB, operation_name)
+                    raise HTTPException(
+                        503,
+                        f"{operation_name} failed after CUDA OOM recovery: {detail}",
+                        headers={"Retry-After": "10"},
+                    )
                 continue
             if _is_zimage_cudagraph_list_assertion(e):
                 downgraded = _downgrade_zimage_compile_mode("torch inductor CUDA graph list-output assertion")
@@ -1499,9 +1826,10 @@ def _generate_image_with_model_sync(req: ZImageRequest):
 
 
 @app.post("/generate_image")
-async def generate_image(req: ZImageRequest):
+async def generate_image(req: ZImageRequest, request: Request):
     if not LOAD_ZIMAGE:
         raise HTTPException(503, "zimage disabled")
+    _remember_request_prompt(request, req.prompt)
     async with gpu_slot(req.low_priority):
         return await asyncio.get_event_loop().run_in_executor(
             None, _generate_image_with_model_sync, req
@@ -1510,7 +1838,8 @@ async def generate_image(req: ZImageRequest):
 
 # GET with query params for cutedsl-site internal use (returns base64)
 @app.get("/generate_image_b64")
-def generate_image_b64(
+async def generate_image_b64(
+    request: Request,
     prompt: str,
     width: int = ZIMAGE_DEFAULT_WIDTH,
     height: int = ZIMAGE_DEFAULT_HEIGHT,
@@ -1518,10 +1847,164 @@ def generate_image_b64(
     lora_id: Optional[str] = None,
     auto_lora: bool = True,
 ):
-    return generate_image(ZImageRequest(
+    _require_nonempty_prompt(prompt)
+    _remember_request_prompt(request, prompt)
+    req = ZImageRequest(
         prompt=prompt, width=width, height=height, seed=seed,
         lora_id=lora_id, auto_lora=auto_lora,
-    ))
+    )
+    async with gpu_slot(req.low_priority):
+        return await asyncio.get_event_loop().run_in_executor(
+            None, _generate_image_with_model_sync, req
+        )
+
+
+# ---------------------------------------------------------------------------
+# Experimental: per-step diffusion trace for early-exit ablation
+# ---------------------------------------------------------------------------
+
+
+class StepTraceRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    width: int = 512
+    height: int = 512
+    seed: int = 0
+    num_inference_steps: int = 9
+    guidance_scale: float = ZIMAGE_DEFAULT_GUIDANCE
+    decode_x0: bool = True
+    save_tensors: bool = True
+    low_priority: bool = True
+    sigmas: Optional[list[float]] = None
+
+
+def _decode_zimage_latent_to_pil(pipe, latents: torch.Tensor):
+    vae = pipe.vae
+    lat = latents.to(vae.dtype) / vae.config.scaling_factor + vae.config.shift_factor
+    with torch.inference_mode():
+        img = vae.decode(lat, return_dict=False)[0]
+    return pipe.image_processor.postprocess(img, output_type="pil")[0]
+
+
+def _step_trace_sync(req: StepTraceRequest):
+    if nsfw_classifier is not None:
+        _unload_nsfw_classifier()
+    if zimage_pipeline is None:
+        raise HTTPException(503, "zimage not loaded")
+    pipe, _ = zimage_pipeline
+    if hasattr(pipe, 'to') and not hasattr(pipe, '_offload_gpu_id'):
+        try:
+            pipe.to(DEVICE)
+        except Exception:
+            pass
+    _deactivate_loras(pipe)
+    _reset_zimage_scheduler(pipe)
+
+    width = (req.width // 64) * 64 or 1024
+    height = (req.height // 64) * 64 or 1024
+    generator = _make_pipeline_generator(pipe, req.seed)
+    pipe_kwargs = dict(
+        prompt=req.prompt, width=width, height=height,
+        num_inference_steps=req.num_inference_steps,
+        guidance_scale=req.guidance_scale, generator=generator,
+    )
+    pipe_kwargs, prompt_cache_meta = _prepare_zimage_prompt_embeddings(pipe, pipe_kwargs)
+    if req.sigmas:
+        pipe_kwargs["sigmas"] = req.sigmas
+
+    zs: list[torch.Tensor] = []
+    vs: list[torch.Tensor] = []
+    step_times: list[float] = []
+
+    def _cb(_pipe, step_index, _timestep, callback_kwargs):  # noqa: ANN001
+        step_times.append(time.perf_counter())
+        zs.append(callback_kwargs["latents"].detach().clone())
+        vs.append(callback_kwargs["noise_pred"].detach().clone())
+        return callback_kwargs
+
+    t0 = time.perf_counter()
+    result = pipe(
+        **pipe_kwargs,
+        callback_on_step_end=_cb,
+        callback_on_step_end_tensor_inputs=["latents", "noise_pred"],
+    )
+    gen_seconds = time.perf_counter() - t0
+    sigmas = [float(s) for s in pipe.scheduler.sigmas]
+    final_img = result.images[0]
+
+    trace_id = f"{int(time.time() * 1000)}_s{req.seed}"
+    out_dir = os.path.join(STEP_TRACE_DIR, trace_id)
+    os.makedirs(out_dir, exist_ok=True)
+    final_path = os.path.join(out_dir, "final.webp")
+    final_img.save(final_path, quality=95)
+
+    from cutezimage.image_metrics import compare_images, pil_to_tensor
+    final_t = pil_to_tensor(final_img)
+
+    steps_data = []
+    n = len(zs)
+    for k in range(n):
+        s_next = sigmas[k + 1] if k + 1 < len(sigmas) else 0.0
+        row: dict = {"step": k, "sigma": sigmas[k], "sigma_next": s_next}
+        if k > 0:
+            dz = zs[k] - zs[k - 1]
+            zn = zs[k].norm().item()
+            row.update({
+                "dz_l2": round(dz.norm().item(), 5),
+                "dz_rel": round(dz.norm().item() / max(zn, 1e-8), 6),
+                "dz_l1_mean": round(dz.abs().mean().item(), 6),
+                "cos_prev": round(torch.nn.functional.cosine_similarity(
+                    zs[k].flatten(), zs[k - 1].flatten(), dim=0).item(), 6),
+            })
+        if req.decode_x0:
+            x0 = zs[k] - s_next * vs[k]
+            img = _decode_zimage_latent_to_pil(pipe, x0)
+            p = os.path.join(out_dir, f"x0_step{k:02d}.webp")
+            img.save(p, quality=95)
+            m = compare_images(pil_to_tensor(img), final_t)
+            row.update({
+                "x0_image": p,
+                "ssim_to_final": round(m["ssim"], 5),
+                "psnr_to_final": round(m["psnr_db"], 3) if math.isfinite(m["psnr_db"]) else None,
+                "mae_to_final": round(m["mae"], 4),
+            })
+        steps_data.append(row)
+
+    if req.save_tensors:
+        emb = pipe_kwargs.get("prompt_embeds")
+        pooled = None
+        if emb:
+            first = emb[0] if isinstance(emb, (list, tuple)) else emb
+            pooled = first.float().mean(dim=0).cpu()
+        torch.save({
+            "latents": [z.half().cpu() for z in zs],
+            "noise_preds": [v.half().cpu() for v in vs],
+            "sigmas": sigmas,
+            "prompt": req.prompt,
+            "seed": req.seed,
+            "width": width,
+            "height": height,
+            "pooled_prompt_embedding": pooled,
+        }, os.path.join(out_dir, "trace.pt"))
+
+    step_durations = [round(b - a, 4) for a, b in zip(step_times, step_times[1:])]
+    return {
+        "trace_id": trace_id,
+        "dir": out_dir,
+        "final_image": final_path,
+        "gen_seconds": round(gen_seconds, 3),
+        "step_durations": step_durations,
+        "sigmas": sigmas,
+        "steps": steps_data,
+        "prompt_embedding_cache": prompt_cache_meta,
+    }
+
+
+@app.post("/experimental/step_trace")
+async def step_trace(req: StepTraceRequest):
+    if not LOAD_ZIMAGE:
+        raise HTTPException(503, "zimage disabled")
+    async with gpu_slot(req.low_priority):
+        return await asyncio.get_event_loop().run_in_executor(None, _step_trace_sync, req)
 
 
 # ---------------------------------------------------------------------------
@@ -1568,20 +2051,56 @@ class ChronosRequest(BaseModel):
     values: list[float]
     prediction_length: int = 64
     quantile_levels: Optional[list[float]] = None
+    # Optional covariates for multivariate forecasting. Each is a named series.
+    # past_covariates align 1:1 with `values` (same length, the model uses
+    # cross-variate attention to inform the target). future_covariates supply
+    # known-ahead values over the horizon (length == prediction_length) and must
+    # be a subset of past_covariates keys.
+    past_covariates: Optional[dict[str, list[float]]] = None
+    future_covariates: Optional[dict[str, list[float]]] = None
 
 
 def _forecast_sync(req: ChronosRequest):
     """Synchronous GPU work for forecasting."""
     t0 = time.time()
-    context = torch.tensor(req.values, dtype=torch.float32)
-
     quantile_levels = req.quantile_levels or [0.1, 0.5, 0.9]
 
-    quantiles, mean = chronos_pipeline.predict_quantiles(
-        context,
-        prediction_length=req.prediction_length,
-        quantile_levels=quantile_levels,
-    )
+    if req.past_covariates:
+        # Multivariate path: build a rich task so Chronos-2 attends across
+        # covariates. Lengths are validated by the pipeline; surface as 400.
+        hist = len(req.values)
+        for name, col in req.past_covariates.items():
+            if len(col) != hist:
+                raise HTTPException(
+                    400,
+                    f"past_covariate {name!r} length {len(col)} != values length {hist}",
+                )
+        for name, col in (req.future_covariates or {}).items():
+            if name not in req.past_covariates:
+                raise HTTPException(400, f"future_covariate {name!r} has no matching past_covariate")
+            if len(col) != req.prediction_length:
+                raise HTTPException(
+                    400,
+                    f"future_covariate {name!r} length {len(col)} != prediction_length {req.prediction_length}",
+                )
+        task = {
+            "target": req.values,
+            "past_covariates": req.past_covariates,
+        }
+        if req.future_covariates:
+            task["future_covariates"] = req.future_covariates
+        quantiles, mean = chronos_pipeline.predict_quantiles(
+            [task],
+            prediction_length=req.prediction_length,
+            quantile_levels=quantile_levels,
+        )
+    else:
+        context = torch.tensor(req.values, dtype=torch.float32)
+        quantiles, mean = chronos_pipeline.predict_quantiles(
+            context,
+            prediction_length=req.prediction_length,
+            quantile_levels=quantile_levels,
+        )
 
     elapsed = time.time() - t0
 
@@ -1641,14 +2160,11 @@ def _forecast_batch_sync(req: ChronosBatchRequest):
     contexts = [torch.tensor(s, dtype=torch.float32) for s in req.series]
     quantile_levels = req.quantile_levels or [0.1, 0.5, 0.9]
 
-    # Pad to same length for batching
-    max_len = max(len(c) for c in contexts)
-    padded = torch.zeros(len(contexts), max_len)
-    for i, c in enumerate(contexts):
-        padded[i, -len(c):] = c
-
+    # Pass the list directly: the pipeline left-pads with NaN (treated as
+    # missing). Zero-padding here would poison instance-norm stats and make a
+    # short series forecast differently in a batch than alone.
     quantiles, mean = chronos_pipeline.predict_quantiles(
-        padded,
+        contexts,
         prediction_length=req.prediction_length,
         quantile_levels=quantile_levels,
     )
@@ -1708,9 +2224,35 @@ async def forecast_batch(req: ChronosBatchRequest):
 # ---------------------------------------------------------------------------
 
 class TTSRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1)
     voice: str = "af_nicole"
     speed: float = 1.0
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be empty")
+        return value
+
+
+def _tg_backend_headers(*, caption: bool = False) -> dict[str, str]:
+    """Return the scoped service credential without exposing it in errors."""
+    key = CAPTION_BACKEND_API_KEY if caption and CAPTION_BACKEND_API_KEY else (TG_API_KEY or CAPTION_BACKEND_API_KEY)
+    return {"secret": key} if key else {}
+
+
+def _tg_backend_error(service: str, exc: httpx.HTTPError) -> HTTPException:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in {401, 403}:
+            logger.error("%s backend rejected proxy credentials (status=%d)", service, status)
+            return HTTPException(502, f"{service} backend authentication failed")
+        if 400 <= status < 500:
+            logger.info("%s backend rejected request (status=%d)", service, status)
+            return HTTPException(status, f"{service} request rejected by backend")
+    logger.error("%s backend request failed: %s", service, exc)
+    return HTTPException(502, f"{service} backend request failed")
 
 
 @app.post("/synthesize")
@@ -1719,6 +2261,7 @@ async def synthesize(req: TTSRequest):
         resp = await tg_client.post(
             "/api/v1/generate_speech",
             json={"text": req.text, "voice": req.voice, "speed": req.speed},
+            headers=_tg_backend_headers(),
         )
         resp.raise_for_status()
         # Return audio bytes directly
@@ -1728,8 +2271,7 @@ async def synthesize(req: TTSRequest):
             headers={"X-Voice": req.voice},
         )
     except httpx.HTTPError as e:
-        logger.error("TTS proxy error: %s", e)
-        raise HTTPException(502, f"TTS backend error: {e}")
+        raise _tg_backend_error("TTS", e) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1751,12 +2293,12 @@ async def transcribe(req: STTRequest):
                 "translate_to_english": req.translate_to_english,
                 "output_filetype": "txt",
             },
+            headers=_tg_backend_headers(),
         )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
-        logger.error("STT proxy error: %s", e)
-        raise HTTPException(502, f"STT backend error: {e}")
+        raise _tg_backend_error("STT", e) from e
 
 
 @app.post("/transcribe_file")
@@ -1766,12 +2308,12 @@ async def transcribe_file(audio_file: UploadFile = File(...)):
         resp = await tg_client.post(
             "/api/v1/audio-file-extraction",
             files={"audio_file": (audio_file.filename, content, audio_file.content_type or "audio/wav")},
+            headers=_tg_backend_headers(),
         )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
-        logger.error("STT file proxy error: %s", e)
-        raise HTTPException(502, f"STT backend error: {e}")
+        raise _tg_backend_error("STT", e) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1782,18 +2324,27 @@ class CaptionRequest(BaseModel):
     image_url: str
 
 
+def _caption_backend_headers() -> dict[str, str]:
+    """Return caption-specific auth, allowing independent credential rotation."""
+    return _tg_backend_headers(caption=True)
+
+
+def _caption_backend_error(exc: httpx.HTTPError) -> HTTPException:
+    return _tg_backend_error("Caption", exc)
+
+
 @app.post("/caption")
 async def caption_image(req: CaptionRequest):
     try:
         resp = await tg_client.post(
             "/api/v1/image-caption",
             data={"image_url": req.image_url, "fast_mode": "true"},
+            headers=_caption_backend_headers(),
         )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
-        logger.error("Caption proxy error: %s", e)
-        raise HTTPException(502, f"Caption backend error: {e}")
+        raise _caption_backend_error(e) from e
 
 
 @app.post("/caption_file")
@@ -1804,12 +2355,12 @@ async def caption_file(image_file: UploadFile = File(...)):
             "/api/v1/image-caption",
             files={"image_file": (image_file.filename, content, image_file.content_type or "image/jpeg")},
             data={"fast_mode": "true"},
+            headers=_caption_backend_headers(),
         )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
-        logger.error("Caption file proxy error: %s", e)
-        raise HTTPException(502, f"Caption backend error: {e}")
+        raise _caption_backend_error(e) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1835,12 +2386,12 @@ async def gemma4_chat(req: Gemma4Request):
                 "stream": req.stream,
                 "model": "default",
             },
+            headers=_tg_backend_headers(),
         )
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPError as e:
-        logger.error("Gemma4 proxy error: %s", e)
-        raise HTTPException(502, f"Gemma4 backend error: {e}")
+        raise _tg_backend_error("Gemma4", e) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1924,30 +2475,55 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
         guidance_scale=ZIMAGE_DEFAULT_GUIDANCE,
         generator=generator,
     )
+    pipe_kwargs, prompt_cache_meta = _prepare_zimage_prompt_embeddings(text2img_pipe, pipe_kwargs)
     _reset_zimage_scheduler(text2img_pipe)
+    pipeline_timing = {}
+    exit_info: dict = {}
 
     if lora:
         try:
-            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=_effective_lora_scale(lora))
-            try:
-                with _nvtx_range("zimage.full.pipeline_lora"):
-                    result = text2img_pipe(**pipe_kwargs)
-            finally:
-                _restore_original_weights(text2img_pipe.transformer)
+            _activate_lora(text2img_pipe, lora, lora_scale=_effective_lora_scale(lora))
+            with _nvtx_range("zimage.full.pipeline_lora"):
+                result, _ = _run_zimage_capture_multi(
+                    text2img_pipe, pipe_kwargs, (), pipeline_timing,
+                    early_exit=ZIMAGE_EARLY_EXIT or None,
+                    early_exit_min_steps=ZIMAGE_EARLY_EXIT_MIN_STEPS,
+                    exit_info=exit_info,
+                    log_prompt=final_prompt,
+                )
         except Exception as e:
             logger.warning("LoRA %s failed, generating without: %s", lora.id, e)
-            _restore_original_weights(text2img_pipe.transformer)
+            _deactivate_loras(text2img_pipe)
             _reset_zimage_scheduler(text2img_pipe)
             with _nvtx_range("zimage.full.pipeline"):
-                result = text2img_pipe(**pipe_kwargs)
+                pipeline_timing = {}
+                exit_info = {}
+                result, _ = _run_zimage_capture_multi(text2img_pipe, pipe_kwargs, (), pipeline_timing)
             lora = None
     else:
+        _deactivate_loras(text2img_pipe)
+        capture = _capture_steps_for(steps) if _latent_save_active() else ()
         with _nvtx_range("zimage.full.pipeline"):
-            result = text2img_pipe(**pipe_kwargs)
+            result, captured = _run_zimage_capture_multi(
+                text2img_pipe, pipe_kwargs, capture, pipeline_timing,
+                early_exit=ZIMAGE_EARLY_EXIT or None,
+                early_exit_min_steps=ZIMAGE_EARLY_EXIT_MIN_STEPS,
+                exit_info=exit_info,
+                log_prompt=final_prompt,
+            )
+        if exit_info.get("exited_after_step"):
+            captured = {}
+        if captured:
+            cached_conditioning = (pipe_kwargs.get("prompt_embeds") or [None])[0]
+            _persist_generation_latents(final_prompt, req.seed, steps,
+                                        w, h, ZIMAGE_DEFAULT_GUIDANCE, captured,
+                                        text_embedding=cached_conditioning)
 
     image = result.images[0]
     elapsed = time.time() - t0
-    logger.info("compat: %dx%d in %.2fs (lora=%s)", w, h, elapsed, lora.id if lora else "none")
+    logger.info("compat: %dx%d in %.2fs (lora=%s%s)", w, h, elapsed,
+                lora.id if lora else "none",
+                f", early_exit@{exit_info['exited_after_step']}" if exit_info.get("exited_after_step") else "")
 
     encode_t0 = time.time()
     with _nvtx_range("zimage.webp_encode"):
@@ -1970,14 +2546,25 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
             "height": h,
             "steps": steps,
             "lora": lora.id if lora else None,
+            "prompt_embedding_cache": prompt_cache_meta,
+            "pipeline_timing": pipeline_timing,
+            "early_exit": exit_info or None,
         }
     return result
 
 
-def _latent_teleport_unit(prompt: str, width: int, height: int, steps: int, seed: int):
+def _latent_teleport_unit(prompt: str, width: int, height: int, steps: int, seed: int,
+                          guidance: float | None = None):
     from latentteleport.tokenizer import VisualUnit
 
-    key = f"{prompt}|{width}x{height}|steps={steps}|seed={seed}|guidance={ZIMAGE_DEFAULT_GUIDANCE}"
+    if guidance is None:
+        guidance = ZIMAGE_DEFAULT_GUIDANCE
+    precision_mode = (PRECISION or {}).get("mode", DTYPE_STR)
+    key = (
+        f"cache={ZIMAGE_LATENT_CACHE_VERSION}|model={ZIMAGE_MODEL_PATH}|"
+        f"precision={precision_mode}|cute={int(ZIMAGE_USE_CUTE)}|"
+        f"{prompt}|{width}x{height}|steps={steps}|seed={seed}|guidance={guidance}"
+    )
     return VisualUnit.from_text(key)
 
 
@@ -1993,20 +2580,179 @@ def _get_latent_teleport_cache(width: int, height: int):
     return latent_teleport_cache
 
 
-def _run_zimage_with_capture(pipe, pipe_kwargs: dict, capture_step: int) -> tuple[object, dict[int, torch.Tensor]]:
+_lt_tokenizer = None
+
+
+def _get_lt_tokenizer():
+    global _lt_tokenizer
+    if _lt_tokenizer is None:
+        from latentteleport.tokenizer import CuratedTokenizer
+
+        _lt_tokenizer = CuratedTokenizer()
+    return _lt_tokenizer
+
+
+def _latent_save_active() -> bool:
+    return LATENT_TELEPORT_ENABLED and LATENT_SAVE
+
+
+def _capture_steps_for(steps: int) -> tuple[int, ...]:
+    cap_step = max(0, min(LATENT_TELEPORT_START_STEP - 1, steps - 2))
+    return tuple(sorted({cap_step, steps - 1}))
+
+
+def _run_zimage_capture_multi(pipe, pipe_kwargs: dict, capture_steps,
+                              timing_out: dict | None = None,
+                              early_exit: float | None = None,
+                              early_exit_min_steps: int = 4,
+                              exit_info: dict | None = None,
+                              log_prompt: str | None = None) -> tuple[object, dict[int, torch.Tensor]]:
+    if not capture_steps and timing_out is None and not early_exit and not ZIMAGE_SKIP_NOOP_STEPS:
+        return pipe(**pipe_kwargs), {}
     captured: dict[int, torch.Tensor] = {}
+    callback_times: list[float] = []
+    prev_latent: list = [None]
+    prev_x0: list = [None]
+    below_count: list = [0]
+    dx0_curve: list[float] = []
+    started = time.perf_counter()
 
     def _capture(_pipe, step_index, _timestep, callback_kwargs):  # noqa: ANN001
-        if step_index == capture_step and "latents" in callback_kwargs:
-            captured[step_index] = callback_kwargs["latents"].detach().clone().cpu()
+        callback_times.append(time.perf_counter())
+        z = callback_kwargs.get("latents")
+        if step_index in capture_steps and z is not None:
+            captured[step_index] = z.detach().clone().cpu()
+        if ZIMAGE_SKIP_NOOP_STEPS and z is not None and not _pipe.interrupt:
+            total = getattr(_pipe, "_num_timesteps", 0)
+            if step_index < total - 1:
+                try:
+                    noop = float(_pipe.scheduler.sigmas[step_index + 1]) <= 0.0
+                except Exception:
+                    noop = False
+                if noop:
+                    # sigma is already 0: every remaining step moves z by
+                    # (0 - 0) * v, so skipping is bitwise-identical.
+                    _pipe._interrupt = True
+                    for k in capture_steps:
+                        if k > step_index and k not in captured:
+                            captured[k] = z.detach().clone().cpu()
+                    if exit_info is not None:
+                        exit_info["noop_steps_skipped"] = total - 1 - step_index
+        if (early_exit or DX0_LOG) and z is not None:
+            total = getattr(_pipe, "_num_timesteps", 0)
+            zp = prev_latent[0]
+            if zp is not None and step_index < total - 1:
+                sig = _pipe.scheduler.sigmas
+                s_prev = float(sig[step_index])
+                s_cur = float(sig[step_index + 1])
+                denom = s_cur - s_prev
+                if abs(denom) > 1e-9:
+                    # x0-hat: Euler-extrapolate to sigma=0 with this step's velocity.
+                    # Threshold on x0-hat movement, not raw latent movement: the
+                    # shifted few-step schedule takes growing sigma jumps so dz
+                    # never shrinks, while the denoised prediction stabilizes.
+                    x0 = z - s_cur * ((z - zp) / denom)
+                    x0p = prev_x0[0]
+                    if x0p is not None:
+                        rel = ((x0 - x0p).norm() / x0.norm().clamp_min(1e-8)).item()
+                        dx0_curve.append(round(rel, 5))
+                        # hysteresis: require ZIMAGE_EARLY_EXIT_CONSECUTIVE
+                        # consecutive below-threshold steps; flat slowly-decaying
+                        # curves (high-texture prompts) fail a single-hit rule.
+                        below_count[0] = below_count[0] + 1 if (early_exit and rel < early_exit) else 0
+                        if (early_exit and not _pipe.interrupt
+                                and (step_index + 1) >= early_exit_min_steps
+                                and below_count[0] >= ZIMAGE_EARLY_EXIT_CONSECUTIVE):
+                            if s_cur > 0:
+                                callback_kwargs["latents"] = x0
+                            _pipe._interrupt = True
+                            if exit_info is not None:
+                                exit_info.update({
+                                    "exited_after_step": step_index + 1,
+                                    "total_steps": total,
+                                    "dx0_rel": round(rel, 6),
+                                    "threshold": early_exit,
+                                })
+                    prev_x0[0] = x0
+            prev_latent[0] = z
         return callback_kwargs
 
-    result = pipe(
-        **pipe_kwargs,
-        callback_on_step_end=_capture,
-        callback_on_step_end_tensor_inputs=["latents"],
-    )
+    try:
+        result = pipe(
+            **pipe_kwargs,
+            callback_on_step_end=_capture,
+            callback_on_step_end_tensor_inputs=["latents"],
+        )
+    except TypeError:
+        logger.debug("pipeline does not support step callbacks; latent save skipped")
+        callback_times.clear()
+        result = pipe(**pipe_kwargs)
+    finished = time.perf_counter()
+    if timing_out is not None:
+        timing_out.update({
+            "pipeline_ms": int((finished - started) * 1000),
+            "denoise_through_last_step_ms": (
+                int((callback_times[-1] - started) * 1000) if callback_times else None
+            ),
+            "postprocess_after_last_step_ms": (
+                int((finished - callback_times[-1]) * 1000) if callback_times else None
+            ),
+            "physical_steps_observed": len(callback_times) or None,
+        })
+        if dx0_curve:
+            timing_out["dx0_curve"] = dx0_curve
+    if DX0_LOG and dx0_curve:
+        try:
+            with open(DX0_CORPUS_PATH, "a") as f:
+                f.write(json.dumps({
+                    "t": int(time.time()),
+                    "prompt": log_prompt,
+                    "steps": getattr(pipe, "_num_timesteps", None),
+                    "physical_steps": len(callback_times),
+                    "dx0_curve": dx0_curve,
+                    "exited_after_step": (exit_info or {}).get("exited_after_step"),
+                    "width": pipe_kwargs.get("width"),
+                    "height": pipe_kwargs.get("height"),
+                }) + "\n")
+        except Exception as e:
+            logger.debug("dx0 corpus write failed: %s", e)
     return result, captured
+
+
+def _persist_generation_latents(prompt: str, seed: int, steps: int, width: int, height: int,
+                                guidance: float, captured: dict[int, torch.Tensor],
+                                text_embedding: torch.Tensor | None = None):
+    """Persist latents already computed during normal generation. Zero extra inference."""
+    if not captured:
+        return
+    if text_embedding is not None:
+        text_embedding = text_embedding.detach()
+    try:
+        cache = _get_latent_teleport_cache(width, height)
+        unit = _latent_teleport_unit(prompt, width, height, steps, seed, guidance)
+        if cache.has_unit(unit):
+            return
+        cache.store_latents(
+            unit,
+            captured,
+            text_embedding=text_embedding,
+            metadata={"prompt": prompt, "seed": seed, "steps": steps,
+                      "width": width, "height": height, "guidance": guidance,
+                      "mode": "generation_capture"},
+        )
+        try:
+            word_units = _get_lt_tokenizer().tokenize(prompt)
+        except Exception:
+            word_units = []
+        try:
+            cache.record_prompt(prompt, unit, word_units, seed=seed,
+                                width=width, height=height, steps=steps)
+        except Exception as e:
+            logger.debug("record_prompt failed: %s", e)
+        logger.info("latent saved: unit=%s steps=%s words=%d", unit.unit_id,
+                    list(captured), len(word_units))
+    except Exception as e:
+        logger.warning("latent save failed: %s", e)
 
 
 def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, save_path: str,
@@ -2076,6 +2822,12 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
         "total_steps": steps,
         "requested_resume_step": requested_resume_step,
         "approx_enabled": teleport_approx,
+        "prompt_embedding_cache": {
+            "enabled": ZIMAGE_PROMPT_CACHE_SIZE > 0,
+            "hit": cached_prompt_emb is not None,
+            "encode_ms": 0,
+            "source": "latent_cache" if cached_prompt_emb is not None else None,
+        },
     }
 
     if cached_latent is not None:
@@ -2169,33 +2921,32 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
             teleport_meta["approx_fallback_reason"] = type(e).__name__
 
     if cached_latent is None:
+        pipe_kwargs, prompt_cache_meta = _prepare_zimage_prompt_embeddings(text2img_pipe, pipe_kwargs)
+        teleport_meta["prompt_embedding_cache"] = prompt_cache_meta
+        pipeline_timing = {}
         with _nvtx_range("zimage.teleport.prime_pipeline"):
-            result, captured = _run_zimage_with_capture(text2img_pipe, pipe_kwargs, capture_step)
+            result, captured = _run_zimage_capture_multi(
+                text2img_pipe,
+                pipe_kwargs,
+                tuple(sorted({capture_step, steps - 1})),
+                pipeline_timing,
+            )
+        teleport_meta["pipeline_timing"] = pipeline_timing
         image = result.images[0]
         if capture_step in captured:
-            free_mb = _cuda_free_mb()
-            if free_mb is not None and free_mb < LATENT_TELEPORT_MIN_FREE_MB:
-                logger.info("latent teleport prompt embedding cache skipped: only %d MB free", free_mb)
-                emb = None
-            else:
-                try:
-                    with _nvtx_range("zimage.teleport.prompt_embed_cache"):
-                        text_emb, _ = text2img_pipe.encode_prompt(
-                            prompt=final_prompt,
-                            negative_prompt=None,
-                            do_classifier_free_guidance=False,
-                            device=DEVICE,
-                        )
-                    emb = text_emb[0].detach().cpu() if isinstance(text_emb, list) else text_emb.detach().cpu()
-                except Exception as e:
-                    logger.warning("latent teleport text embedding capture failed: %s", e)
-                    emb = None
+            emb = (pipe_kwargs.get("prompt_embeds") or [None])[0]
             cache.store_latents(
                 unit,
-                {capture_step: captured[capture_step]},
+                captured,
                 text_embedding=emb,
-                metadata={"prompt": final_prompt, "seed": req.seed, "steps": steps, "mode": "exact_prompt"},
+                metadata={"prompt": final_prompt, "seed": req.seed, "steps": steps,
+                          "width": w, "height": h, "mode": "exact_prompt"},
             )
+            try:
+                cache.record_prompt(final_prompt, unit, _get_lt_tokenizer().tokenize(final_prompt),
+                                    seed=req.seed, width=w, height=h, steps=steps)
+            except Exception as e:
+                logger.debug("record_prompt failed: %s", e)
         teleport_meta["method"] = "full_generation_cached_latent"
 
     elapsed = time.time() - t0
@@ -2232,6 +2983,8 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
             "teleport_approx_cache_hit": approximate_hit,
             "teleport_approx_similarity": approximate_similarity,
             "teleport_approx_source": approximate_source,
+            "prompt_embedding_cache": teleport_meta["prompt_embedding_cache"],
+            "pipeline_timing": teleport_meta.get("pipeline_timing"),
         }
     return result
 
@@ -2271,7 +3024,7 @@ def _generate_and_upload_teleport_with_model_sync(prompt: str, width: int, heigh
     )
 
 
-def _style_transfer_and_upload_sync(prompt: str, image_url: str, save_path: str,
+def _style_transfer_and_upload_sync(prompt: str, input_image: Image.Image, save_path: str,
                                      strength: float = 0.6) -> dict:
     if save_path and check_if_blob_exists(save_path):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
@@ -2279,9 +3032,6 @@ def _style_transfer_and_upload_sync(prompt: str, image_url: str, save_path: str,
         return {"path": url}
 
     _, img2img_pipe = zimage_pipeline
-
-    from diffusers.utils import load_image
-    input_image = load_image(image_url).convert("RGB")
 
     w = (input_image.width // 64) * 64 or 1024
     h = (input_image.height // 64) * 64 or 1024
@@ -2320,14 +3070,16 @@ def _style_transfer_and_upload_sync(prompt: str, image_url: str, save_path: str,
 
 def _style_transfer_and_upload_with_model_sync(prompt: str, image_url: str, save_path: str,
                                                strength: float = 0.6) -> dict:
+    input_image = _load_remote_image(image_url)
     return _with_zimage_model_retry(
         "style_transfer_and_upload_image",
-        lambda: _style_transfer_and_upload_sync(prompt, image_url, save_path, strength),
+        lambda: _style_transfer_and_upload_sync(prompt, input_image, save_path, strength),
     )
 
 
 @app.get("/create_and_upload_image")
 async def create_and_upload_image(
+    request: Request,
     prompt: str,
     width: int = 1024,
     height: int = 1024,
@@ -2346,6 +3098,8 @@ async def create_and_upload_image(
     background: bool = False,
 ):
     _check_secret(secret)
+    _remember_request_prompt(request, prompt)
+    _require_nonempty_prompt(prompt)
     sp = build_save_path(save_path) if save_path else ""
     if sp and check_if_blob_exists(sp):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
@@ -2383,6 +3137,7 @@ async def create_and_upload_image(
 
 @app.get("/style_transfer_and_upload_image")
 async def style_transfer_and_upload_image(
+    request: Request,
     prompt: str,
     image_url: str,
     save_path: str = "",
@@ -2391,14 +3146,20 @@ async def style_transfer_and_upload_image(
     secret: str = "",
 ):
     _check_secret(secret)
-    _require_http_url(image_url, "image_url")
+    _remember_request_prompt(request, prompt)
+    _require_nonempty_prompt(prompt)
     sp = build_save_path(save_path) if save_path else ""
     if sp and check_if_blob_exists(sp):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         return {"path": f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{sp}"}
+    input_image = await asyncio.get_event_loop().run_in_executor(None, _load_remote_image, image_url)
     async with gpu_semaphore:
         return await asyncio.get_event_loop().run_in_executor(
-            None, _style_transfer_and_upload_with_model_sync, prompt, image_url, sp, strength,
+            None,
+            lambda: _with_zimage_model_retry(
+                "style_transfer_and_upload_image",
+                lambda: _style_transfer_and_upload_sync(prompt, input_image, sp, strength),
+            ),
         )
 
 
@@ -2413,6 +3174,7 @@ async def style_transfer_bytes_and_upload_image(
     image_file: Optional[UploadFile] = File(None),
 ):
     _check_secret(secret)
+    _require_nonempty_prompt(prompt)
     if image_file:
         content = await image_file.read()
         from PIL import Image
@@ -2447,15 +3209,16 @@ async def style_transfer_bytes_and_upload_image(
                 return await asyncio.get_event_loop().run_in_executor(None, _do)
 
     elif image_url:
-        _require_http_url(image_url, "image_url")
         sp = build_save_path(save_path) if save_path else ""
-        with model_manager.use("zimage"):
-            if zimage_pipeline is None:
-                raise HTTPException(503, "zimage model not loaded")
-            async with gpu_semaphore:
-                return await asyncio.get_event_loop().run_in_executor(
-                    None, _style_transfer_and_upload_sync, prompt, image_url, sp, strength,
-                )
+        input_image = await asyncio.get_event_loop().run_in_executor(None, _load_remote_image, image_url)
+        async with gpu_semaphore:
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _with_zimage_model_retry(
+                    "style_transfer_and_upload_image",
+                    lambda: _style_transfer_and_upload_sync(prompt, input_image, sp, strength),
+                ),
+            )
     else:
         raise HTTPException(400, "either image_url or image_file required")
 
