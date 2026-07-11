@@ -419,13 +419,24 @@ more informative. The server now appends every generation's dx0 curve to
 `/nvme0n1-disk/tmp/dx0-corpus.jsonl` (`DX0_LOG=1`), so a large corpus accrues
 passively; revisit learned/KNN exit prediction at n~10k.
 
-Production configuration (`start_persistent.sh`): `ZIMAGE_EARLY_EXIT=0.12`,
-`ZIMAGE_EARLY_EXIT_MIN_STEPS=5`, `ZIMAGE_EARLY_EXIT_CONSECUTIVE=2`, no-op skip
-on. Expected ~2 fewer forwards of 8 requested (~25% denoise latency) with p90
-LPIPS ~0.02 and worst case ~0.12 on ~3-5% of prompts, backstopped by the
-existing artifact quality-retry. Per-request `early_exit=0` disables; threshold
+A 16-prompt 1024px repeat showed the same shape with higher dx0 levels and a
+safer profile: two-consecutive tau=0.15 saved 2.38 forwards at 100% <=0.05
+LPIPS (max 0.039). Because the dx0 curve depends on the sigma schedule, the
+production default moved from 8 to 9 requested steps: the denser schedule
+anchors quality to the better 8-effective-step reference while the adaptive
+exit reclaims the added cost. Measured warm 1024x1024: simple prompts exit at
+5 physical forwards (~2.09 s), detail-heavy prompts run all 8 (~3.27 s); the
+old fixed configuration always paid ~3.2 s for 7-effective-step quality. An
+8-prompt fixed-seed aesthetic-parity check scored 6.177 (full) versus 6.166
+(early-exit).
+
+Production configuration (`start_persistent.sh`): `ZIMAGE_DEFAULT_STEPS=9`,
+`ZIMAGE_EARLY_EXIT=0.15`, `ZIMAGE_EARLY_EXIT_MIN_STEPS=5`,
+`ZIMAGE_EARLY_EXIT_CONSECUTIVE=2`, no-op skip on, backstopped by the existing
+artifact quality-retry. Per-request `early_exit=0` disables; threshold
 exits do not write the exact-replay teleport cache (approximate latents must
-not poison it), while no-op skips still do. The
+not poison it), while no-op skips still do. The gallery bulk generator also
+runs `--steps 9` on this config. The
 `/experimental/step_trace` endpoint captures per-step latents, velocities,
 sigmas, x0-hat decodes, and pooled prompt embeddings for future ablations, and
 accepts custom `sigmas` for schedule sweeps. Tooling:
