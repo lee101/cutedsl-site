@@ -32,9 +32,9 @@ def now_slug() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def request_json(url: str, timeout: float) -> tuple[int, dict | str, float]:
+def request_json(url: str, timeout: float, user_agent: str) -> tuple[int, dict | str, float]:
     started = time.perf_counter()
-    req = Request(url, headers={"accept": "application/json"})
+    req = Request(url, headers={"accept": "application/json", "user-agent": user_agent})
     try:
         with urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
@@ -50,11 +50,11 @@ def request_json(url: str, timeout: float) -> tuple[int, dict | str, float]:
         except json.JSONDecodeError:
             payload = body
         return e.code, payload, time.perf_counter() - started
-    except URLError as e:
+    except (URLError, TimeoutError) as e:
         return 0, repr(e), time.perf_counter() - started
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8100")
     parser.add_argument("--secret", default="cutedsl2024")
@@ -64,7 +64,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--output-dir", default="/nvme0n1-disk/tmp/zimage-reliability")
     parser.add_argument("--no-secret", action="store_true", help="omit secret for public-edge checks")
-    args = parser.parse_args()
+    parser.add_argument("--low-priority", action="store_true", help="send probe requests behind public GPU traffic")
+    parser.add_argument(
+        "--user-agent",
+        default="Mozilla/5.0 (CuteDSL reliability probe)",
+        help="HTTP user agent sent by the probe",
+    )
+    args = parser.parse_args(argv)
 
     stamp = now_slug()
     output_dir = Path(args.output_dir)
@@ -86,10 +92,16 @@ def main() -> int:
                     "perf": "true",
                     "save_path": save_path,
                 }
+                if args.low_priority:
+                    params["low_priority"] = "true"
                 if not args.no_secret:
                     params["secret"] = args.secret
 
-                status, payload, wall_s = request_json(f"{endpoint}?{urlencode(params)}", args.timeout)
+                status, payload, wall_s = request_json(
+                    f"{endpoint}?{urlencode(params)}",
+                    args.timeout,
+                    args.user_agent,
+                )
                 perf = payload.get("perf", {}) if isinstance(payload, dict) else {}
                 row = {
                     "attempt": attempt,

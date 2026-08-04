@@ -10,7 +10,12 @@ def test_catalog_contains_netwrck_zimage_adapters_only():
     assert get_lora_by_id("retro_scifi_90s") is not None
     assert get_lora_by_id("vintage_travel_poster") is not None
     assert get_lora_by_id("zit_v6") is not None
-    assert all("netwrckstatic.netwrck.com/static/loras/" in lora.url for lora in loras)
+    assert get_lora_by_id("zimage_360") is not None
+    assert all(
+        "netwrckstatic.netwrck.com/static/loras/" in lora.url
+        or "appstatic.app.nz/cutedsl/loras/" in lora.url
+        for lora in loras
+    )
 
 
 def test_keyword_selector_picks_specific_zimage_loras():

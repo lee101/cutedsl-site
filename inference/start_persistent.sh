@@ -18,6 +18,18 @@ if [ -z "${CAPTION_BACKEND_API_KEY:-}" ] && command -v systemctl >/dev/null 2>&1
         esac
     done
 fi
+. /nvme0n1-disk/code/cutedsl-site/inference/caption_backend_auth.sh
+verify_caption_backend_auth || exit 1
+
+# Do not race a supervised worker. Killing a systemd-owned PID directly causes
+# Restart=always to launch a standby while this script launches another worker.
+# Operators with service access should restart the unit instead.
+if [ "${CUTEDSL_ALLOW_MANUAL_RESTART:-0}" != "1" ] \
+    && command -v systemctl >/dev/null 2>&1 \
+    && systemctl is-active --quiet cutedsl-zimage.service 2>/dev/null; then
+    echo "Refusing manual restart: cutedsl-zimage.service is active; use systemctl restart cutedsl-zimage.service" >&2
+    exit 1
+fi
 cd /nvme0n1-disk/code/cutedsl-site/inference
 
 terminate_existing() {
@@ -108,6 +120,7 @@ setsid nohup env \
     ENABLE_NVFP4="${ENABLE_NVFP4:-0}" \
     ZIMAGE_USE_CUTE="${ZIMAGE_USE_CUTE:-0}" \
     ZIMAGE_CPU_OFFLOAD="${ZIMAGE_CPU_OFFLOAD:-auto}" \
+    ZIMAGE_TEXT_ENCODER_DEVICE="${ZIMAGE_TEXT_ENCODER_DEVICE:-cpu}" \
     ZIMAGE_NO_OFFLOAD_MIN_FREE_MB="${ZIMAGE_NO_OFFLOAD_MIN_FREE_MB:-24576}" \
     ZIMAGE_DIRECT_DEVICE_MAP="${ZIMAGE_DIRECT_DEVICE_MAP:-1}" \
     ZIMAGE_EARLY_EXIT="${ZIMAGE_EARLY_EXIT:-0.15}" \
@@ -122,6 +135,9 @@ setsid nohup env \
     LATENT_TELEPORT_ENABLED=1 \
     LATENT_TELEPORT_CACHE_DIR=/nvme0n1-disk/tmp/latentteleport-cache \
     LATENT_TELEPORT_START_STEP=7 \
+    LATENT_TELEPORT_MAX_ENTRIES_PER_RESOLUTION="${LATENT_TELEPORT_MAX_ENTRIES_PER_RESOLUTION:-2048}" \
+    LATENT_TELEPORT_MAX_GIB_PER_RESOLUTION="${LATENT_TELEPORT_MAX_GIB_PER_RESOLUTION:-8}" \
+    LATENT_TELEPORT_PRUNE_INTERVAL_SECONDS="${LATENT_TELEPORT_PRUNE_INTERVAL_SECONDS:-60}" \
     ZIMAGE_PROMPT_CACHE_SIZE="${ZIMAGE_PROMPT_CACHE_SIZE:-64}" \
     MAX_GPU_CONCURRENT=1 \
     LOW_PRIORITY_IDLE_SECONDS=5.0 \

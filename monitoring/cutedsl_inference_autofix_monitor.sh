@@ -2,7 +2,6 @@
 set -euo pipefail
 
 PROJECT_DIR="/nvme0n1-disk/code/cutedsl-site"
-RELATED_DIR="/nvme0n1-disk/code/cutedsl"
 LOG="$PROJECT_DIR/monitoring/cutedsl_inference_autofix_monitor.log"
 LOCKFILE="/tmp/cutedsl_inference_autofix_monitor.lock"
 ERROR_LOG="${ERROR_LOG_PATH:-/nvme0n1-disk/tmp/cutedsl-inference-errors.jsonl}"
@@ -10,7 +9,7 @@ STATE_FILE="${CODEXEXEC_STATE:-/nvme0n1-disk/tmp/cutedsl-codexexec-autofix.state
 LAST_RUN_FILE="${CODEXEXEC_LAST_RUN_STATE:-/nvme0n1-disk/tmp/cutedsl-codexexec-autofix-last-run}"
 CHECK_INTERVAL="${CODEXEXEC_CHECK_INTERVAL:-60}"
 COOLDOWN_SECONDS="${CODEXEXEC_COOLDOWN_SECONDS:-10800}"
-MODEL="${CODEXEXEC_MODEL:-gpt-5.5}"
+MODEL="${CODEXEXEC_MODEL:-gpt-5.6-sol}"
 REASONING="${CODEXEXEC_REASONING:-high}"
 
 log() {
@@ -36,19 +35,19 @@ cmd=(codex exec
     -m "$MODEL"
     -c "model_reasoning_effort=$REASONING"
     -s danger-full-access
-    --dangerously-bypass-approvals-and-sandbox
-    -)
+    --dangerously-bypass-approvals-and-sandbox)
 
-if [ -d "$RELATED_DIR" ]; then
-    cmd=(codex exec
-        -C "$PROJECT_DIR"
-        --add-dir "$RELATED_DIR"
-        -m "$MODEL"
-        -c "model_reasoning_effort=$REASONING"
-        -s danger-full-access
-        --dangerously-bypass-approvals-and-sandbox
-        -)
-fi
+for related_dir in \
+    /nvme0n1-disk/code/cutedsl \
+    /nvme0n1-disk/code/omniserve-native \
+    /nvme0n1-disk/code/text-generator.io \
+    /nvme0n1-disk/code/netwrck
+do
+    if [ -d "$related_dir" ]; then
+        cmd+=(--add-dir "$related_dir")
+    fi
+done
+cmd+=(-)
 
 export CODEXEXEC_CMD="${cmd[*]}"
 export ERROR_LOG_PATH="$ERROR_LOG"

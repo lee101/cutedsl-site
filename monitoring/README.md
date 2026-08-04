@@ -8,6 +8,22 @@ The inference monitor tails the structured inference error log:
 
 When new `5xx` events appear, it launches CodexExec with a detailed repair prompt. It is rate-limited to one agent run per 3 hours by default.
 
+The agent receives the CuteDSL kernels, native C gateway, text-generator
+compatibility service, and RA1 gateway as writable related directories. Its
+repair contract is to reproduce the failure, inspect the live managed-service
+logs, add a regression test, restart only the affected managed unit, and then
+retest localhost plus the public production route. It must preserve unrelated
+dirty work and must not start duplicate inference processes.
+
+For throughput incidents, inspect `/health` fields `gpu_queue`,
+`dynamic_batching`, and `prompt_embedding_cache` before changing kernels.
+`dynamic_batching.oom_batch_fallbacks` should remain zero. A high queue wait
+with low pipeline time usually means the low-priority gallery generator is in
+flight; public work should overtake it between images. The production service
+uses adaptive batches, exact latent replay, CPU-resident text encoding, sticky
+LoRAs, and an FP32 LoRA prewarm. Do not enable the Triton RoPE experiment on
+Blackwell until its invalid-address-space failure has a regression test.
+
 ## Command
 
 The monitor uses:
@@ -15,7 +31,10 @@ The monitor uses:
 ```bash
 codex exec -C /nvme0n1-disk/code/cutedsl-site \
   --add-dir /nvme0n1-disk/code/cutedsl \
-  -m gpt-5.5 \
+  --add-dir /nvme0n1-disk/code/omniserve-native \
+  --add-dir /nvme0n1-disk/code/text-generator.io \
+  --add-dir /nvme0n1-disk/code/netwrck \
+  -m gpt-5.6-sol \
   -c model_reasoning_effort=high \
   -s danger-full-access \
   --dangerously-bypass-approvals-and-sandbox \

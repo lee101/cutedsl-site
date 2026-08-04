@@ -13,6 +13,8 @@ import json
 import logging
 import math
 import os
+import shlex
+import subprocess
 import threading
 import time
 import uuid
@@ -23,7 +25,7 @@ import traceback
 import socket
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Callable, Iterator, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
@@ -31,6 +33,7 @@ import requests
 import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, field_validator
@@ -38,6 +41,10 @@ from pydantic import BaseModel, Field, field_validator
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+try:
+    from .dynamic_batcher import DynamicBatcher
+except ImportError:  # server.py is also launched directly from inference/
+    from dynamic_batcher import DynamicBatcher
 from aesthetic_score import score_images as aesthetic_score_images
 from image_quality import (
     bumpy_metrics,
@@ -112,10 +119,66 @@ _zimage_compile_mode_lock = threading.Lock()
 # Chronos has hit CUDA graph assertion failures under torch.compile in local
 # inference, so keep it eager by default unless explicitly enabled.
 CHRONOS_COMPILE_MODE = os.getenv("CHRONOS_COMPILE_MODE", "") or None
+# CuteChronos2Model currently diverges ~10% from upstream on quantile outputs
+# (kernel toggles ruled out; under investigation). use_cute=0 delegates to the
+# upstream Chronos2Model for exact outputs at ~1.4x the latency.
+CHRONOS_USE_CUTE = os.getenv("CHRONOS_USE_CUTE", "1") == "1"
 
 # Text-generator.io backend for TTS, STT, captioning, gemma4
 TG_BACKEND_URL = os.getenv("TG_BACKEND_URL", "http://localhost:9080")
-CAPTION_BACKEND_API_KEY = os.getenv("CAPTION_BACKEND_API_KEY", "")
+COEXISTING_TEXT_SLEEP_URL = os.getenv(
+    "COEXISTING_TEXT_SLEEP_URL", "http://127.0.0.1:8300/backend/sleep"
+).strip()
+COEXISTING_TEXT_SLEEP_TIMEOUT = float(os.getenv("COEXISTING_TEXT_SLEEP_TIMEOUT", "120"))
+PRELOAD_DELAY_SECONDS = max(0.0, float(os.getenv("PRELOAD_DELAY_SECONDS", "1")))
+
+
+def _configured_caption_backend_api_key() -> str:
+    """Resolve the caption service's authoritative partner credential.
+
+    Some production launchers inherit an older generic ``TG_API_KEY`` while
+    the caption backend's systemd unit has the rotated scoped credential.  A
+    read-only service query keeps inline systemd launches aligned with the
+    backend; non-systemd environments fall back to their explicit variables.
+    """
+    inherited = (
+        os.getenv("CAPTION_BACKEND_API_KEY", "")
+        or os.getenv("NETWRCK_IMAGE_CAPTION_SECRET", "")
+    )
+    if os.getenv("CAPTION_BACKEND_SYSTEMD_LOOKUP", "1") != "1":
+        return inherited
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                "text-generator-inference.service",
+                "--property=Environment",
+                "--value",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            settings = dict(
+                item.split("=", 1)
+                for item in shlex.split(result.stdout)
+                if "=" in item
+            )
+            service_key = (
+                settings.get("NETWRCK_IMAGE_CAPTION_SECRET", "")
+                or settings.get("NETWRCK_PARTNER_SECRET", "")
+            )
+            if service_key:
+                return service_key
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return inherited
+
+
+CAPTION_BACKEND_API_KEY = _configured_caption_backend_api_key()
 # A deployment may retain the historical caption-specific variable while the
 # same scoped partner credential is used by all text-generator proxy routes.
 TG_API_KEY = os.getenv("TG_API_KEY", "") or CAPTION_BACKEND_API_KEY
@@ -133,7 +196,16 @@ ZIMAGE_DEFAULT_HEIGHT = int(os.getenv("ZIMAGE_DEFAULT_HEIGHT", "1024"))
 LATENT_TELEPORT_ENABLED = os.getenv("LATENT_TELEPORT_ENABLED", "0") == "1"
 LATENT_TELEPORT_CACHE_DIR = os.getenv("LATENT_TELEPORT_CACHE_DIR", "/nvme0n1-disk/tmp/latentteleport-cache")
 LATENT_TELEPORT_START_STEP = int(os.getenv("LATENT_TELEPORT_START_STEP", "7"))
-ZIMAGE_LATENT_CACHE_VERSION = os.getenv("ZIMAGE_LATENT_CACHE_VERSION", "v2")
+LATENT_TELEPORT_MAX_ENTRIES_PER_RESOLUTION = max(
+    1, int(os.getenv("LATENT_TELEPORT_MAX_ENTRIES_PER_RESOLUTION", "2048"))
+)
+LATENT_TELEPORT_MAX_GIB_PER_RESOLUTION = max(
+    0.25, float(os.getenv("LATENT_TELEPORT_MAX_GIB_PER_RESOLUTION", "8"))
+)
+LATENT_TELEPORT_PRUNE_INTERVAL_SECONDS = max(
+    0.0, float(os.getenv("LATENT_TELEPORT_PRUNE_INTERVAL_SECONDS", "60"))
+)
+ZIMAGE_LATENT_CACHE_VERSION = os.getenv("ZIMAGE_LATENT_CACHE_VERSION", "v3")
 LATENT_SAVE = os.getenv("LATENT_SAVE", "1") == "1"
 ZIMAGE_EARLY_EXIT = float(os.getenv("ZIMAGE_EARLY_EXIT", "0") or 0)
 ZIMAGE_EARLY_EXIT_MIN_STEPS = int(os.getenv("ZIMAGE_EARLY_EXIT_MIN_STEPS", "4"))
@@ -143,18 +215,46 @@ DX0_LOG = os.getenv("DX0_LOG", "1") == "1"
 DX0_CORPUS_PATH = os.getenv("DX0_CORPUS_PATH", "/nvme0n1-disk/tmp/dx0-corpus.jsonl")
 STEP_TRACE_DIR = os.getenv("STEP_TRACE_DIR", "/nvme0n1-disk/tmp/step-trace")
 LATENT_TELEPORT_APPROX_MIN_SIM = float(os.getenv("LATENT_TELEPORT_APPROX_MIN_SIM", "0.92"))
+# Approximate replay resumes from a neighbouring prompt's latent. Off by default
+# on the paid path: it is a real quality trade, not a transparent cache hit.
+LATENT_TELEPORT_APPROX_DEFAULT = os.getenv("LATENT_TELEPORT_APPROX_DEFAULT", "0") == "1"
 LATENT_TELEPORT_MIN_FREE_MB = int(os.getenv("LATENT_TELEPORT_MIN_FREE_MB", "512"))
-ZIMAGE_NO_OFFLOAD_MIN_FREE_MB = int(os.getenv("ZIMAGE_NO_OFFLOAD_MIN_FREE_MB", "24576"))
+# Full BF16 residency needs about 20.5 GiB of weights plus allocator/workspace
+# headroom.  A stale production unit once supplied 12.5 GiB here and auto mode
+# selected full CUDA with only 19 GiB free, wedging the load halfway through.
+# Operators who truly have a dedicated device can still explicitly set
+# ZIMAGE_CPU_OFFLOAD=0; auto mode must keep this safety floor.
+ZIMAGE_NO_OFFLOAD_MIN_FREE_MB = max(
+    24576, int(os.getenv("ZIMAGE_NO_OFFLOAD_MIN_FREE_MB", "24576"))
+)
 ZIMAGE_DIRECT_DEVICE_MAP = os.getenv("ZIMAGE_DIRECT_DEVICE_MAP", "1") == "1"
+# "cpu" keeps the Qwen3 text encoder (~8 GB bf16) in system RAM: prompt encodes
+# run on CPU (cache misses only) and only the conditioning tensors move to GPU.
+# Frees VRAM for co-resident services (vLLM text backend) at no image-quality cost.
+ZIMAGE_TEXT_ENCODER_DEVICE = os.getenv("ZIMAGE_TEXT_ENCODER_DEVICE", "").strip().lower() or None
+# Weight-only quantization applied to the text encoder ALONE ("int8wo" ~4 GB,
+# "nvfp4" ~2.2 GB) so it can stay GPU-resident beside the bf16 transformer.
+# This host's CPU (Xeon E5 v4, AVX2, no AMX/bf16) encodes a prompt in ~5 s,
+# which dominates a ~2.5 s denoise; a quantized GPU encoder removes that.
+ZIMAGE_TEXT_ENCODER_QUANT = os.getenv("ZIMAGE_TEXT_ENCODER_QUANT", "").strip().lower() or None
+# Refuse to move a quantized encoder onto a GPU that cannot also hold the
+# transformer's activations; falling back to CPU is slow but never OOMs.
+ZIMAGE_TEXT_ENCODER_MIN_FREE_MB = int(os.getenv("ZIMAGE_TEXT_ENCODER_MIN_FREE_MB", "1536"))
 ZIMAGE_LOAD_MIN_FREE_MB = int(os.getenv("ZIMAGE_LOAD_MIN_FREE_MB", "9216"))
-ZIMAGE_RUNTIME_MIN_FREE_MB = int(os.getenv("ZIMAGE_RUNTIME_MIN_FREE_MB", "768"))
 ZIMAGE_OOM_RECOVERY_WAIT_SECONDS = float(os.getenv("ZIMAGE_OOM_RECOVERY_WAIT_SECONDS", "10"))
 ZIMAGE_OOM_RECOVERY_POLL_SECONDS = float(os.getenv("ZIMAGE_OOM_RECOVERY_POLL_SECONDS", "0.5"))
+ZIMAGE_FATAL_RESTART_DELAY_SECONDS = float(os.getenv("ZIMAGE_FATAL_RESTART_DELAY_SECONDS", "10"))
+ZIMAGE_REQUIRE_CUDA_READY = os.getenv("ZIMAGE_REQUIRE_CUDA_READY", "1") == "1"
 ALLOW_PRIVATE_IMAGE_URLS = os.getenv("ALLOW_PRIVATE_IMAGE_URLS", "0") == "1"
 REMOTE_IMAGE_TIMEOUT_SECONDS = float(os.getenv("REMOTE_IMAGE_TIMEOUT_SECONDS", "15"))
 REMOTE_IMAGE_MAX_BYTES = int(os.getenv("REMOTE_IMAGE_MAX_BYTES", str(20 * 1024 * 1024)))
 ZIMAGE_PROMPT_CACHE_SIZE = max(0, int(os.getenv("ZIMAGE_PROMPT_CACHE_SIZE", "64")))
 ZIMAGE_ENHANCE_PROMPT = os.getenv("ZIMAGE_ENHANCE_PROMPT", "1") == "1"
+ZIMAGE_PREWARM_LORA_IDS = tuple(
+    item.strip()
+    for item in os.getenv("ZIMAGE_PREWARM_LORA_IDS", "").split(",")
+    if item.strip()
+)
 
 # ---------------------------------------------------------------------------
 # Model memory manager — lazy load, LRU eviction, idle unload
@@ -162,6 +262,21 @@ ZIMAGE_ENHANCE_PROMPT = os.getenv("ZIMAGE_ENHANCE_PROMPT", "1") == "1"
 
 MODEL_IDLE_TIMEOUT = int(os.getenv("MODEL_IDLE_TIMEOUT", "3600"))  # 1 hour default for batch generation
 BATCH_WINDOW_MS = int(os.getenv("BATCH_WINDOW_MS", "50"))  # ms to wait for batching
+ZIMAGE_DYNAMIC_BATCH_ENABLED = os.getenv("ZIMAGE_DYNAMIC_BATCH_ENABLED", "1") == "1"
+ZIMAGE_DYNAMIC_BATCH_MAX_SIZE = max(1, int(os.getenv("ZIMAGE_DYNAMIC_BATCH_MAX_SIZE", "4")))
+ZIMAGE_DYNAMIC_BATCH_MAX_PIXELS = max(
+    # Z-Image currently packs list-shaped samples into one long attention
+    # sequence; at 512px, batch 2 benchmarked slower than two serial chunks.
+    # Keep coalescing/residency sharing enabled but default physical batching
+    # to 256px workloads until a true batch dimension lands in the kernel.
+    64 * 64, int(os.getenv("ZIMAGE_DYNAMIC_BATCH_MAX_PIXELS", str(512 * 512)))
+)
+ZIMAGE_DYNAMIC_BATCH_RESERVE_MB = max(0, int(os.getenv("ZIMAGE_DYNAMIC_BATCH_RESERVE_MB", "512")))
+ZIMAGE_DYNAMIC_BATCH_EXTRA_MB = max(1, int(os.getenv("ZIMAGE_DYNAMIC_BATCH_EXTRA_MB", "1024")))
+ZIMAGE_VRAM_BROKER_URL = os.getenv("ZIMAGE_VRAM_BROKER_URL", "").strip().rstrip("/")
+ZIMAGE_VRAM_BROKER_TIMEOUT_SECONDS = 0.25
+ZIMAGE_VRAM_BROKER_RETRY_SECONDS = 5.0
+ZIMAGE_VRAM_BROKER_TTL_SECONDS = 600
 
 zimage_pipeline = None
 chronos_pipeline = None
@@ -172,32 +287,163 @@ tg_client: httpx.AsyncClient = None
 MAX_GPU_CONCURRENT = int(os.getenv("MAX_GPU_CONCURRENT", "2"))
 LOW_PRIORITY_IDLE_SECONDS = float(os.getenv("LOW_PRIORITY_IDLE_SECONDS", "5.0"))
 gpu_semaphore = None
+zimage_dynamic_batcher: DynamicBatcher | None = None
+_zimage_batch_runtime_lock = threading.Lock()
+_zimage_batch_runtime = {
+    "pipeline_batches": 0,
+    "pipeline_images": 0,
+    "serial_chunks": 0,
+    "oom_batch_fallbacks": 0,
+    "largest_pipeline_batch": 0,
+    "broker_grants": 0,
+    "broker_denials": 0,
+    "broker_errors": 0,
+    "last_granted_mb": 0,
+}
+_zimage_vram_broker_state_lock = threading.Lock()
+_zimage_vram_broker_unreachable_until = 0.0
 
 # LoRA search engine (lazy init)
 lora_engine = None
 latent_teleport_cache = None
 _zimage_effective_cpu_offload: bool | None = None
 _zimage_load_strategy: str | None = None
+# Where the text encoder actually ended up. Quantized placement can fall back to
+# CPU when VRAM is short, and the runtime paths that re-home the pipeline must
+# follow the real placement — a blind pipe.to(cuda) on a CPU-pinned fp32 encoder
+# drags ~16 GB across PCIe and OOMs the worker.
+_zimage_text_encoder_placement: str | None = None
 _zimage_prompt_cache: OrderedDict[tuple, tuple[list[torch.Tensor], list[torch.Tensor] | None]] = OrderedDict()
 _zimage_prompt_cache_lock = threading.Lock()
 _zimage_prompt_cache_hits = 0
 _zimage_prompt_cache_misses = 0
+_cuda_runtime_fault_lock = threading.Lock()
+_cuda_runtime_fault: str | None = None
+_cuda_runtime_fault_at: float | None = None
+_cuda_process_restart_scheduled = False
+
+
+_FATAL_CUDA_ERROR_MARKERS = (
+    "unspecified launch failure",
+    "illegal memory access",
+    "device-side assert",
+    "device is lost",
+    "device lost",
+    "driver shutting down",
+    "initialization error",
+    "cuda-capable device(s) is/are busy or unavailable",
+)
+
+
+def _is_fatal_cuda_error(exc: BaseException) -> bool:
+    """Return whether an error means this process's CUDA context is unusable."""
+    text = str(exc).lower()
+    return "cuda" in text and any(marker in text for marker in _FATAL_CUDA_ERROR_MARKERS)
+
+
+def _mark_cuda_runtime_fault(exc: BaseException | str) -> None:
+    """Latch fatal CUDA state so later requests fail fast instead of storming the GPU."""
+    global _cuda_runtime_fault, _cuda_runtime_fault_at
+    detail = str(exc).splitlines()[0].strip() or type(exc).__name__
+    with _cuda_runtime_fault_lock:
+        if _cuda_runtime_fault is None:
+            _cuda_runtime_fault = detail
+            _cuda_runtime_fault_at = time.time()
+            logger.error("CUDA runtime marked unhealthy: %s", detail)
+
+
+def _schedule_cuda_process_restart() -> None:
+    """Exit once after the current 503 is flushed so systemd can replace CUDA state."""
+    global _cuda_process_restart_scheduled
+    with _cuda_runtime_fault_lock:
+        if _cuda_process_restart_scheduled:
+            return
+        _cuda_process_restart_scheduled = True
+    delay = max(0.5, ZIMAGE_FATAL_RESTART_DELAY_SECONDS)
+    logger.critical("scheduling inference process restart in %.1fs after CUDA became unavailable", delay)
+    timer = threading.Timer(delay, os._exit, args=(70,))
+    timer.daemon = True
+    timer.start()
+
+
+def _cuda_unavailable_detail(*, probe: bool = True) -> str | None:
+    """Describe an unavailable/poisoned CUDA runtime, otherwise return ``None``."""
+    if not (LOAD_ZIMAGE and DEVICE.startswith("cuda")):
+        return None
+    with _cuda_runtime_fault_lock:
+        fault = _cuda_runtime_fault
+    if fault:
+        return f"CUDA runtime is unhealthy and the inference process must restart ({fault})"
+    try:
+        available = torch.cuda.is_available()
+    except Exception as exc:
+        if _is_fatal_cuda_error(exc):
+            _mark_cuda_runtime_fault(exc)
+        return f"CUDA availability probe failed ({type(exc).__name__})"
+    if not available:
+        return "CUDA device is unavailable"
+    if probe:
+        try:
+            torch.cuda.mem_get_info()
+        except Exception as exc:
+            if _is_fatal_cuda_error(exc):
+                _mark_cuda_runtime_fault(exc)
+            return f"CUDA memory probe failed ({type(exc).__name__})"
+    return None
+
+
+def _raise_if_zimage_cuda_unavailable() -> None:
+    detail = _cuda_unavailable_detail()
+    if detail:
+        # cudaGetDeviceCount can remain false for the lifetime of a process when
+        # PyTorch first probes it before the NVIDIA driver is ready. A request
+        # proves this worker is serving image traffic, so let the supervisor
+        # replace it after the retryable response has had time to flush.
+        if ZIMAGE_REQUIRE_CUDA_READY and LOAD_ZIMAGE and DEVICE.startswith("cuda"):
+            _schedule_cuda_process_restart()
+        raise HTTPException(503, detail, headers={"Retry-After": "30"})
+
+
+def _require_zimage_cuda_at_startup(cuda_detail: str | None) -> None:
+    """Refuse readiness when this worker requires CUDA but initialized without it."""
+    if (
+        cuda_detail
+        and ZIMAGE_REQUIRE_CUDA_READY
+        and LOAD_ZIMAGE
+        and DEVICE.startswith("cuda")
+    ):
+        raise RuntimeError(f"Z-Image CUDA startup check failed: {cuda_detail}")
 
 
 def _clear_torch_cuda_caches():
+    """Best-effort cleanup which never replaces the exception being handled."""
     import gc
     gc.collect()
-    if torch.cuda.is_available():
+    try:
+        available = torch.cuda.is_available()
+    except Exception as exc:
+        if _is_fatal_cuda_error(exc):
+            _mark_cuda_runtime_fault(exc)
+        return
+    if not available:
+        return
+    with _cuda_runtime_fault_lock:
+        if _cuda_runtime_fault is not None:
+            return
+    cleanup_calls = (
+        ("synchronize", torch.cuda.synchronize),
+        ("empty_cache", torch.cuda.empty_cache),
+        ("ipc_collect", torch.cuda.ipc_collect),
+        ("clear_cublas_workspaces", torch._C._cuda_clearCublasWorkspaces),
+    )
+    for name, cleanup in cleanup_calls:
         try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-        try:
-            torch._C._cuda_clearCublasWorkspaces()
-        except Exception:
-            pass
+            cleanup()
+        except Exception as exc:
+            if _is_fatal_cuda_error(exc):
+                _mark_cuda_runtime_fault(exc)
+                return
+            logger.warning("CUDA cleanup %s failed: %s", name, exc)
 
 
 def _embedding_list(value) -> list[torch.Tensor] | None:
@@ -217,7 +463,7 @@ def _device_embedding_copy(value, *, device, dtype) -> list[torch.Tensor] | None
     tensors = _embedding_list(value)
     if tensors is None:
         return None
-    return [tensor.to(device=device, dtype=dtype, non_blocking=True) for tensor in tensors]
+    return [tensor.detach().to(device=device, dtype=dtype, non_blocking=True) for tensor in tensors]
 
 
 def _clear_zimage_prompt_cache() -> None:
@@ -269,14 +515,20 @@ def _prepare_zimage_prompt_embeddings(pipe, pipe_kwargs: dict) -> tuple[dict, di
 
     target_device = DEVICE if not str(DEVICE).startswith("cuda") or torch.cuda.is_available() else "cpu"
     target_dtype = getattr(getattr(pipe, "transformer", None), "dtype", DTYPE)
+    encoder = getattr(pipe, "text_encoder", None)
+    encode_device = str(getattr(encoder, "device", target_device)) if encoder is not None else target_device
     started = time.perf_counter()
     if cached is None:
-        positive, negative = pipe.encode_prompt(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            do_classifier_free_guidance=do_cfg,
-            device=target_device,
-        )
+        # encode_prompt is called directly here, outside the pipeline's own
+        # inference wrapper. Keep conditioning graph-free both for lower
+        # memory use and for safe persistence by latent-teleport caches.
+        with torch.inference_mode():
+            positive, negative = pipe.encode_prompt(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                do_classifier_free_guidance=do_cfg,
+                device=encode_device,
+            )
         positive_cpu = _cpu_embedding_copy(positive)
         negative_cpu = _cpu_embedding_copy(negative)
         if positive_cpu is None:
@@ -286,8 +538,8 @@ def _prepare_zimage_prompt_embeddings(pipe, pipe_kwargs: dict) -> tuple[dict, di
             _zimage_prompt_cache_misses += 1
             while len(_zimage_prompt_cache) > ZIMAGE_PROMPT_CACHE_SIZE:
                 _zimage_prompt_cache.popitem(last=False)
-        positive_device = _embedding_list(positive)
-        negative_device = _embedding_list(negative)
+        positive_device = _device_embedding_copy(positive, device=target_device, dtype=target_dtype)
+        negative_device = _device_embedding_copy(negative, device=target_device, dtype=target_dtype)
         hit = False
     else:
         positive_device = _device_embedding_copy(cached[0], device=target_device, dtype=target_dtype)
@@ -409,6 +661,40 @@ def gpu_slot(low_priority: bool = False):
     return gpu_semaphore.low_priority() if low_priority else gpu_semaphore.high_priority()
 
 
+def _sleep_coexisting_text_backend(model_name: str) -> bool:
+    """Best-effort VRAM handoff before diffusion/forecast GPU work.
+
+    The paired text adapter sleeps vLLM level-1 synchronously, retaining its
+    CPU-backed weights for a fast later wake while freeing GPU weights and KV.
+    Deployments without that adapter retain the existing local preflight/OOM
+    handling.
+    """
+    if not COEXISTING_TEXT_SLEEP_URL:
+        return True
+    try:
+        response = requests.post(
+            COEXISTING_TEXT_SLEEP_URL,
+            timeout=max(1.0, COEXISTING_TEXT_SLEEP_TIMEOUT),
+        )
+        if 200 <= response.status_code < 300:
+            logger.info("slept coexisting text backend before using %s", model_name)
+            return True
+        if response.status_code == 409:
+            raise HTTPException(
+                503,
+                "text generation is active; retry the GPU model request shortly",
+                headers={"Retry-After": "5"},
+            )
+        logger.warning(
+            "text backend sleep returned HTTP %s before loading %s",
+            response.status_code,
+            model_name,
+        )
+    except requests.RequestException as exc:
+        logger.debug("coexisting text backend sleep unavailable: %s", exc)
+    return False
+
+
 class ModelManager:
     """LRU model manager with idle timeout and lazy loading.
 
@@ -417,19 +703,103 @@ class ModelManager:
     Requests are batched within a BATCH_WINDOW_MS window to avoid thrashing.
     """
 
-    def __init__(self):
+    def __init__(self, coexisting_text_sleep: Callable[[str], bool] | None = None):
         self._lock = threading.Lock()
         self._last_access: dict[str, float] = {}  # model -> last use time
         self._loaded: set[str] = set()
         self._in_use: dict[str, int] = {}  # model -> active request refcount
+        # Requests reserve admission before entering an async queue or executor.
+        # Without this separate count, /admin/hold can land after an HTTP request
+        # was accepted but before use() pins the model, turning admitted work into
+        # a 503 during a peer GPU handoff.
+        self._admitted: dict[str, int] = {}
         self._idle_timer: threading.Timer | None = None
         self._batch_queues: dict[str, list] = {}  # model -> [(request, future)]
+        self._hold_until = 0.0
+        # Keep cross-service mutation injectable. Unit-created managers are
+        # isolated by default; the production singleton opts in explicitly.
+        self._coexisting_text_sleep = coexisting_text_sleep
+
+    def _coordinate_gpu_handoff(self, model_name: str) -> None:
+        if self._coexisting_text_sleep is not None:
+            self._coexisting_text_sleep(model_name)
+
+    def _raise_if_held_locked(self) -> None:
+        remaining = self._hold_until - time.time()
+        if remaining > 0:
+            raise HTTPException(
+                503,
+                f"GPU model admission is paused for a text backend transition ({remaining:.0f}s remaining)",
+                headers={"Retry-After": str(max(1, min(30, int(remaining))))},
+            )
+
+    def hold(self, seconds: float) -> float:
+        """Pause new model loads/uses while another GPU backend boots."""
+        seconds = max(1.0, min(float(seconds), 3600.0))
+        with self._lock:
+            self._hold_until = max(self._hold_until, time.time() + seconds)
+            return max(0.0, self._hold_until - time.time())
+
+    def try_hold(self, seconds: float) -> tuple[float | None, dict[str, int]]:
+        """Atomically acquire a hold only when all admitted GPU work is idle."""
+        seconds = max(1.0, min(float(seconds), 3600.0))
+        with self._lock:
+            busy_models = {
+                model_name: max(
+                    self._admitted.get(model_name, 0),
+                    self._in_use.get(model_name, 0),
+                )
+                for model_name in set(self._admitted) | set(self._in_use)
+                if self._admitted.get(model_name, 0) > 0
+                or self._in_use.get(model_name, 0) > 0
+            }
+            if busy_models:
+                return None, busy_models
+            self._hold_until = max(self._hold_until, time.time() + seconds)
+            return max(0.0, self._hold_until - time.time()), {}
+
+    @contextlib.contextmanager
+    def reserve(self, model_name: str):
+        """Protect accepted async work from a later peer admission hold."""
+        with self._lock:
+            self._raise_if_held_locked()
+            self._admitted[model_name] = self._admitted.get(model_name, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                remaining = max(0, self._admitted.get(model_name, 0) - 1)
+                if remaining:
+                    self._admitted[model_name] = remaining
+                else:
+                    self._admitted.pop(model_name, None)
+
+    def release_hold(self) -> None:
+        with self._lock:
+            self._hold_until = 0.0
+
+    def hold_remaining(self) -> float:
+        with self._lock:
+            return max(0.0, self._hold_until - time.time())
 
     @contextlib.contextmanager
     def use(self, model_name: str):
         """Context manager: ensure model is loaded and pin it for the duration."""
-        self.ensure_loaded(model_name)
+        # A loaded diffusion pipeline can still expand its CUDA footprint at
+        # inference time, so coordinate every use rather than cold loads only.
+        # Check the local hold before the network call so a text wake already
+        # in progress wins without us trying to put it back to sleep.
         with self._lock:
+            self._raise_if_held_locked()
+        self._coordinate_gpu_handoff(model_name)
+        self.ensure_loaded(model_name, coordinate=False)
+        with self._lock:
+            self._raise_if_held_locked()
+            # An admin hold/unload can land between ensure_loaded() and this
+            # pin. Fail cleanly rather than executing through a dropped global
+            # pipeline reference.
+            if model_name not in self._loaded:
+                raise HTTPException(503, f"{model_name} was unloaded before inference started")
             self._in_use[model_name] = self._in_use.get(model_name, 0) + 1
         try:
             yield
@@ -520,10 +890,22 @@ class ModelManager:
         _clear_torch_cuda_caches()
         return dropped
 
-    def ensure_loaded(self, model_name: str):
+    def ensure_loaded(self, model_name: str, *, coordinate: bool = True):
         """Ensure model is loaded (lazy load if needed). Evicts other models if needed."""
         global zimage_pipeline, chronos_pipeline, _zimage_effective_cpu_offload
+        # Cross-service calls must happen outside _lock. The text manager can
+        # simultaneously be asking /admin/hold for this lock; keeping the HTTP
+        # handshake outside prevents a distributed lock inversion.
         with self._lock:
+            self._raise_if_held_locked()
+            if model_name in self._loaded:
+                self.touch(model_name)
+                return
+        if coordinate:
+            self._coordinate_gpu_handoff(model_name)
+
+        with self._lock:
+            self._raise_if_held_locked()
             if model_name in self._loaded:
                 self.touch(model_name)
                 return
@@ -564,7 +946,7 @@ class ModelManager:
         return model_name in self._loaded
 
 
-model_manager = ModelManager()
+model_manager = ModelManager(_sleep_coexisting_text_backend)
 
 # NSFW classifier (lazy loaded to save GPU memory)
 nsfw_classifier = None
@@ -606,6 +988,72 @@ def _apply_nvfp4_quantization(model: torch.nn.Module) -> torch.nn.Module:
         logger.warning("%s quantization failed: %s", PRECISION["mode"], e)
 
     return model
+
+
+def _place_text_encoder(encoder: torch.nn.Module) -> str:
+    """Place the text encoder and remember where it landed."""
+    global _zimage_text_encoder_placement
+    _zimage_text_encoder_placement = _place_text_encoder_uncached(encoder)
+    return _zimage_text_encoder_placement
+
+
+def _text_encoder_on_cpu() -> bool:
+    """True when moving the whole pipeline to CUDA would drag the encoder along."""
+    if _zimage_text_encoder_placement is not None:
+        return _zimage_text_encoder_placement.startswith("cpu")
+    return ZIMAGE_TEXT_ENCODER_DEVICE == "cpu"
+
+
+def _place_text_encoder_uncached(encoder: torch.nn.Module) -> str:
+    """Quantize the text encoder and move it to the GPU, or leave it on CPU.
+
+    Records and returns the placement actually used, for logging and /health.
+    The encoder is quantized while still on CPU so peak VRAM never includes the
+    bf16 copy, then moved; if the device lacks room for the quantized weights
+    plus a working margin we keep the CPU/fp32 encoder rather than risk an OOM
+    that would take the whole image worker down.
+    """
+    mode = ZIMAGE_TEXT_ENCODER_QUANT
+    if not mode or mode in ("none", "bf16") or not str(DEVICE).startswith("cuda"):
+        return "cpu/fp32" if ZIMAGE_TEXT_ENCODER_DEVICE == "cpu" else str(DEVICE)
+
+    bytes_per_param = {"int8wo": 1, "nvfp4": 0.55}.get(mode)
+    if bytes_per_param is None:
+        logger.warning("unknown ZIMAGE_TEXT_ENCODER_QUANT=%s; keeping encoder on CPU", mode)
+        return "cpu/fp32"
+
+    params = sum(p.numel() for p in encoder.parameters())
+    needed_mb = int(params * bytes_per_param / 1e6) + ZIMAGE_TEXT_ENCODER_MIN_FREE_MB
+    try:
+        free_mb = torch.cuda.mem_get_info()[0] // (1024 * 1024)
+    except Exception as exc:  # CUDA can be busy/unhealthy during a cold load
+        logger.warning("text encoder VRAM probe failed (%s); keeping it on CPU", exc)
+        return "cpu/fp32"
+    if free_mb < needed_mb:
+        logger.warning(
+            "text encoder stays on CPU: %s needs ~%d MB (incl. %d MB margin), only %d MB free",
+            mode, needed_mb, ZIMAGE_TEXT_ENCODER_MIN_FREE_MB, free_mb,
+        )
+        encoder.to("cpu", dtype=torch.float32)
+        return "cpu/fp32"
+
+    try:
+        encoder.to("cpu", dtype=DTYPE)
+        _precision_mod.apply_quant(encoder, mode, skip_patterns=[], skip_first_last=False)
+        encoder.to(DEVICE)
+    except Exception as exc:
+        logger.warning("text encoder %s quantization failed (%s); falling back to CPU/fp32", mode, exc)
+        try:
+            encoder.to("cpu", dtype=torch.float32)
+        except Exception:
+            pass
+        return "cpu/fp32"
+
+    logger.info(
+        "Z-Image text encoder on %s (%s weight-only, %.1f GB bf16 -> ~%.1f GB)",
+        DEVICE, mode, params * 2 / 1e9, params * bytes_per_param / 1e9,
+    )
+    return f"{DEVICE}/{mode}"
 
 
 def _optimize_for_inference():
@@ -690,11 +1138,25 @@ def _resolve_zimage_cpu_offload() -> bool:
     if free_mb is None:
         logger.info("ZIMAGE_CPU_OFFLOAD=auto: no CUDA free-memory reading; using CPU offload")
         return True
-    use_offload = free_mb < ZIMAGE_NO_OFFLOAD_MIN_FREE_MB
+    # The 24 GiB safety floor models the full ~8 GiB BF16 text encoder. A
+    # weight-only encoder leaves substantially more headroom, so applying that
+    # unadjusted floor needlessly selects accelerate CPU offload and turns a
+    # few-second image request into a multi-minute component-shuttling job.
+    encoder_savings_mb = {
+        "int8wo": 4096,
+        "nvfp4": 6144,
+    }.get(ZIMAGE_TEXT_ENCODER_QUANT or "", 0)
+    effective_min_free_mb = max(
+        16384,
+        ZIMAGE_NO_OFFLOAD_MIN_FREE_MB - encoder_savings_mb,
+    )
+    use_offload = free_mb < effective_min_free_mb
     logger.info(
-        "ZIMAGE_CPU_OFFLOAD=auto: free CUDA memory=%d MB, no-offload threshold=%d MB, cpu_offload=%s",
+        "ZIMAGE_CPU_OFFLOAD=auto: free CUDA memory=%d MB, "
+        "no-offload threshold=%d MB (encoder_quant=%s), cpu_offload=%s",
         free_mb,
-        ZIMAGE_NO_OFFLOAD_MIN_FREE_MB,
+        effective_min_free_mb,
+        ZIMAGE_TEXT_ENCODER_QUANT or "none",
         use_offload,
     )
     return use_offload
@@ -702,6 +1164,28 @@ def _resolve_zimage_cpu_offload() -> bool:
 
 def _zimage_cpu_offload_enabled() -> bool:
     return _zimage_effective_cpu_offload if _zimage_effective_cpu_offload is not None else _resolve_zimage_cpu_offload()
+
+
+def _enable_zimage_model_cpu_offload(pipe, *, keep_text_encoder_cpu: bool) -> None:
+    """Enable component offload without hooking a deliberately CPU-pinned encoder.
+
+    Diffusers' Z-Image offload sequence normally starts with ``text_encoder``.
+    Hiding that component while hooks are installed keeps prompt encoding on
+    CPU and prevents an 8 GB encoder transfer from competing with co-resident
+    GPU services. Transformer/VAE offload behavior is unchanged.
+    """
+    encoder = getattr(pipe, "text_encoder", None) if keep_text_encoder_cpu else None
+    if encoder is None:
+        pipe.enable_model_cpu_offload()
+        return
+
+    pipe.text_encoder = None
+    try:
+        pipe.enable_model_cpu_offload()
+    finally:
+        pipe.text_encoder = encoder
+    encoder.to("cpu", dtype=torch.float32)
+    logger.info("Z-Image text encoder excluded from GPU offload hooks and pinned to CPU/fp32")
 
 
 def _cuda_free_mb() -> int | None:
@@ -730,6 +1214,40 @@ def _raise_if_zimage_memory_pressure(min_free_mb: int, operation_name: str):
     detail = _zimage_memory_pressure_detail(min_free_mb, operation_name)
     if detail:
         raise HTTPException(503, detail, headers={"Retry-After": "10"})
+
+
+def _reclaim_zimage_cold_load_headroom(min_free_mb: int, operation_name: str) -> None:
+    """Release stale partial-model/cache state before rejecting a cold load.
+
+    An OOM traceback can temporarily retain pipeline tensors after recovery has
+    marked the model unloaded. Once that request unwinds, those tensors become
+    reclaimable, but a later request used to fail the free-memory preflight
+    before PyTorch's allocator or partial model caches were cleaned again.
+    """
+    detail = _zimage_memory_pressure_detail(min_free_mb, operation_name)
+    if detail is None:
+        return
+
+    before_mb = _cuda_free_mb()
+    logger.warning(
+        "%s cold load is under CUDA memory pressure (%s); "
+        "clearing stale Z-Image state and rechecking",
+        operation_name,
+        detail,
+    )
+    # This is idempotent when the manager has no loaded model. It also clears
+    # partially constructed pipelines and the process's unused allocator pool.
+    model_manager.force_unload("zimage")
+    after_mb = _cuda_free_mb()
+    if before_mb is not None and after_mb is not None and after_mb > before_mb:
+        logger.info(
+            "%s cold-load cleanup reclaimed %d MB CUDA headroom (%d -> %d MB free)",
+            operation_name,
+            after_mb - before_mb,
+            before_mb,
+            after_mb,
+        )
+    _raise_if_zimage_memory_pressure(min_free_mb, operation_name)
 
 
 def _wait_for_zimage_memory_headroom(min_free_mb: int, operation_name: str) -> bool:
@@ -803,7 +1321,16 @@ def _load_zimage():
         # fallback when CuteZImage conversion/compilation is being benchmarked.
         from diffusers import ZImagePipeline, ZImageImg2ImgPipeline
         load_kwargs = {"torch_dtype": DTYPE}
-        if not enable_offload and not ENABLE_NVFP4 and ZIMAGE_DIRECT_DEVICE_MAP:
+        text_encoder_cpu = ZIMAGE_TEXT_ENCODER_DEVICE == "cpu"
+        # A quantized encoder must be built on CPU and quantized before it moves,
+        # so the direct-to-GPU device_map shortcut cannot be used for it.
+        if (
+            not enable_offload
+            and not ENABLE_NVFP4
+            and ZIMAGE_DIRECT_DEVICE_MAP
+            and not text_encoder_cpu
+            and not ZIMAGE_TEXT_ENCODER_QUANT
+        ):
             load_kwargs["device_map"] = DEVICE
         try:
             text2img_pipe = ZImagePipeline.from_pretrained(ZIMAGE_MODEL_PATH, **load_kwargs)
@@ -830,8 +1357,39 @@ def _load_zimage():
                                 sum(p.numel() for p in comp.parameters()) * 2 / 1e9)
                     _apply_nvfp4_quantization(comp)
 
+        # Loading the CPU checkpoint can take minutes on a busy host. In auto
+        # mode another GPU service may consume the headroom observed above
+        # while those shards are being read. Re-evaluate immediately before
+        # moving components to CUDA so a stale no-offload decision cannot turn
+        # a safe cold load into an avoidable OOM. Explicit 0/1 settings retain
+        # their requested behavior, and NVFP4 remains resident because its
+        # tensor subclasses are incompatible with accelerate CPU offload.
+        if (
+            not enable_offload
+            and not ENABLE_NVFP4
+            and not getattr(text2img_pipe, "hf_device_map", None)
+        ):
+            refreshed_offload = _resolve_zimage_cpu_offload()
+            if refreshed_offload:
+                logger.warning(
+                    "CUDA headroom changed during Z-Image checkpoint load; "
+                    "enabling CPU offload before moving components to GPU"
+                )
+                enable_offload = True
+                _zimage_effective_cpu_offload = True
+                _zimage_load_strategy = "cpu-model-offload-after-load"
+
+        if ZIMAGE_TEXT_ENCODER_QUANT and enable_offload:
+            logger.warning(
+                "ZIMAGE_TEXT_ENCODER_QUANT=%s ignored: accelerate CPU offload owns component placement",
+                ZIMAGE_TEXT_ENCODER_QUANT,
+            )
+
         if enable_offload and not ENABLE_NVFP4 and hasattr(text2img_pipe, "enable_model_cpu_offload"):
-            text2img_pipe.enable_model_cpu_offload()
+            _enable_zimage_model_cpu_offload(
+                text2img_pipe,
+                keep_text_encoder_cpu=text_encoder_cpu,
+            )
         else:
             # NVFP4 already shrinks weights substantially, and no-offload is
             # also the low-latency path on 24 GB+ GPUs for 1024px generation.
@@ -842,7 +1400,16 @@ def _load_zimage():
                     for comp_name in ("transformer", "vae", "text_encoder"):
                         comp = getattr(text2img_pipe, comp_name, None)
                         if comp is not None:
-                            comp.to(DEVICE)
+                            if comp_name == "text_encoder" and ZIMAGE_TEXT_ENCODER_QUANT:
+                                text_encoder_placement = _place_text_encoder(comp)
+                                text_encoder_cpu = text_encoder_placement.startswith("cpu")
+                            elif comp_name == "text_encoder" and text_encoder_cpu:
+                                # float32 on CPU: oneDNN fp32 GEMM is ~10x faster
+                                # than PyTorch's emulated bf16 CPU path.
+                                comp.to("cpu", dtype=torch.float32)
+                                logger.info("Z-Image text encoder pinned to CPU/fp32 (ZIMAGE_TEXT_ENCODER_DEVICE=cpu)")
+                            else:
+                                comp.to(DEVICE)
             except Exception as e:
                 if (
                     str(DEVICE).startswith("cuda")
@@ -854,7 +1421,10 @@ def _load_zimage():
                         DEVICE,
                         e,
                     )
-                    text2img_pipe.enable_model_cpu_offload()
+                    _enable_zimage_model_cpu_offload(
+                        text2img_pipe,
+                        keep_text_encoder_cpu=text_encoder_cpu,
+                    )
                     enable_offload = True
                     _zimage_effective_cpu_offload = True
                     _zimage_load_strategy = "cpu-model-offload-fallback"
@@ -862,6 +1432,19 @@ def _load_zimage():
                     raise RuntimeError(f"Z-Image component .to({DEVICE}) failed") from e
 
         img2img_pipe = ZImageImg2ImgPipeline(**text2img_pipe.components)
+
+        if _text_encoder_on_cpu() and not enable_offload:
+            # DiffusionPipeline.device reports the FIRST component's device, so
+            # a CPU-pinned text encoder makes _execution_device=cpu and latents
+            # get built on CPU against the CUDA transformer. Pin the property.
+            def _pin_pipe_device(pipe, device):
+                cls = type(pipe)
+                pinned = type(cls.__name__ + "Pinned", (cls,), {
+                    "device": property(lambda self: torch.device(device)),
+                })
+                pipe.__class__ = pinned
+            _pin_pipe_device(text2img_pipe, DEVICE)
+            _pin_pipe_device(img2img_pipe, DEVICE)
 
         # Defensive: wrap scheduler.step so sigma_idx never overruns. The
         # vanilla FlowMatchEulerDiscreteScheduler can race its _step_index
@@ -904,6 +1487,9 @@ def _load_zimage():
         except Exception as e:
             logger.warning("AITune engine load failed (non-fatal, using PyTorch): %s", e)
 
+    if ZIMAGE_PREWARM_LORA_IDS and not ENABLE_NVFP4:
+        _prewarm_zimage_loras(text2img_pipe, ZIMAGE_PREWARM_LORA_IDS)
+
     if skip_warmup:
         logger.info("Z-Image warmup skipped (NVFP4 or ZIMAGE_SKIP_WARMUP=1)")
         return
@@ -939,7 +1525,7 @@ def _load_chronos():
         CHRONOS_MODEL_PATH,
         device=chronos_device,
         dtype=chronos_dtype,
-        use_cute=True,
+        use_cute=CHRONOS_USE_CUTE,
         compile_mode=CHRONOS_COMPILE_MODE if chronos_device.startswith("cuda") else None,
     )
 
@@ -952,9 +1538,19 @@ def _load_chronos():
     # Warmup
     logger.info("Chronos2 warmup...")
     try:
-        dummy = torch.randn(1, 64, device=chronos_device)
-        chronos_pipeline.predict(dummy, prediction_length=16)
-        logger.info("Chronos2 warmup complete")
+        # Vary each dim independently so torch.compile marks both context and
+        # horizon dynamic at startup instead of recompiling (~40s) on the first
+        # user request with an unseen (context, num_output_patches) combo.
+        warmup_shapes = (
+            [(64, 16), (128, 16), (128, 32), (512, 64), (512, 30)]
+            if CHRONOS_COMPILE_MODE
+            else [(64, 16)]
+        )
+        t_w = time.time()
+        for ctx_len, horizon in warmup_shapes:
+            dummy = torch.randn(1, ctx_len, device=chronos_device)
+            chronos_pipeline.predict(dummy, prediction_length=horizon)
+        logger.info("Chronos2 warmup complete (%.1fs, %d shapes)", time.time() - t_w, len(warmup_shapes))
     except Exception as e:
         logger.warning("Chronos2 warmup failed (non-fatal): %s", e)
 
@@ -963,12 +1559,38 @@ def _load_chronos():
 # FastAPI app
 # ---------------------------------------------------------------------------
 
+
+async def _preload_model_after_startup(model_name: str) -> None:
+    """Delay background preloading until after uvicorn has had time to bind.
+
+    Uvicorn enters the application lifespan before binding its HTTP socket. A
+    duplicate service can therefore complete an expensive GPU preload and
+    disturb peer workloads before finally reporting EADDRINUSE. The short
+    cancellable delay makes bind failure win that race.
+    """
+    try:
+        if PRELOAD_DELAY_SECONDS:
+            await asyncio.sleep(PRELOAD_DELAY_SECONDS)
+        await asyncio.to_thread(model_manager.ensure_loaded, model_name)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("background preload of %s failed: %s", model_name, exc)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global tg_client, gpu_semaphore
+    global tg_client, gpu_semaphore, zimage_dynamic_batcher
     _optimize_for_inference()
 
     gpu_semaphore = PriorityGPUSemaphore(MAX_GPU_CONCURRENT)
+    if ZIMAGE_DYNAMIC_BATCH_ENABLED:
+        zimage_dynamic_batcher = DynamicBatcher(
+            key_fn=_zimage_batch_compatibility_key,
+            run_batch=_run_zimage_dynamic_batch,
+            priority_fn=lambda req: 0 if req.low_priority else 1,
+            max_batch_size=ZIMAGE_DYNAMIC_BATCH_MAX_SIZE,
+            window_ms=BATCH_WINDOW_MS,
+        )
 
     tg_client = httpx.AsyncClient(
         base_url=TG_BACKEND_URL,
@@ -980,21 +1602,40 @@ async def lifespan(app: FastAPI):
     # Lazy load models on first request via model_manager.
     # Optionally warm them in a background executor so the HTTP socket comes up
     # immediately after restarts instead of making nginx wait on checkpoint load.
+    cuda_detail = _cuda_unavailable_detail()
+    if cuda_detail:
+        logger.critical("Z-Image unavailable at startup: %s", cuda_detail)
+    _require_zimage_cuda_at_startup(cuda_detail)
+
+    preload_tasks: list[asyncio.Task] = []
     if os.getenv("PRELOAD_MODELS", "0") == "1":
-        loop = asyncio.get_running_loop()
-        if LOAD_ZIMAGE:
-            loop.run_in_executor(None, model_manager.ensure_loaded, "zimage")
+        if LOAD_ZIMAGE and cuda_detail is None:
+            preload_tasks.append(asyncio.create_task(_preload_model_after_startup("zimage")))
         if LOAD_CHRONOS:
-            loop.run_in_executor(None, model_manager.ensure_loaded, "chronos2")
+            preload_tasks.append(asyncio.create_task(_preload_model_after_startup("chronos2")))
 
     logger.info("CuteDSL Inference Server ready")
-    yield
+    try:
+        yield
+    finally:
+        if zimage_dynamic_batcher is not None:
+            await zimage_dynamic_batcher.close()
+            zimage_dynamic_batcher = None
+        for task in preload_tasks:
+            if not task.done():
+                task.cancel()
+        if preload_tasks:
+            await asyncio.gather(*preload_tasks, return_exceptions=True)
+        await tg_client.aclose()
+        logger.info("Shutdown complete")
 
-    await tg_client.aclose()
-    logger.info("Shutdown complete")
 
+try:
+    from fastapi.responses import ORJSONResponse as _DefaultResponse
+except ImportError:
+    _DefaultResponse = JSONResponse
 
-app = FastAPI(title="CuteDSL Inference Server", lifespan=lifespan)
+app = FastAPI(title="CuteDSL Inference Server", lifespan=lifespan, default_response_class=_DefaultResponse)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
@@ -1002,7 +1643,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 def _sanitize_query(query_string: bytes) -> str:
     pairs = []
     for key, value in parse_qsl(query_string.decode("utf-8", errors="replace"), keep_blank_values=True):
-        if key.lower() in {"secret", "api_key", "key", "token"}:
+        if key.lower() in {"prompt", "secret", "api_key", "key", "token"}:
             value = "<redacted>"
         pairs.append((key, value))
     return urlencode(pairs)
@@ -1021,6 +1662,11 @@ def _request_prompt_info(request: Request) -> dict:
 
 def _remember_request_prompt(request: Request, prompt: str):
     request.state.prompt_text = prompt
+
+
+def _remember_request_inference_params(request: Request, **params) -> None:
+    """Keep non-sensitive generation settings for reproducible error events."""
+    request.state.inference_params = params
 
 
 def _require_nonempty_prompt(prompt: str, field_name: str = "prompt"):
@@ -1049,6 +1695,7 @@ def _log_request_error(request: Request, exc: Exception, status_code: int, detai
         "client": request.client.host if request.client else "",
         "error_type": type(exc).__name__,
         "error": detail or str(exc),
+        "inference": getattr(request.state, "inference_params", {}),
         **_request_prompt_info(request),
     }
     if status_code >= 500:
@@ -1066,6 +1713,19 @@ def _log_request_error(request: Request, exc: Exception, status_code: int, detai
     )
 
 
+def _json_safe(value):
+    """Recursively make error payloads safe for Starlette's strict encoder."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    return str(value)
+
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
     request.state.request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
@@ -1074,13 +1734,27 @@ async def request_id_middleware(request: Request, call_next):
     return response
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Validation errors echo the rejected input. FastAPI's default response
+    # therefore contains NaN/Infinity when those tokens arrive in JSON, which
+    # makes Starlette's allow_nan=False serializer raise a second exception.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": _json_safe(exc.errors()),
+            "request_id": getattr(request.state, "request_id", ""),
+        },
+    )
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     if exc.status_code >= 500:
         _log_request_error(request, exc, exc.status_code, detail=str(exc.detail))
     return JSONResponse(
         status_code=exc.status_code,
-        content={"detail": exc.detail, "request_id": getattr(request.state, "request_id", "")},
+        content=_json_safe({"detail": exc.detail, "request_id": getattr(request.state, "request_id", "")}),
         headers=getattr(exc, "headers", None),
     )
 
@@ -1181,6 +1855,16 @@ def _load_remote_image(image_url: str) -> Image.Image:
 @app.post("/admin/unload")
 def admin_unload(model: str | None = None):
     """Force-unload a model (or all) and free GPU memory immediately."""
+    if model is None and model_manager.hold_remaining() <= 0:
+        # Peer lifecycle managers first acquire /admin/hold and then poll this
+        # endpoint until all models are gone. If hold acquisition was rejected,
+        # allowing their fallback poll to unload later would bypass the atomic
+        # admission decision and recreate the handoff race.
+        raise HTTPException(
+            409,
+            "GPU model unload requires an active admission hold",
+            headers={"Retry-After": "2"},
+        )
     before = 0
     after = 0
     if torch.cuda.is_available():
@@ -1193,23 +1877,114 @@ def admin_unload(model: str | None = None):
         "loaded": sorted(model_manager._loaded),
         "reserved_mib_before": before,
         "reserved_mib_after": after,
+        "hold_seconds_remaining": round(model_manager.hold_remaining(), 1),
+    }
+
+
+@app.post("/admin/hold")
+def admin_hold(seconds: float = 600):
+    """Atomically pause idle GPU admission for a peer boot.
+
+    A handoff is not acquired when HTTP work is already admitted. Returning a
+    retryable conflict is essential: reporting success and then skipping the
+    unload leaves the image endpoint paused even though the peer never received
+    the GPU.
+    """
+    remaining, busy_models = model_manager.try_hold(seconds)
+    if remaining is None:
+        busy = ", ".join(
+            f"{model_name}={count}" for model_name, count in sorted(busy_models.items())
+        )
+        raise HTTPException(
+            409,
+            f"GPU model handoff is busy ({busy}); retry shortly",
+            headers={"Retry-After": "2"},
+        )
+    try:
+        dropped = model_manager.force_unload()
+    except BaseException:
+        model_manager.release_hold()
+        raise
+    loaded = sorted(model_manager._loaded)
+    if loaded:
+        # Defensive invariant: a successful hold must actually make the GPU
+        # models releasable. Never strand admission if an unknown user remains.
+        model_manager.release_hold()
+        raise HTTPException(
+            409,
+            f"GPU model handoff could not unload: {', '.join(loaded)}",
+            headers={"Retry-After": "2"},
+        )
+    return {
+        "status": "held",
+        "hold_seconds_remaining": round(remaining, 1),
+        "dropped": dropped,
+        "loaded": loaded,
+    }
+
+
+@app.post("/admin/release")
+def admin_release():
+    """Release a peer's bounded GPU admission hold."""
+    model_manager.release_hold()
+    return {
+        "status": "released",
+        "hold_seconds_remaining": 0.0,
+        "loaded": sorted(model_manager._loaded),
     }
 
 
 @app.get("/health")
 @app.get("/healthz")
-def health():
+def health(request: Request):
     gpu_queue = gpu_semaphore.snapshot() if gpu_semaphore is not None else {}
-    return {
-        "status": "ok",
+    cuda_detail = _cuda_unavailable_detail()
+    # Readiness probes are the only traffic an unhealthy/idle worker may see.
+    # Let them initiate process replacement too, instead of waiting for a real
+    # image request to discover the already-poisoned CUDA context.
+    if (
+        request.url.path == "/healthz"
+        and cuda_detail
+        and ZIMAGE_REQUIRE_CUDA_READY
+        and LOAD_ZIMAGE
+        and DEVICE.startswith("cuda")
+    ):
+        _schedule_cuda_process_restart()
+    payload = {
+        "status": "degraded" if cuda_detail else "ok",
+        "cuda": {
+            "healthy": cuda_detail is None,
+            "detail": cuda_detail,
+            "fatal_fault_at": _cuda_runtime_fault_at,
+        },
         "models": {
             "zimage": model_manager.is_loaded("zimage"),
             "chronos2": model_manager.is_loaded("chronos2"),
             "zimage_enabled": LOAD_ZIMAGE,
             "chronos2_enabled": LOAD_CHRONOS,
             "nsfw": nsfw_classifier is not None,
+            "text_encoder": _zimage_text_encoder_placement
+            or ("cpu/fp32" if ZIMAGE_TEXT_ENCODER_DEVICE == "cpu" else None),
         },
         "gpu_queue": gpu_queue,
+        "dynamic_batching": {
+            **(
+                zimage_dynamic_batcher.snapshot()
+                if zimage_dynamic_batcher is not None
+                else {
+                    "enabled": False,
+                    "window_ms": BATCH_WINDOW_MS,
+                    "max_batch_size": ZIMAGE_DYNAMIC_BATCH_MAX_SIZE,
+                    "pending": 0,
+                }
+            ),
+            "max_pixels": ZIMAGE_DYNAMIC_BATCH_MAX_PIXELS,
+            "reserve_mb": ZIMAGE_DYNAMIC_BATCH_RESERVE_MB,
+            "extra_mb_per_image": ZIMAGE_DYNAMIC_BATCH_EXTRA_MB,
+            "broker_enabled": bool(ZIMAGE_VRAM_BROKER_URL),
+            **_zimage_batch_runtime_snapshot(),
+        },
+        "gpu_admission_hold_seconds": round(model_manager.hold_remaining(), 1),
         "nvfp4": ENABLE_NVFP4,
         "precision": PRECISION,
         "zimage_use_cute": ZIMAGE_USE_CUTE,
@@ -1224,6 +1999,9 @@ def health():
             "enabled": LATENT_TELEPORT_ENABLED,
             "cache_dir": LATENT_TELEPORT_CACHE_DIR,
             "start_step": LATENT_TELEPORT_START_STEP,
+            "max_entries_per_resolution": LATENT_TELEPORT_MAX_ENTRIES_PER_RESOLUTION,
+            "max_gib_per_resolution": LATENT_TELEPORT_MAX_GIB_PER_RESOLUTION,
+            "prune_interval_seconds": LATENT_TELEPORT_PRUNE_INTERVAL_SECONDS,
             "approx_min_similarity": LATENT_TELEPORT_APPROX_MIN_SIM,
             "min_free_mb": LATENT_TELEPORT_MIN_FREE_MB,
             "latent_save": LATENT_SAVE,
@@ -1232,6 +2010,14 @@ def health():
         "device": DEVICE,
         "dtype": DTYPE_STR,
     }
+    # /health remains a liveness endpoint for CPU proxy/forecast routes;
+    # /healthz is readiness and must not route image traffic to a dead GPU.
+    readiness_unavailable = request.url.path == "/healthz" and cuda_detail is not None
+    return JSONResponse(
+        status_code=503 if readiness_unavailable else 200,
+        content=_json_safe(payload),
+        headers={"Retry-After": "30"} if readiness_unavailable else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1418,6 +2204,9 @@ class ZImageRequest(BaseModel):
     guidance_scale: float = ZIMAGE_DEFAULT_GUIDANCE
     lora_id: Optional[str] = None
     auto_lora: bool = True
+    # Callers such as RA1 may already have applied the catalog template. Keep
+    # the explicit LoRA activation while avoiding a second trigger/template.
+    prompt_is_final: bool = False
     lora_scale: float = 1.0
     low_priority: bool = False
     quality_retry: bool = True
@@ -1426,6 +2215,11 @@ class ZImageRequest(BaseModel):
     score_aesthetic: bool = False
     early_exit: Optional[float] = Field(None, ge=0.0, le=1.0)
     early_exit_min_steps: Optional[int] = Field(None, ge=1)
+    teleport: bool = False
+    # None => follow LATENT_TELEPORT_APPROX_DEFAULT. Approximate replay reuses a
+    # *different* prompt's latent, so it stays opt-in on the paid path.
+    teleport_approx: Optional[bool] = None
+    teleport_approx_min_sim: Optional[float] = Field(None, ge=0.0, le=1.0)
 
     @field_validator("prompt")
     @classmethod
@@ -1483,6 +2277,31 @@ def _deactivate_loras(pipe):
         _lora_swapper.deactivate()
 
 
+def _prewarm_zimage_loras(pipe, lora_ids: tuple[str, ...]) -> None:
+    """Pay first-merge CUDA setup during background preload, then restore base."""
+    from lora_fixtures import get_lora_by_id
+
+    started = time.perf_counter()
+    warmed = []
+    try:
+        for lora_id in lora_ids:
+            lora = get_lora_by_id(lora_id)
+            if lora is None:
+                logger.warning("Z-Image LoRA prewarm skipped unknown id: %s", lora_id)
+                continue
+            _activate_lora(pipe, lora, lora_scale=_effective_lora_scale(lora))
+            warmed.append(lora_id)
+    except Exception as exc:
+        logger.warning("Z-Image LoRA prewarm failed after %s: %s", warmed, exc)
+    finally:
+        _deactivate_loras(pipe)
+    logger.info(
+        "Z-Image LoRA prewarm complete: ids=%s elapsed=%.2fs",
+        warmed,
+        time.perf_counter() - started,
+    )
+
+
 def _effective_lora_scale(lora, requested_scale: float | None = None) -> float:
     if requested_scale is not None and requested_scale != 1.0:
         return requested_scale
@@ -1514,7 +2333,8 @@ def _resolve_lora(req: ZImageRequest):
     if req.lora_id:
         lora = get_lora_by_id(req.lora_id)
         if lora:
-            return lora, apply_lora_template(lora, req.prompt)
+            final_prompt = req.prompt if req.prompt_is_final else apply_lora_template(lora, req.prompt)
+            return lora, final_prompt
         logger.warning("lora_id '%s' not found, proceeding without LoRA", req.lora_id)
         return None, req.prompt
 
@@ -1536,10 +2356,19 @@ def _generate_image_once_sync(req: ZImageRequest):
 
     text2img_pipe, _ = zimage_pipeline
 
-    # Ensure pipeline is on GPU (may have been displaced by NSFW model)
+    # Ensure pipeline is on GPU (may have been displaced by NSFW model).
+    # With the text encoder pinned to CPU, a whole-pipeline .to(DEVICE) would
+    # drag its ~8 GB back onto the GPU (and stall for minutes when those pages
+    # are swapped) — move only the GPU-resident components in that mode.
     if hasattr(text2img_pipe, 'to') and not hasattr(text2img_pipe, '_offload_gpu_id'):
         try:
-            text2img_pipe.to(DEVICE)
+            if _text_encoder_on_cpu():
+                for _comp_name in ("transformer", "vae"):
+                    _comp = getattr(text2img_pipe, _comp_name, None)
+                    if _comp is not None:
+                        _comp.to(DEVICE)
+            else:
+                text2img_pipe.to(DEVICE)
         except Exception:
             pass
 
@@ -1556,6 +2385,132 @@ def _generate_image_once_sync(req: ZImageRequest):
     # from the previous call causes IndexError on sigmas[N+1].
     _reset_zimage_scheduler(text2img_pipe)
 
+    teleport_meta = None
+    if req.teleport and LATENT_TELEPORT_ENABLED and lora is None and req.num_inference_steps > 1:
+        resume_step = max(1, min(LATENT_TELEPORT_START_STEP, req.num_inference_steps - 1))
+        capture_step = resume_step - 1
+        cache = _get_latent_teleport_cache(width, height)
+        unit = _latent_teleport_unit(
+            final_prompt,
+            width,
+            height,
+            req.num_inference_steps,
+            req.seed,
+            req.guidance_scale,
+        )
+        cached_latent = cache.load_latent(unit, capture_step)
+        cached_prompt_embedding = (
+            cache.load_text_embedding_full(unit) if cached_latent is not None else None
+        )
+        teleport_meta = {
+            "enabled": True,
+            "cache_hit": cached_latent is not None,
+            "capture_step": capture_step,
+            "resume_step": resume_step,
+            "total_steps": req.num_inference_steps,
+        }
+        if cached_latent is not None:
+            try:
+                from latentteleport.refine import refine_from_latent
+
+                replay_started = time.time()
+                with _nvtx_range("zimage.openai_teleport_replay"):
+                    image = refine_from_latent(
+                        text2img_pipe,
+                        cached_latent,
+                        final_prompt,
+                        None,
+                        resume_step,
+                        prompt_embeds=(
+                            [cached_prompt_embedding]
+                            if cached_prompt_embedding is not None
+                            else None
+                        ),
+                        num_total_steps=req.num_inference_steps,
+                        height=height,
+                        width=width,
+                        guidance_scale=req.guidance_scale,
+                        seed=req.seed,
+                        device=DEVICE,
+                    )
+                elapsed = time.time() - replay_started
+                buf = io.BytesIO()
+                image.save(buf, format="WEBP", quality=90)
+                teleport_meta.update({
+                    "method": "exact_prompt_latent_replay",
+                    "inference_time_ms": int(elapsed * 1000),
+                })
+                return {
+                    "image_base64": base64.b64encode(buf.getvalue()).decode(),
+                    "format": "webp",
+                    "width": width,
+                    "height": height,
+                    "inference_time_ms": int(elapsed * 1000),
+                    "seed": req.seed,
+                    "prompt_used": final_prompt,
+                    "lora": None,
+                    "prompt_embedding_cache": {
+                        "enabled": ZIMAGE_PROMPT_CACHE_SIZE > 0,
+                        "hit": cached_prompt_embedding is not None,
+                        "encode_ms": 0,
+                        "source": "latent_cache" if cached_prompt_embedding is not None else None,
+                    },
+                    "pipeline_timing": None,
+                    "early_exit": None,
+                    "teleport": teleport_meta,
+                }
+            except Exception as exc:
+                logger.warning(
+                    "OpenAI latent replay failed; falling back to full generation: %s", exc
+                )
+                teleport_meta.update({
+                    "cache_hit": False,
+                    "fallback_reason": type(exc).__name__,
+                })
+
+        approx_enabled = (
+            req.teleport_approx if req.teleport_approx is not None else LATENT_TELEPORT_APPROX_DEFAULT
+        )
+        teleport_meta["approx_enabled"] = approx_enabled
+        if not teleport_meta.get("cache_hit") and approx_enabled:
+            approx = _teleport_approximate_replay(
+                text2img_pipe,
+                cache,
+                final_prompt,
+                width,
+                height,
+                req.num_inference_steps,
+                resume_step,
+                capture_step,
+                req.guidance_scale,
+                req.seed,
+                req.teleport_approx_min_sim,
+            )
+            if approx is not None:
+                image, approx_meta = approx
+                buf = io.BytesIO()
+                image.save(buf, format="WEBP", quality=90)
+                teleport_meta.update(approx_meta)
+                return {
+                    "image_base64": base64.b64encode(buf.getvalue()).decode(),
+                    "format": "webp",
+                    "width": width,
+                    "height": height,
+                    "inference_time_ms": approx_meta["inference_time_ms"],
+                    "seed": req.seed,
+                    "prompt_used": final_prompt,
+                    "lora": None,
+                    "prompt_embedding_cache": {
+                        "enabled": ZIMAGE_PROMPT_CACHE_SIZE > 0,
+                        "hit": False,
+                        "encode_ms": approx_meta.get("encode_ms", 0),
+                        "source": "teleport_approx",
+                    },
+                    "pipeline_timing": None,
+                    "early_exit": None,
+                    "teleport": teleport_meta,
+                }
+
     pipe_kwargs = dict(
         prompt=final_prompt,
         width=width,
@@ -1567,6 +2522,10 @@ def _generate_image_once_sync(req: ZImageRequest):
     pipe_kwargs, prompt_cache_meta = _prepare_zimage_prompt_embeddings(text2img_pipe, pipe_kwargs)
 
     early_exit_threshold = req.early_exit if req.early_exit is not None else (ZIMAGE_EARLY_EXIT or None)
+    # A teleport miss primes an exact latent. Approximate early-exit latents
+    # are deliberately not cached, so run the full schedule on that first hit.
+    if teleport_meta is not None and not teleport_meta.get("cache_hit"):
+        early_exit_threshold = None
     early_exit_min_steps = req.early_exit_min_steps or ZIMAGE_EARLY_EXIT_MIN_STEPS
     exit_info: dict = {}
     captured = {}
@@ -1622,7 +2581,7 @@ def _generate_image_once_sync(req: ZImageRequest):
                 width, height, elapsed, req.num_inference_steps,
                 lora.id if lora else "none")
 
-    return {
+    response = {
         "image_base64": img_b64,
         "format": "webp",
         "width": width,
@@ -1635,6 +2594,13 @@ def _generate_image_once_sync(req: ZImageRequest):
         "pipeline_timing": pipeline_timing,
         "early_exit": exit_info or None,
     }
+    if teleport_meta is not None:
+        teleport_meta.update({
+            "method": "full_generation_cached_latent",
+            "inference_time_ms": int(elapsed * 1000),
+        })
+        response["teleport"] = teleport_meta
+    return response
 
 
 def _copy_zimage_request(req: ZImageRequest, prompt: str) -> ZImageRequest:
@@ -1745,6 +2711,399 @@ def _generate_image_sync(req: ZImageRequest):
     raise HTTPException(500, "image generation failed")
 
 
+def _zimage_batch_compatibility_key(req: ZImageRequest) -> tuple:
+    """Return fields which must be identical for one diffusion forward batch."""
+    width = (req.width // 64) * 64 or 1024
+    height = (req.height // 64) * 64 or 1024
+    # Explicit LoRAs can batch across prompts. Auto selection is prompt-driven,
+    # so only identical auto-LoRA prompts share a batch unless an ID is pinned.
+    lora_route = req.lora_id or (req.prompt if req.auto_lora else None)
+    threshold = req.early_exit if req.early_exit is not None else (ZIMAGE_EARLY_EXIT or None)
+    return (
+        width,
+        height,
+        req.num_inference_steps,
+        round(req.guidance_scale, 6),
+        lora_route,
+        req.auto_lora,
+        round(req.lora_scale, 6),
+        threshold,
+        req.early_exit_min_steps or ZIMAGE_EARLY_EXIT_MIN_STEPS,
+        req.low_priority,
+        req.best_of,
+        req.teleport,
+    )
+
+
+def _zimage_batch_runtime_add(**increments: int) -> None:
+    with _zimage_batch_runtime_lock:
+        for key, amount in increments.items():
+            if key == "last_granted_mb":
+                _zimage_batch_runtime[key] = amount
+            elif key == "largest_pipeline_batch":
+                _zimage_batch_runtime[key] = max(_zimage_batch_runtime[key], amount)
+            else:
+                _zimage_batch_runtime[key] += amount
+
+
+def _zimage_batch_runtime_snapshot() -> dict:
+    with _zimage_batch_runtime_lock:
+        return dict(_zimage_batch_runtime)
+
+
+def _zimage_batch_desired_capacity(reqs: list[ZImageRequest]) -> int:
+    if not reqs:
+        return 1
+    width = (reqs[0].width // 64) * 64 or 1024
+    height = (reqs[0].height // 64) * 64 or 1024
+    by_pixels = max(1, ZIMAGE_DYNAMIC_BATCH_MAX_PIXELS // max(1, width * height))
+    return max(1, min(len(reqs), ZIMAGE_DYNAMIC_BATCH_MAX_SIZE, by_pixels))
+
+
+def _zimage_batch_capacity_from_cuda(desired_capacity: int) -> int:
+    capacity = desired_capacity
+    free_mb = _cuda_free_mb()
+    if free_mb is not None:
+        by_headroom = 1 + max(
+            0,
+            (free_mb - ZIMAGE_DYNAMIC_BATCH_RESERVE_MB) // ZIMAGE_DYNAMIC_BATCH_EXTRA_MB,
+        )
+        capacity = min(capacity, by_headroom)
+    return max(1, capacity)
+
+
+def _zimage_vram_broker_is_cached_unreachable() -> bool:
+    with _zimage_vram_broker_state_lock:
+        return time.monotonic() < _zimage_vram_broker_unreachable_until
+
+
+def _zimage_vram_broker_mark_unreachable() -> None:
+    global _zimage_vram_broker_unreachable_until
+    with _zimage_vram_broker_state_lock:
+        _zimage_vram_broker_unreachable_until = (
+            time.monotonic() + ZIMAGE_VRAM_BROKER_RETRY_SECONDS
+        )
+
+
+def _zimage_vram_broker_lease(
+    reqs: list[ZImageRequest], desired_capacity: int
+) -> tuple[int, str | None]:
+    if not ZIMAGE_VRAM_BROKER_URL or _zimage_vram_broker_is_cached_unreachable():
+        return _zimage_batch_capacity_from_cuda(desired_capacity), None
+
+    requested_mb = (
+        (desired_capacity - 1) * ZIMAGE_DYNAMIC_BATCH_EXTRA_MB
+        + ZIMAGE_DYNAMIC_BATCH_RESERVE_MB
+    )
+    try:
+        response = requests.post(
+            f"{ZIMAGE_VRAM_BROKER_URL}/v1/gpu/lease",
+            json={
+                "owner": "zimage",
+                "mb": requested_mb,
+                "min_mb": ZIMAGE_DYNAMIC_BATCH_RESERVE_MB,
+                "tier": (
+                    "background"
+                    if reqs and all(req.low_priority for req in reqs)
+                    else "free"
+                ),
+                "ttl_s": ZIMAGE_VRAM_BROKER_TTL_SECONDS,
+            },
+            timeout=ZIMAGE_VRAM_BROKER_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("granted"), bool):
+            raise ValueError("invalid broker lease response")
+        if not payload["granted"]:
+            denied_mb = payload.get("mb")
+            if (
+                isinstance(denied_mb, bool)
+                or not isinstance(denied_mb, int)
+                or denied_mb != 0
+                or not isinstance(payload.get("reason"), str)
+            ):
+                raise ValueError("invalid broker denial response")
+            _zimage_batch_runtime_add(broker_denials=1)
+            return _zimage_batch_capacity_from_cuda(desired_capacity), None
+
+        lease_id = payload.get("lease_id")
+        granted_mb = payload.get("mb")
+        expires_in_s = payload.get("expires_in_s")
+        if (
+            not isinstance(lease_id, str)
+            or not lease_id
+            or isinstance(granted_mb, bool)
+            or not isinstance(granted_mb, int)
+            or granted_mb < ZIMAGE_DYNAMIC_BATCH_RESERVE_MB
+            or granted_mb > requested_mb
+            or isinstance(expires_in_s, bool)
+            or not isinstance(expires_in_s, int)
+            or expires_in_s <= 0
+        ):
+            raise ValueError("invalid broker grant response")
+
+        by_headroom = 1 + max(
+            0,
+            (granted_mb - ZIMAGE_DYNAMIC_BATCH_RESERVE_MB)
+            // ZIMAGE_DYNAMIC_BATCH_EXTRA_MB,
+        )
+        _zimage_batch_runtime_add(
+            broker_grants=1,
+            last_granted_mb=granted_mb,
+        )
+        return max(1, min(desired_capacity, by_headroom)), lease_id
+    except Exception as exc:
+        _zimage_batch_runtime_add(broker_errors=1)
+        _zimage_vram_broker_mark_unreachable()
+        logger.warning("Z-Image VRAM broker lease failed; using CUDA headroom: %s", exc)
+        return _zimage_batch_capacity_from_cuda(desired_capacity), None
+
+
+def _zimage_vram_broker_release(lease_id: str | None) -> None:
+    if not lease_id:
+        return
+    try:
+        response = requests.post(
+            f"{ZIMAGE_VRAM_BROKER_URL}/v1/gpu/release",
+            json={"lease_id": lease_id},
+            timeout=ZIMAGE_VRAM_BROKER_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("released") is not True:
+            raise ValueError("invalid broker release response")
+    except Exception as exc:
+        _zimage_batch_runtime_add(broker_errors=1)
+        _zimage_vram_broker_mark_unreachable()
+        logger.warning("Z-Image VRAM broker release failed: %s", exc)
+
+
+@contextlib.contextmanager
+def _zimage_batch_allocation(reqs: list[ZImageRequest]) -> Iterator[int]:
+    desired_capacity = _zimage_batch_desired_capacity(reqs)
+    capacity, lease_id = _zimage_vram_broker_lease(reqs, desired_capacity)
+    try:
+        yield capacity
+    finally:
+        _zimage_vram_broker_release(lease_id)
+
+
+def _zimage_batch_capacity(reqs: list[ZImageRequest]) -> int:
+    """Choose a live microbatch size, releasing any probe lease immediately."""
+    with _zimage_batch_allocation(reqs) as capacity:
+        return capacity
+
+
+def _move_zimage_inference_components_to_device(pipe) -> None:
+    """Restore GPU-resident components without moving a pinned CPU encoder."""
+    if not hasattr(pipe, "to") or hasattr(pipe, "_offload_gpu_id"):
+        return
+    try:
+        if _text_encoder_on_cpu():
+            for component_name in ("transformer", "vae"):
+                component = getattr(pipe, component_name, None)
+                if component is not None:
+                    component.to(DEVICE)
+        else:
+            pipe.to(DEVICE)
+    except Exception:
+        # Preserve the existing single-request behavior: the pipeline call is
+        # the authoritative check and produces a useful CUDA error if needed.
+        pass
+
+
+def _prepare_zimage_batch_embeddings(pipe, prompts: list[str], common: dict) -> tuple[dict, list[dict]]:
+    positive: list[torch.Tensor] = []
+    negative: list[torch.Tensor] = []
+    metadata: list[dict] = []
+    for prompt in prompts:
+        prepared, prompt_meta = _prepare_zimage_prompt_embeddings(
+            pipe,
+            {**common, "prompt": prompt},
+        )
+        positive.extend(prepared.get("prompt_embeds") or [])
+        negative.extend(prepared.get("negative_prompt_embeds") or [])
+        metadata.append(prompt_meta)
+    batch_kwargs = dict(common)
+    batch_kwargs["prompt"] = None
+    batch_kwargs["prompt_embeds"] = positive
+    if negative:
+        batch_kwargs["negative_prompt_embeds"] = negative
+    return batch_kwargs, metadata
+
+
+def _generate_image_batch_once_sync(reqs: list[ZImageRequest]) -> list[dict]:
+    """Run compatible requests in one Z-Image pipeline invocation."""
+    if len(reqs) == 1:
+        return [_generate_image_once_sync(reqs[0])]
+    if nsfw_classifier is not None:
+        _unload_nsfw_classifier()
+
+    text2img_pipe, _ = zimage_pipeline
+    _move_zimage_inference_components_to_device(text2img_pipe)
+    resolved = [_resolve_lora(req) for req in reqs]
+    loras = [item[0] for item in resolved]
+    final_prompts = [item[1] for item in resolved]
+    lora_keys = {
+        (
+            lora.id if lora else None,
+            round(_effective_lora_scale(lora, req.lora_scale), 6) if lora else None,
+        )
+        for req, lora in zip(reqs, loras)
+    }
+    if len(lora_keys) != 1:
+        logger.info("dynamic batch split after auto-LoRA routes diverged")
+        return [_generate_image_once_sync(req) for req in reqs]
+
+    first = reqs[0]
+    width = (first.width // 64) * 64 or 1024
+    height = (first.height // 64) * 64 or 1024
+    generators = [_make_pipeline_generator(text2img_pipe, req.seed) for req in reqs]
+    _reset_zimage_scheduler(text2img_pipe)
+    common = {
+        "width": width,
+        "height": height,
+        "num_inference_steps": first.num_inference_steps,
+        "guidance_scale": first.guidance_scale,
+        "generator": generators,
+    }
+    pipe_kwargs, prompt_cache_metadata = _prepare_zimage_batch_embeddings(
+        text2img_pipe, final_prompts, common
+    )
+
+    early_exit_threshold = (
+        first.early_exit if first.early_exit is not None else (ZIMAGE_EARLY_EXIT or None)
+    )
+    early_exit_min_steps = first.early_exit_min_steps or ZIMAGE_EARLY_EXIT_MIN_STEPS
+    exit_info: dict = {}
+    pipeline_timing: dict = {}
+    lora = loras[0]
+    capture = ()
+    if lora is None and _latent_save_active():
+        capture = _capture_steps_for(first.num_inference_steps)
+    try:
+        if lora is not None:
+            _activate_lora(
+                text2img_pipe,
+                lora,
+                lora_scale=_effective_lora_scale(lora, first.lora_scale),
+            )
+        else:
+            _deactivate_loras(text2img_pipe)
+        started = time.time()
+        result, captured = _run_zimage_capture_multi(
+            text2img_pipe,
+            pipe_kwargs,
+            capture,
+            pipeline_timing,
+            early_exit=early_exit_threshold,
+            early_exit_min_steps=early_exit_min_steps,
+            exit_info=exit_info,
+            log_prompt=" | ".join(final_prompts),
+        )
+    except Exception as exc:
+        if lora is None:
+            raise
+        logger.warning("batched LoRA generation failed (%s), retrying without: %s", lora.id, exc)
+        _deactivate_loras(text2img_pipe)
+        pipeline_timing = {}
+        started = time.time()
+        result, captured = _run_zimage_capture_multi(
+            text2img_pipe, pipe_kwargs, (), pipeline_timing
+        )
+        lora = None
+    elapsed = time.time() - started
+
+    if exit_info.get("exited_after_step"):
+        captured = {}
+    if captured and lora is None:
+        embeddings = pipe_kwargs.get("prompt_embeds") or []
+        for index, req in enumerate(reqs):
+            per_image_captures = {
+                step: latent[index:index + 1] for step, latent in captured.items()
+            }
+            embedding = embeddings[index] if index < len(embeddings) else None
+            _persist_generation_latents(
+                final_prompts[index],
+                req.seed,
+                req.num_inference_steps,
+                width,
+                height,
+                req.guidance_scale,
+                per_image_captures,
+                text_embedding=embedding,
+            )
+
+    outputs = []
+    lora_info = {"lora_id": lora.id, "lora_name": lora.name} if lora else None
+    for index, (req, image) in enumerate(zip(reqs, result.images)):
+        buf = io.BytesIO()
+        image.save(buf, format="WEBP", quality=90)
+        outputs.append({
+            "image_base64": base64.b64encode(buf.getvalue()).decode(),
+            "format": "webp",
+            "width": width,
+            "height": height,
+            "inference_time_ms": int(elapsed * 1000),
+            "seed": req.seed,
+            "prompt_used": final_prompts[index],
+            "lora": lora_info,
+            "prompt_embedding_cache": prompt_cache_metadata[index],
+            "pipeline_timing": dict(pipeline_timing),
+            "early_exit": dict(exit_info) if exit_info else None,
+            "dynamic_batch": {
+                "size": len(reqs),
+                "index": index,
+                "total_inference_time_ms": int(elapsed * 1000),
+            },
+        })
+    _zimage_batch_runtime_add(
+        pipeline_batches=1,
+        pipeline_images=len(outputs),
+        largest_pipeline_batch=len(outputs),
+    )
+    logger.info(
+        "zimage dynamic batch: size=%d %dx%d in %.2fs (steps=%d, lora=%s)",
+        len(outputs), width, height, elapsed, first.num_inference_steps,
+        lora.id if lora else "none",
+    )
+    return outputs
+
+
+def _generate_image_batch_sync(reqs: list[ZImageRequest]) -> list[dict]:
+    """Apply quality policy around a shared first diffusion pass."""
+    if len(reqs) == 1 or any(req.best_of > 1 or req.teleport for req in reqs):
+        _zimage_batch_runtime_add(serial_chunks=len(reqs))
+        return [_generate_image_sync(req) for req in reqs]
+
+    prepared_reqs = []
+    for req in reqs:
+        prompt = compact_prompt(req.prompt)
+        if ZIMAGE_ENHANCE_PROMPT and req.enhance_prompt:
+            prompt = enhance_prompt(prompt)
+        prepared_reqs.append(_copy_zimage_request(req, prompt))
+
+    results = _generate_image_batch_once_sync(prepared_reqs)
+    for index, (original, prepared, result) in enumerate(zip(reqs, prepared_reqs, results)):
+        image = _decode_result_image(result)
+        if original.quality_retry and image is not None and detect_too_bumpy(image):
+            retry_req = _copy_zimage_request(original, retry_prompt(prepared.prompt))
+            retry_req.seed = original.seed + 1
+            result = _generate_image_once_sync(retry_req)
+            result["quality_retry"] = {
+                "reason": "bumpy_image",
+                "prompt_used": retry_req.prompt,
+                "attempts": 2,
+                "initial_dynamic_batch_size": len(reqs),
+            }
+            results[index] = result
+            image = _decode_result_image(result)
+        if original.score_aesthetic:
+            _attach_aesthetic_score(results[index], image)
+    return results
+
+
 def _is_cuda_oom(exc: Exception) -> bool:
     text = str(exc).lower()
     return "out of memory" in text and ("cuda" in text or "accelerator" in type(exc).__name__.lower())
@@ -1768,34 +3127,57 @@ def _recover_from_zimage_runtime_fault(reason: str):
         torch._dynamo.reset()
     except Exception:
         pass
-    if torch.cuda.is_available():
-        try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+    _clear_torch_cuda_caches()
 
 
 def _recover_from_cuda_oom():
     _recover_from_zimage_runtime_fault("CUDA OOM")
 
 
+def _detach_recoverable_exception_traceback(exc: BaseException) -> None:
+    """Drop unwound generation frames before CUDA cleanup runs.
+
+    Pipeline and intermediate tensor locals remain reachable through an
+    exception traceback. Keeping that traceback while calling empty_cache()
+    makes an OOM recovery appear to unload the model while its allocations are
+    still live, which prevents both the immediate retry and later cold loads.
+    """
+    exc.__traceback__ = None
+
+
 def _with_zimage_model_retry(operation_name: str, fn):
     last_exc = None
     for attempt in range(3):
         try:
+            _raise_if_zimage_cuda_unavailable()
             if not model_manager.is_loaded("zimage"):
-                _raise_if_zimage_memory_pressure(ZIMAGE_LOAD_MIN_FREE_MB, operation_name)
+                _reclaim_zimage_cold_load_headroom(ZIMAGE_LOAD_MIN_FREE_MB, operation_name)
             with model_manager.use("zimage"):
                 if zimage_pipeline is None:
                     raise HTTPException(503, "zimage model failed to load")
-                _raise_if_zimage_memory_pressure(ZIMAGE_RUNTIME_MIN_FREE_MB, operation_name)
+                # Global driver free memory is not the pipeline's usable
+                # headroom: PyTorch can satisfy inference from its reserved
+                # allocator pool even when cudaMemGetInfo is low. Let the
+                # actual operation run and use the OOM recovery below if its
+                # real allocation cannot be fulfilled.
                 return fn()
         except Exception as e:
             last_exc = e
+            if _is_fatal_cuda_error(e):
+                _mark_cuda_runtime_fault(e)
+                # Drop Python/module references, but never issue more CUDA work
+                # after a launch failure. Only a fresh process can recover.
+                model_manager.force_unload("zimage")
+                _schedule_cuda_process_restart()
+                raise HTTPException(
+                    503,
+                    f"{operation_name} stopped after a fatal CUDA runtime error; process restart required",
+                    headers={"Retry-After": "30"},
+                ) from e
             if _is_cuda_oom(e):
                 logger.warning("%s hit CUDA OOM; reloading model and retrying once", operation_name)
+                _detach_recoverable_exception_traceback(e)
+                last_exc = None
                 _recover_from_cuda_oom()
                 if attempt > 0:
                     raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery")
@@ -1809,6 +3191,8 @@ def _with_zimage_model_retry(operation_name: str, fn):
                 continue
             if _is_zimage_cudagraph_list_assertion(e):
                 downgraded = _downgrade_zimage_compile_mode("torch inductor CUDA graph list-output assertion")
+                _detach_recoverable_exception_traceback(e)
+                last_exc = None
                 _recover_from_zimage_runtime_fault("torch inductor CUDA graph assertion")
                 if not downgraded or attempt >= 2:
                     raise HTTPException(503, f"{operation_name} failed after compile-mode recovery")
@@ -1825,15 +3209,68 @@ def _generate_image_with_model_sync(req: ZImageRequest):
     return _with_zimage_model_retry("generate_image", lambda: _generate_image_sync(req))
 
 
+def _generate_image_batch_with_model_sync(reqs: list[ZImageRequest]) -> list[dict]:
+    """Keep one model lease while executing one or more adaptive chunks."""
+    def _run() -> list[dict]:
+        outputs: list[dict] = []
+        offset = 0
+        while offset < len(reqs):
+            remaining = reqs[offset:]
+            with _zimage_batch_allocation(remaining) as capacity:
+                chunk = remaining[:capacity]
+                try:
+                    outputs.extend(_generate_image_batch_sync(chunk))
+                except Exception as exc:
+                    if len(chunk) == 1 or not _is_cuda_oom(exc):
+                        raise
+                    logger.warning(
+                        "dynamic batch size %d hit CUDA OOM; retrying the chunk serially",
+                        len(chunk),
+                    )
+                    _detach_recoverable_exception_traceback(exc)
+                    _clear_torch_cuda_caches()
+                    _zimage_batch_runtime_add(oom_batch_fallbacks=1, serial_chunks=len(chunk))
+                    outputs.extend(_generate_image_sync(req) for req in chunk)
+            offset += len(chunk)
+        return outputs
+
+    return _with_zimage_model_retry("generate_image_batch", _run)
+
+
+async def _run_zimage_dynamic_batch(reqs: list[ZImageRequest]) -> list[dict]:
+    low_priority = all(req.low_priority for req in reqs)
+    async with gpu_slot(low_priority):
+        return await asyncio.get_running_loop().run_in_executor(
+            None, _generate_image_batch_with_model_sync, reqs
+        )
+
+
+async def _submit_zimage_request(req: ZImageRequest) -> dict:
+    with model_manager.reserve("zimage"):
+        if zimage_dynamic_batcher is None:
+            async with gpu_slot(req.low_priority):
+                return await asyncio.get_running_loop().run_in_executor(
+                    None, _generate_image_with_model_sync, req
+                )
+        return await zimage_dynamic_batcher.submit(req)
+
+
 @app.post("/generate_image")
 async def generate_image(req: ZImageRequest, request: Request):
     if not LOAD_ZIMAGE:
         raise HTTPException(503, "zimage disabled")
     _remember_request_prompt(request, req.prompt)
-    async with gpu_slot(req.low_priority):
-        return await asyncio.get_event_loop().run_in_executor(
-            None, _generate_image_with_model_sync, req
-        )
+    _remember_request_inference_params(
+        request,
+        model="zimage-turbo",
+        width=req.width,
+        height=req.height,
+        num_inference_steps=req.num_inference_steps,
+        auto_lora=req.auto_lora,
+        teleport=False,
+        perf=False,
+    )
+    return await _submit_zimage_request(req)
 
 
 # GET with query params for cutedsl-site internal use (returns base64)
@@ -1849,14 +3286,103 @@ async def generate_image_b64(
 ):
     _require_nonempty_prompt(prompt)
     _remember_request_prompt(request, prompt)
+    _remember_request_inference_params(
+        request,
+        model="zimage-turbo",
+        width=width,
+        height=height,
+        num_inference_steps=ZIMAGE_DEFAULT_STEPS,
+        auto_lora=auto_lora,
+        teleport=False,
+        perf=False,
+    )
     req = ZImageRequest(
         prompt=prompt, width=width, height=height, seed=seed,
         lora_id=lora_id, auto_lora=auto_lora,
     )
-    async with gpu_slot(req.low_priority):
-        return await asyncio.get_event_loop().run_in_executor(
-            None, _generate_image_with_model_sync, req
-        )
+    return await _submit_zimage_request(req)
+
+
+def _openai_images_secret(request: Request, body: dict) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return str(
+        request.headers.get("secret")
+        or body.get("secret")
+        or request.query_params.get("secret")
+        or ""
+    )
+
+
+@app.post("/v1/images/generations")
+async def openai_images_generations(request: Request):
+    """OpenAI-compatible image generation so omniserve / omniserve-native can
+    front this server with no payload translation. Extra fields (lora_id,
+    auto_lora, prompt_is_final, lora_scale, steps, seed, guidance_scale) pass
+    through."""
+    if not LOAD_ZIMAGE:
+        raise HTTPException(503, "zimage disabled")
+    body = await request.json()
+    _check_secret(_openai_images_secret(request, body))
+    prompt = str(body.get("prompt") or "")
+    _require_nonempty_prompt(prompt)
+    width, height = ZIMAGE_DEFAULT_WIDTH, ZIMAGE_DEFAULT_HEIGHT
+    size = body.get("size")
+    if size:
+        try:
+            width, height = (int(x) for x in str(size).lower().split("x"))
+        except ValueError:
+            raise HTTPException(400, "size must be WIDTHxHEIGHT")
+    width = int(body.get("width") or width)
+    height = int(body.get("height") or height)
+    n = max(1, min(int(body.get("n") or 1), 4))
+    seed = int(body.get("seed") or 0)
+    lora_id = body.get("lora_id")
+    lora_scale = float(body.get("lora_scale") or 1.0)
+    loras = body.get("loras") or []
+    if not lora_id and loras:
+        first = loras[0]
+        lora_id = first.get("id") if isinstance(first, dict) else str(first)
+        if isinstance(first, dict) and first.get("scale") is not None:
+            lora_scale = float(first["scale"])
+    base = dict(
+        prompt=prompt, width=width, height=height,
+        num_inference_steps=int(body.get("steps") or body.get("num_inference_steps") or ZIMAGE_DEFAULT_STEPS),
+        guidance_scale=float(body.get("guidance_scale") or ZIMAGE_DEFAULT_GUIDANCE),
+        lora_id=lora_id, lora_scale=lora_scale,
+        auto_lora=bool(body.get("auto_lora", True)),
+        prompt_is_final=bool(body.get("prompt_is_final", False)),
+        low_priority=bool(body.get("low_priority", False)),
+        quality_retry=bool(body.get("quality_retry", True)),
+        enhance_prompt=bool(body.get("enhance_prompt", True)),
+        best_of=max(1, min(int(body.get("best_of") or 1), 4)),
+        score_aesthetic=bool(body.get("score_aesthetic", False)),
+        early_exit=body.get("early_exit"),
+        early_exit_min_steps=body.get("early_exit_min_steps"),
+        teleport=bool(body.get("teleport", False)),
+    )
+    _remember_request_prompt(request, prompt)
+    _remember_request_inference_params(
+        request, model="zimage-turbo", width=width, height=height,
+        num_inference_steps=base["num_inference_steps"],
+        auto_lora=base["auto_lora"], teleport=False, perf=False,
+    )
+    requests_to_run = [ZImageRequest(seed=seed + i, **base) for i in range(n)]
+    results = await asyncio.gather(*(_submit_zimage_request(req) for req in requests_to_run))
+    data = []
+    for result in results:
+        entry = {"b64_json": result.get("image_base64")}
+        if result.get("lora"):
+            entry["lora"] = result["lora"]
+        if result.get("seed") is not None:
+            entry["seed"] = result["seed"]
+        if result.get("dynamic_batch"):
+            entry["dynamic_batch"] = result["dynamic_batch"]
+        if result.get("teleport"):
+            entry["teleport"] = result["teleport"]
+        data.append(entry)
+    return {"created": int(time.time()), "model": "z-image-turbo", "data": data}
 
 
 # ---------------------------------------------------------------------------
@@ -1893,7 +3419,13 @@ def _step_trace_sync(req: StepTraceRequest):
     pipe, _ = zimage_pipeline
     if hasattr(pipe, 'to') and not hasattr(pipe, '_offload_gpu_id'):
         try:
-            pipe.to(DEVICE)
+            if _text_encoder_on_cpu():
+                for _comp_name in ("transformer", "vae"):
+                    _comp = getattr(pipe, _comp_name, None)
+                    if _comp is not None:
+                        _comp.to(DEVICE)
+            else:
+                pipe.to(DEVICE)
         except Exception:
             pass
     _deactivate_loras(pipe)
@@ -2048,8 +3580,8 @@ def search_loras(q: str = Query(..., min_length=1), top_k: int = 5):
 # ---------------------------------------------------------------------------
 
 class ChronosRequest(BaseModel):
-    values: list[float]
-    prediction_length: int = 64
+    values: list[float] = Field(min_length=1, max_length=8192)
+    prediction_length: int = Field(default=64, ge=1, le=1024)
     quantile_levels: Optional[list[float]] = None
     # Optional covariates for multivariate forecasting. Each is a named series.
     # past_covariates align 1:1 with `values` (same length, the model uses
@@ -2058,6 +3590,69 @@ class ChronosRequest(BaseModel):
     # be a subset of past_covariates keys.
     past_covariates: Optional[dict[str, list[float]]] = None
     future_covariates: Optional[dict[str, list[float]]] = None
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, values: list[float]) -> list[float]:
+        return _validate_chronos_series(values, "values")
+
+    @field_validator("past_covariates", "future_covariates")
+    @classmethod
+    def validate_covariates(cls, covariates: Optional[dict[str, list[float]]]):
+        if covariates is None:
+            return None
+        for name, values in covariates.items():
+            _validate_chronos_series(values, f"covariate {name!r}")
+        return covariates
+
+    @field_validator("quantile_levels")
+    @classmethod
+    def validate_quantile_levels(cls, levels: Optional[list[float]]):
+        return _validate_chronos_quantile_levels(levels)
+
+
+def _validate_chronos_series(values: list[float], label: str) -> list[float]:
+    """Accept NaN missing values, but reject values unsafe for model arithmetic."""
+    if not values:
+        raise ValueError(f"{label} must not be empty")
+    if any(math.isinf(value) for value in values):
+        raise ValueError(f"{label} must not contain infinite values")
+    if not any(math.isfinite(value) for value in values):
+        raise ValueError(f"{label} must contain at least one finite value")
+
+    # Chronos consumes float32 contexts. Reject numbers that overflow during
+    # conversion instead of letting them poison model activations and later
+    # crash Starlette's strict JSON serializer with NaN/Infinity.
+    tensor = torch.tensor(values, dtype=torch.float32)
+    input_missing = torch.isnan(tensor)
+    if not torch.isfinite(tensor[~input_missing]).all().item():
+        raise ValueError(f"{label} contains values outside the float32 range")
+    return values
+
+
+def _validate_chronos_quantile_levels(levels: Optional[list[float]]):
+    if levels is None:
+        return None
+    if not levels:
+        raise ValueError("quantile_levels must not be empty")
+    if len(levels) > 21:
+        raise ValueError("quantile_levels must contain at most 21 values")
+    if any(not math.isfinite(level) or not 0.0 < level < 1.0 for level in levels):
+        raise ValueError("quantile_levels must contain finite values between 0 and 1")
+    if len(set(levels)) != len(levels):
+        raise ValueError("quantile_levels must not contain duplicates")
+    return levels
+
+
+def _require_finite_forecast(*tensors: torch.Tensor) -> None:
+    if not all(torch.isfinite(tensor).all().item() for tensor in tensors):
+        # A non-finite prediction has no valid JSON or forecasting meaning.
+        # Surface it as an input-domain error rather than an opaque serializer
+        # 500, without silently replacing model output or changing semantics.
+        raise HTTPException(
+            422,
+            "forecast produced non-finite values; check the input scale and missing values",
+        )
 
 
 def _forecast_sync(req: ChronosRequest):
@@ -2106,6 +3701,7 @@ def _forecast_sync(req: ChronosRequest):
 
     q_tensor = quantiles[0].squeeze(0)
     m_tensor = mean[0].squeeze(0)
+    _require_finite_forecast(q_tensor, m_tensor)
 
     logger.info("chronos2: %d values -> %d steps in %.2fms",
                 len(req.values), req.prediction_length, elapsed * 1000)
@@ -2148,10 +3744,24 @@ class ChronosBatchRequest(BaseModel):
     """Batch forecast: predict multiple time series at once.
     Each series can be a different OHLC channel (open, high, low, close).
     """
-    series: list[list[float]]  # list of time series
-    prediction_length: int = 64
+    series: list[list[float]] = Field(min_length=1, max_length=64)  # list of time series
+    prediction_length: int = Field(default=64, ge=1, le=1024)
     quantile_levels: Optional[list[float]] = None
     constrain_ohlc: bool = False  # if True, reorder so high >= open,close >= low
+
+    @field_validator("series")
+    @classmethod
+    def validate_series(cls, series: list[list[float]]) -> list[list[float]]:
+        for index, values in enumerate(series):
+            if len(values) > 8192:
+                raise ValueError(f"series[{index}] must contain at most 8192 values")
+            _validate_chronos_series(values, f"series[{index}]")
+        return series
+
+    @field_validator("quantile_levels")
+    @classmethod
+    def validate_quantile_levels(cls, levels: Optional[list[float]]):
+        return _validate_chronos_quantile_levels(levels)
 
 
 def _forecast_batch_sync(req: ChronosBatchRequest):
@@ -2173,9 +3783,12 @@ def _forecast_batch_sync(req: ChronosBatchRequest):
 
     results = []
     for i in range(len(req.series)):
-        m = mean[i].squeeze(0).tolist()
+        m_tensor = mean[i].squeeze(0)
+        q_tensor = quantiles[i].squeeze(0)
+        _require_finite_forecast(m_tensor, q_tensor)
+        m = m_tensor.tolist()
         q = {
-            str(ql): quantiles[i].squeeze(0)[:, j].tolist()
+            str(ql): q_tensor[:, j].tolist()
             for j, ql in enumerate(quantile_levels)
         }
         results.append({"mean": m, "quantiles": q})
@@ -2554,18 +4167,105 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
 
 
 def _latent_teleport_unit(prompt: str, width: int, height: int, steps: int, seed: int,
-                          guidance: float | None = None):
+                          guidance: float | None = None, lora=None):
     from latentteleport.tokenizer import VisualUnit
 
     if guidance is None:
         guidance = ZIMAGE_DEFAULT_GUIDANCE
     precision_mode = (PRECISION or {}).get("mode", DTYPE_STR)
+    compile_mode = _get_zimage_compile_mode() or "eager"
+    # The text encoder's placement/quantization changes the conditioning tensors
+    # slightly, so latents captured under a different encoder are not valid to
+    # resume from — keep it in the key instead of silently replaying stale work.
+    encoder = _zimage_text_encoder_placement or ZIMAGE_TEXT_ENCODER_DEVICE or str(DEVICE)
+    lora_key = f"{lora.id}@{lora.scale}" if lora is not None else "none"
     key = (
         f"cache={ZIMAGE_LATENT_CACHE_VERSION}|model={ZIMAGE_MODEL_PATH}|"
-        f"precision={precision_mode}|cute={int(ZIMAGE_USE_CUTE)}|"
+        f"precision={precision_mode}|dtype={DTYPE_STR}|cute={int(ZIMAGE_USE_CUTE)}|"
+        f"encoder={encoder}|lora={lora_key}|"
+        f"compile={compile_mode}|early_exit={ZIMAGE_EARLY_EXIT}|"
+        f"early_exit_min={ZIMAGE_EARLY_EXIT_MIN_STEPS}|"
+        f"early_exit_consecutive={ZIMAGE_EARLY_EXIT_CONSECUTIVE}|"
+        f"skip_noop={int(ZIMAGE_SKIP_NOOP_STEPS)}|"
         f"{prompt}|{width}x{height}|steps={steps}|seed={seed}|guidance={guidance}"
     )
     return VisualUnit.from_text(key)
+
+
+def _teleport_approximate_replay(
+    pipe,
+    cache,
+    final_prompt: str,
+    width: int,
+    height: int,
+    steps: int,
+    resume_step: int,
+    capture_step: int,
+    guidance_scale: float | None,
+    seed: int,
+    min_sim_override: float | None,
+):
+    """Resume from the nearest cached latent of a *different* but similar prompt.
+
+    Returns ``(image, meta)`` when a neighbour clears the similarity floor, else
+    ``None`` so the caller runs the normal schedule. Every failure mode falls
+    through to a full generation: an approximate hit is an optimization, never a
+    correctness requirement.
+    """
+    from latentteleport.refine import refine_from_latent
+
+    min_sim = LATENT_TELEPORT_APPROX_MIN_SIM if min_sim_override is None else min_sim_override
+    try:
+        encode_started = time.time()
+        with _nvtx_range("zimage.teleport.approx_prompt_embed"):
+            text_emb, _ = pipe.encode_prompt(
+                prompt=final_prompt,
+                negative_prompt=None,
+                do_classifier_free_guidance=False,
+                device=DEVICE,
+            )
+        encode_ms = int((time.time() - encode_started) * 1000)
+        target_emb = text_emb[0].detach().cpu() if isinstance(text_emb, list) else text_emb.detach().cpu()
+        pooled = target_emb.float().mean(0) if target_emb.dim() == 2 else target_emb.float()
+        nearest = cache.find_nearest(pooled, top_k=1)
+        if not nearest:
+            return None
+        source_unit_id, source_text, sim = nearest[0]
+        if sim < min_sim:
+            return None
+        source_unit = cache.load_unit_by_id(source_unit_id)
+        source_latent = cache.load_latent(source_unit, capture_step) if source_unit is not None else None
+        if source_latent is None:
+            return None
+        replay_started = time.time()
+        with _nvtx_range("zimage.teleport.approx_replay"):
+            image = refine_from_latent(
+                pipe,
+                source_latent,
+                final_prompt,
+                None,
+                resume_step,
+                prompt_embeds=[target_emb],
+                num_total_steps=steps,
+                height=height,
+                width=width,
+                guidance_scale=guidance_scale,
+                seed=seed,
+                device=DEVICE,
+            )
+    except Exception as exc:
+        logger.warning("approximate latent teleport failed; running full generation: %s", exc)
+        return None
+
+    return image, {
+        "method": "approx_prompt_latent_replay",
+        "cache_hit": True,
+        "approx_hit": True,
+        "approx_similarity": float(sim),
+        "approx_source": source_text,
+        "encode_ms": encode_ms,
+        "inference_time_ms": int((time.time() - replay_started) * 1000) + encode_ms,
+    }
 
 
 def _get_latent_teleport_cache(width: int, height: int):
@@ -2576,6 +4276,9 @@ def _get_latent_teleport_cache(width: int, height: int):
         latent_teleport_cache = LatentCache(
             LATENT_TELEPORT_CACHE_DIR,
             resolution=(height, width),
+            max_entries=LATENT_TELEPORT_MAX_ENTRIES_PER_RESOLUTION,
+            max_bytes=int(LATENT_TELEPORT_MAX_GIB_PER_RESOLUTION * 1024**3),
+            prune_interval_s=LATENT_TELEPORT_PRUNE_INTERVAL_SECONDS,
         )
     return latent_teleport_cache
 
@@ -2622,7 +4325,7 @@ def _run_zimage_capture_multi(pipe, pipe_kwargs: dict, capture_steps,
         z = callback_kwargs.get("latents")
         if step_index in capture_steps and z is not None:
             captured[step_index] = z.detach().clone().cpu()
-        if ZIMAGE_SKIP_NOOP_STEPS and z is not None and not _pipe.interrupt:
+        if ZIMAGE_SKIP_NOOP_STEPS and z is not None and not getattr(_pipe, "interrupt", False):
             total = getattr(_pipe, "_num_timesteps", 0)
             if step_index < total - 1:
                 try:
@@ -2660,7 +4363,7 @@ def _run_zimage_capture_multi(pipe, pipe_kwargs: dict, capture_steps,
                         # consecutive below-threshold steps; flat slowly-decaying
                         # curves (high-texture prompts) fail a single-hit rule.
                         below_count[0] = below_count[0] + 1 if (early_exit and rel < early_exit) else 0
-                        if (early_exit and not _pipe.interrupt
+                        if (early_exit and not getattr(_pipe, "interrupt", False)
                                 and (step_index + 1) >= early_exit_min_steps
                                 and below_count[0] >= ZIMAGE_EARLY_EXIT_CONSECUTIVE):
                             if s_cur > 0:
@@ -3099,16 +4802,42 @@ async def create_and_upload_image(
 ):
     _check_secret(secret)
     _remember_request_prompt(request, prompt)
+    _remember_request_inference_params(
+        request,
+        model=model,
+        width=width,
+        height=height,
+        num_inference_steps=num_inference_steps,
+        auto_lora=auto_lora,
+        teleport=teleport,
+        perf=perf,
+    )
     _require_nonempty_prompt(prompt)
     sp = build_save_path(save_path) if save_path else ""
     if sp and check_if_blob_exists(sp):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         return {"path": f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{sp}"}
-    async with gpu_slot(low_priority or background):
-        if teleport:
+    with model_manager.reserve("zimage"):
+        async with gpu_slot(low_priority or background):
+            if teleport:
+                return await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    _generate_and_upload_teleport_with_model_sync,
+                    prompt,
+                    width,
+                    height,
+                    sp,
+                    auto_lora,
+                    lora_id,
+                    perf,
+                    num_inference_steps,
+                    teleport_approx,
+                    teleport_approx_min_sim,
+                    teleport_start_step,
+                )
             return await asyncio.get_event_loop().run_in_executor(
                 None,
-                _generate_and_upload_teleport_with_model_sync,
+                _generate_and_upload_with_model_sync,
                 prompt,
                 width,
                 height,
@@ -3117,22 +4846,7 @@ async def create_and_upload_image(
                 lora_id,
                 perf,
                 num_inference_steps,
-                teleport_approx,
-                teleport_approx_min_sim,
-                teleport_start_step,
             )
-        return await asyncio.get_event_loop().run_in_executor(
-            None,
-            _generate_and_upload_with_model_sync,
-            prompt,
-            width,
-            height,
-            sp,
-            auto_lora,
-            lora_id,
-            perf,
-            num_inference_steps,
-        )
 
 
 @app.get("/style_transfer_and_upload_image")
@@ -3915,9 +5629,46 @@ def list_training_jobs():
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+
+def _local_port_has_listener(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            return probe.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        return False
+
+
+def _wait_for_existing_local_server(port: int) -> bool:
+    """Keep a managed standby quiet while an older instance owns the port.
+
+    ``Restart=always`` service units otherwise spin forever on EADDRINUSE.
+    Waiting keeps the unit healthy without importing a second model; when the
+    old listener leaves, this same process continues into uvicorn and takes
+    over normally.
+    """
+    if os.getenv("INFERENCE_WAIT_FOR_EXISTING_SERVER", "1") != "1":
+        return False
+    if not _local_port_has_listener(port):
+        return False
+
+    poll_seconds = max(
+        0.25,
+        float(os.getenv("INFERENCE_EXISTING_SERVER_POLL_SECONDS", "5")),
+    )
+    logger.warning(
+        "port %s already has a local inference server; waiting in standby without loading models",
+        port,
+    )
+    while _local_port_has_listener(port):
+        time.sleep(poll_seconds)
+    logger.info("port %s is free; standby is taking over", port)
+    return True
+
 if __name__ == "__main__":
     port = int(os.getenv("INFERENCE_PORT", "8100"))
     workers = int(os.getenv("INFERENCE_WORKERS", "1"))
+    _wait_for_existing_local_server(port)
     uvicorn.run(
         "server:app",
         host="0.0.0.0",

@@ -7,6 +7,8 @@ Requires: inference server running on localhost:8100
 
 import os
 import time
+import json
+import math
 import pytest
 import httpx
 
@@ -37,7 +39,8 @@ def test_health():
     r = client.get("/health")
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "ok"
+    assert data["status"] in {"ok", "degraded"}
+    assert "cuda" in data
     assert "models" in data
     assert "zimage" in data["models"]
     assert "chronos2" in data["models"]
@@ -51,6 +54,34 @@ def test_health():
 def test_generate_image_missing_prompt():
     r = client.post("/generate_image", json={})
     assert r.status_code == 422  # Pydantic validation error
+
+
+@skip_if_no_server
+@pytest.mark.parametrize("payload", [
+    {"prompt": ""},
+    {"prompt": "   "},
+])
+def test_generate_image_blank_prompt_rejected_before_gpu(payload):
+    r = client.post("/generate_image", json=payload)
+    assert r.status_code == 422
+    assert "prompt" in r.text
+
+
+@skip_if_no_server
+@pytest.mark.parametrize("prompt", ["", "   "])
+def test_create_and_upload_blank_prompt_rejected_before_gpu(prompt):
+    r = client.get("/create_and_upload_image", params={
+        "prompt": prompt,
+        "width": 512,
+        "height": 512,
+        "model": "zimage-turbo",
+        "auto_lora": "true",
+        "teleport": "true",
+        "perf": "true",
+        "secret": SECRET,
+    })
+    assert r.status_code == 400
+    assert r.json()["detail"] == "prompt must not be empty"
 
 
 @skip_if_no_server
@@ -87,6 +118,52 @@ def test_generate_image_success():
     import base64
     img_bytes = base64.b64decode(data["image_base64"])
     assert len(img_bytes) > 1000  # Should be a non-trivial image
+
+
+@skip_if_no_server
+def test_openai_images_bad_secret():
+    r = client.post("/v1/images/generations",
+                    json={"prompt": "x"},
+                    headers={"Authorization": "Bearer wrong-secret"})
+    assert r.status_code == 403
+
+
+@skip_if_no_server
+def test_openai_images_accepts_compat_secret_header_before_validation():
+    r = client.post(
+        "/v1/images/generations",
+        json={},
+        headers={"secret": SECRET},
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "prompt must not be empty"
+
+
+@skip_if_no_server
+def test_openai_images_missing_prompt():
+    r = client.post("/v1/images/generations", json={},
+                    headers={"Authorization": f"Bearer {SECRET}"})
+    assert r.status_code == 400
+
+
+@skip_if_no_server
+def test_openai_images_generation():
+    health = client.get("/health").json()
+    if not health["models"]["zimage"]:
+        pytest.skip("zimage model not loaded")
+    r = client.post("/v1/images/generations", json={
+        "prompt": "a lighthouse at dusk, oil painting",
+        "size": "512x512",
+        "steps": 4,
+        "seed": 7,
+        "auto_lora": False,
+    }, headers={"Authorization": f"Bearer {SECRET}"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["model"] == "z-image-turbo"
+    assert len(data["data"]) == 1
+    import base64
+    assert len(base64.b64decode(data["data"][0]["b64_json"])) > 1000
 
 
 @skip_if_no_server
@@ -254,6 +331,46 @@ def test_forecast_default_params():
     assert "0.9" in data["quantiles"]
 
 
+@skip_if_no_server
+@pytest.mark.parametrize("payload", [
+    '{"values":[]}',
+    '{"values":[1.0,Infinity,3.0],"prediction_length":4}',
+    '{"values":[1.0,2.0,3.0],"prediction_length":0}',
+    '{"values":[1.0,2.0,3.0],"quantile_levels":[NaN]}',
+])
+def test_forecast_rejects_inputs_that_would_produce_non_finite_json(payload):
+    r = client.post("/forecast", content=payload, headers={"content-type": "application/json"})
+    assert r.status_code == 422, r.text
+    json.dumps(r.json(), allow_nan=False)
+
+
+@skip_if_no_server
+def test_forecast_accepts_long_context_with_missing_values():
+    health = client.get("/health").json()
+    if not health["models"]["chronos2"]:
+        pytest.skip("chronos2 model not loaded")
+
+    values = [float(i) for i in range(4095)] + [float("nan")]
+    r = client.post(
+        "/forecast",
+        content=json.dumps({"values": values, "prediction_length": 4}),
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["context_length"] == 4096
+    assert all(math.isfinite(value) for value in data["mean"])
+
+
+@skip_if_no_server
+def test_forecast_batch_rejects_empty_series():
+    r = client.post("/forecast_batch", json={
+        "series": [[]],
+        "prediction_length": 4,
+    })
+    assert r.status_code == 422, r.text
+
+
 # ---- TTS ----
 
 @skip_if_no_server
@@ -304,7 +421,26 @@ def test_caption_request():
     r = client.post("/caption", json={
         "image_url": "https://picsum.photos/200/200",
     })
-    assert r.status_code in (200, 502)
+    assert r.status_code in (200, 400)
+
+
+@skip_if_no_server
+def test_caption_file_proxy_authentication():
+    """A valid image must reach the caption backend without an auth 5xx."""
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (32, 32), "navy")
+    payload = BytesIO()
+    image.save(payload, format="PNG")
+    r = client.post(
+        "/caption_file",
+        files={"image_file": ("auth-probe.png", payload.getvalue(), "image/png")},
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["caption"]
+    assert data["source"] == "file"
 
 
 # ---- Gemma4 Chat ----

@@ -35,6 +35,9 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg2
@@ -64,6 +67,19 @@ SIZES = {
 
 WEBP_QUALITY = 85
 SAVE_LATENTS = True
+
+# Skip the legacy histogram detector (false-positives on white-background images)
+LENIENT_QUALITY = os.getenv("LENIENT_QUALITY", "0") == "1"
+
+
+def image_too_bumpy(img) -> bool:
+    if not LENIENT_QUALITY:
+        return detect_too_bumpy(img)
+    m = bumpy_metrics(img)
+    return (
+        (m.entropy >= 7.45 and m.laplacian_ratio >= 0.30 and m.laplacian_abs_mean >= 15.0)
+        or (m.laplacian_abs_mean >= 42.0 and m.laplacian_ratio >= 0.31)
+    )
 
 # Graceful shutdown
 shutdown_requested = False
@@ -119,14 +135,14 @@ def prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode()).hexdigest()[:16]
 
 
-def load_all_prompts() -> list[str]:
+def load_all_prompts(prompts_file: Path = PROMPTS_FILE) -> list[str]:
     """Load all prompts from JSONL."""
-    if not PROMPTS_FILE.exists():
-        print(f"ERROR: {PROMPTS_FILE} not found. Run download_prompts.py first.")
+    if not prompts_file.exists():
+        print(f"ERROR: {prompts_file} not found. Run download_prompts.py first.")
         sys.exit(1)
 
     prompts = []
-    with open(PROMPTS_FILE) as f:
+    with open(prompts_file) as f:
         for line in f:
             try:
                 row = json.loads(line)
@@ -183,6 +199,7 @@ def generate_image_local(prompt: str, width: int, height: int, steps: int, seed:
                 "guidance_scale": 0.0,
                 "auto_lora": False,
                 "low_priority": True,
+                "quality_retry": not LENIENT_QUALITY,
             },
             timeout=360,
         )
@@ -283,7 +300,7 @@ def generate_image_with_quality_retry(prompt: str, width: int, height: int, step
         if img is None:
             continue
 
-        if not detect_too_bumpy(img):
+        if not image_too_bumpy(img):
             if attempt > 0:
                 result["prompt_retry_used"] = attempt_prompt
             return result, None
@@ -302,7 +319,76 @@ def generate_image_with_quality_retry(prompt: str, width: int, height: int, step
     return None, "bumpy_image" if saw_bumpy else None
 
 
-def save_and_insert(api_result: dict, prompt: str, conn) -> bool:
+def _generate_image_worker(
+    prompt: str, width: int, height: int, steps: int
+) -> tuple[dict | None, str | None, Exception | None]:
+    try:
+        result, rejection_reason = generate_image_with_quality_retry(
+            prompt, width, height, steps
+        )
+        return result, rejection_reason, None
+    except Exception as exc:
+        return None, None, exc
+
+
+def iter_generation_results(
+    prompts: list[str],
+    width: int,
+    height: int,
+    steps: int,
+    concurrency: int,
+    on_submit: Callable[[int, str], None] | None = None,
+) -> Iterator[
+    tuple[int, str, tuple[dict | None, str | None, Exception | None]]
+]:
+    """Yield worker results in prompt order with bounded requests in flight."""
+    if concurrency <= 1:
+        for index, prompt in enumerate(prompts):
+            if on_submit is not None:
+                on_submit(index, prompt)
+            yield index, prompt, _generate_image_worker(prompt, width, height, steps)
+        return
+
+    prompt_iter = iter(enumerate(prompts))
+    in_flight: deque[tuple[int, str, Future]] = deque()
+    executor = ThreadPoolExecutor(
+        max_workers=concurrency, thread_name_prefix="image-generator"
+    )
+    try:
+        # Keep one queued wave so serialized image/DB writes do not leave worker
+        # slots empty between ordered results.
+        for _ in range(concurrency * 2):
+            try:
+                index, prompt = next(prompt_iter)
+            except StopIteration:
+                break
+            if on_submit is not None:
+                on_submit(index, prompt)
+            future = executor.submit(
+                _generate_image_worker, prompt, width, height, steps
+            )
+            in_flight.append((index, prompt, future))
+
+        while in_flight:
+            index, prompt, future = in_flight.popleft()
+            worker_result = future.result()
+            try:
+                next_index, next_prompt = next(prompt_iter)
+            except StopIteration:
+                pass
+            else:
+                if on_submit is not None:
+                    on_submit(next_index, next_prompt)
+                next_future = executor.submit(
+                    _generate_image_worker, next_prompt, width, height, steps
+                )
+                in_flight.append((next_index, next_prompt, next_future))
+            yield index, prompt, worker_result
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
+def save_and_insert(api_result: dict, prompt: str, conn, model: str = "zimage") -> bool:
     """Decode image, save all sizes + latent, insert into DB. Returns True on success."""
     img_b64 = api_result.get("image_base64")
     if not img_b64:
@@ -357,11 +443,23 @@ def save_and_insert(api_result: dict, prompt: str, conn) -> bool:
             (img_id, prompt,
              api_result.get("width", img.width), api_result.get("height", img.height),
              paths.get("originals", ""), paths.get("thumbs", ""), paths.get("medium", ""),
-             file_size, "zimage", api_result.get("seed", 0),
+             file_size, model, api_result.get("seed", 0),
              api_result.get("num_inference_steps", 9), latent_path),
         )
     conn.commit()
     return True
+
+
+def trigger_reindex():
+    server_url = os.getenv("GO_SERVER_URL", "http://localhost:8095")
+    try:
+        resp = requests.post(f"{server_url}/api/search/reindex", timeout=10)
+        if resp.status_code == 202:
+            print(f"[reindex] Triggered search index rebuild on {server_url}")
+        else:
+            print(f"[reindex] Reindex returned {resp.status_code} (manual restart may be needed)")
+    except Exception as e:
+        print(f"[reindex] Could not trigger reindex: {e}")
 
 
 def estimate_storage(count: int) -> str:
@@ -379,13 +477,23 @@ def main():
     parser.add_argument("--height", type=int, default=1024, help="Image height")
     parser.add_argument("--steps", type=int, default=8, help="Inference steps (8 for Z-Image Turbo)")
     parser.add_argument("--offset", type=int, default=0, help="Skip first N prompts")
+    parser.add_argument("--prompts-file", default=str(PROMPTS_FILE), help="JSONL prompts file")
     parser.add_argument("--dry-run", action="store_true", help="Just count pending, don't generate")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Number of image requests in flight (default: 1)",
+    )
     args = parser.parse_args()
+    if args.concurrency < 1:
+        parser.error("--concurrency must be at least 1")
 
     print("=== CuteDSL Bulk Image Generator ===")
     print(f"Backend:   {BACKEND}" + (f" (fal.ai Flux Schnell)" if BACKEND == "fal" else f" ({INFERENCE_URL})"))
     print(f"Storage:   {IMAGES_DIR}")
     print(f"Size:      {args.width}x{args.height}, {args.steps} steps")
+    print(f"Concurrency: {args.concurrency}")
 
     conn = get_db()
 
@@ -394,8 +502,8 @@ def main():
     print(f"Already generated: {len(existing):,}")
 
     # Load prompts
-    print("Loading prompts...")
-    all_prompts = load_all_prompts()
+    print(f"Loading prompts from {args.prompts_file}...")
+    all_prompts = load_all_prompts(Path(args.prompts_file))
     print(f"Total prompts: {len(all_prompts):,}")
 
     # Filter to ungenerated
@@ -424,18 +532,26 @@ def main():
 
     success = 0
     failed = 0
+    last_reindex = 0
     consecutive_fails = 0
     start = time.time()
 
-    for i, prompt in enumerate(pending):
-        if shutdown_requested:
-            print("\n[!] Shutting down gracefully")
-            break
-
+    def print_progress(index: int, prompt: str) -> None:
         short = (prompt[:70] + "...") if len(prompt) > 70 else prompt
-        print(f"[{i+1:,}/{len(pending):,}] {short}")
+        print(f"[{index+1:,}/{len(pending):,}] {short}")
 
-        result, rejection_reason = generate_image_with_quality_retry(prompt, args.width, args.height, args.steps)
+    generation_results = iter_generation_results(
+        pending,
+        args.width,
+        args.height,
+        args.steps,
+        args.concurrency,
+        on_submit=print_progress,
+    )
+    for i, prompt, worker_result in generation_results:
+        result, rejection_reason, worker_error = worker_result
+        if worker_error is not None:
+            print(f"  Worker error: {worker_error}")
         if result and save_and_insert(result, prompt, conn):
             success += 1
             consecutive_fails = 0
@@ -470,6 +586,15 @@ def main():
             print(f"  --- {success:,} ok, {failed:,} fail | "
                   f"{rate:.1f} img/s | ETA {eta_h:.1f}h | disk {disk_used:.1f} GB ---")
 
+        if success - last_reindex >= 2000:
+            trigger_reindex()
+            last_reindex = success
+
+        if shutdown_requested:
+            print("\n[!] Shutting down gracefully")
+            generation_results.close()
+            break
+
     elapsed = time.time() - start
     rate = success / max(elapsed, 1)
     print(f"\n=== Done ===")
@@ -479,15 +604,7 @@ def main():
 
     # Trigger search index rebuild so new images become searchable immediately
     if success > 0:
-        server_url = os.getenv("GO_SERVER_URL", "http://localhost:8095")
-        try:
-            resp = requests.post(f"{server_url}/api/search/reindex", timeout=10)
-            if resp.status_code == 202:
-                print(f"[reindex] Triggered search index rebuild on {server_url}")
-            else:
-                print(f"[reindex] Reindex returned {resp.status_code} (manual restart may be needed)")
-        except Exception as e:
-            print(f"[reindex] Could not trigger reindex: {e}")
+        trigger_reindex()
 
     conn.close()
 

@@ -1,0 +1,78 @@
+{
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_slug": "nvidia-geforce-rtx-5090",
+  "capability": [
+    12,
+    0
+  ],
+  "steps": 4,
+  "width": 1024,
+  "height": 1024,
+  "psnr_min": 32.0,
+  "configs": [
+    {
+      "name": "bf16",
+      "quant": "none",
+      "skip_patterns": [],
+      "skip_first_last": false,
+      "latency_s": 1.8038,
+      "quality": {
+        "latent_mse": 0.0,
+        "psnr": 99.0
+      },
+      "pareto": true
+    },
+    {
+      "name": "nvfp4-all",
+      "quant": "nvfp4",
+      "skip_patterns": [],
+      "skip_first_last": false,
+      "latency_s": 3.5691,
+      "quality": {
+        "latent_mse": 0.168971,
+        "psnr": 18.65
+      },
+      "pareto": false
+    },
+    {
+      "name": "nvfp4-skip-first-last",
+      "quant": "nvfp4",
+      "skip_patterns": [],
+      "skip_first_last": true,
+      "latency_s": 3.5453,
+      "quality": {
+        "latent_mse": 0.167701,
+        "psnr": 18.7
+      },
+      "pareto": false
+    },
+    {
+      "name": "nvfp4-skip-first-last-emb",
+      "quant": "nvfp4",
+      "skip_patterns": [
+        "embed",
+        "embedder",
+        "time_",
+        "t_embedder",
+        "cap_",
+        "context_",
+        "caption",
+        "patch_",
+        "pos_",
+        "norm",
+        "proj_out",
+        "final_layer",
+        "lm_head"
+      ],
+      "skip_first_last": true,
+      "latency_s": 3.3982,
+      "quality": {
+        "latent_mse": 0.16055,
+        "psnr": 18.71
+      },
+      "pareto": false
+    }
+  ],
+  "chosen": "bf16",
+  "created_at": 1783316036.230958
+}

@@ -38,6 +38,15 @@ def apply_lora_template(lora: LoRAMetadata, prompt: str) -> str:
 def get_all_zimage_loras() -> list[LoRAMetadata]:
     loras = [
         LoRAMetadata(
+            id="zimage_360",
+            name="Z-Image 360 Panorama",
+            trigger_word="360panorama",
+            template="360panorama, equirectangular projection, seamless left-right wrap, centered level horizon, {prompt}",
+            url="https://netwrckstatic.netwrck.com/static/loras/Z-Image_360.safetensors",
+            keywords=["360 panorama", "360panorama", "equirectangular", "panorama", "skybox", "vr environment", "world environment", "immersive scene", "interior panorama", "exterior panorama"],
+            negative_keywords=["portrait", "headshot", "product photo", "logo", "flat illustration", "close-up"],
+        ),
+        LoRAMetadata(
             id="mecha_klein",
             name="Mecha Klein",
             trigger_word="mecha",
@@ -54,6 +63,8 @@ def get_all_zimage_loras() -> list[LoRAMetadata]:
             url="https://netwrckstatic.netwrck.com/static/loras/anime_blend_real_life%20SERENITY%20style.safetensors",
             keywords=["anime real life", "serenity style", "anime blend", "realistic anime", "semi-realistic", "anime portrait", "beautiful anime", "soft anime", "anime character", "anime girl", "anime boy", "serene anime"],
             negative_keywords=["cartoon", "chibi", "simple", "abstract", "pixel art"],
+            # instruction_eval 2026-07-10: 0.8 keeps contrast acc 0.83 (0.80 @1.0, worse @1.2)
+            scale=0.8,
         ),
         LoRAMetadata(
             id="colorful_pop_art",
@@ -423,6 +434,8 @@ def _get_netwrck_extra_zimage_loras() -> list[LoRAMetadata]:
             url="https://netwrckstatic.netwrck.com/static/loras/The%20Look%20naturalfacesandexpressions.safetensors",
             keywords=["natural faces", "expressions", "portrait", "realistic face", "subtle lighting", "staring wondering girl woman", "glamorous beauty", "fashion editorial", "elegant dress", "alluring woman", "handsome man", "strong jawline", "tailored suit", "luxury editorial", "confident expression", "beauty portrait"],
             negative_keywords=["cartoon", "anime", "mask", "overstated", "exaggerated breasts", "ahegao", "tongue out"],
+            # instruction_eval 2026-07-10: 0.8 = acc .825/clip .315; 1.0 dips acc to .775
+            scale=0.8,
         ),
         LoRAMetadata(
             id="vintage_travel_poster",
@@ -504,6 +517,33 @@ def _get_netwrck_extra_zimage_loras() -> list[LoRAMetadata]:
             url="https://netwrckstatic.netwrck.com/static/loras/ZIT-V6.safetensors",
             keywords=["zit", "z image", "v6", "turbo", "anime", "illustration"],
             negative_keywords=["sdxl", "realistic photo", "plain", "minimal"],
+        ),
+        LoRAMetadata(
+            # Trained 2026-07-11 on logo-wizard/modern-logo-dataset top-160 by
+            # aesthetic score (800 steps, r16, 512px, RunPod). PEFT format.
+            id="app_logo_maker",
+            name="App Logo Maker",
+            trigger_word="applogo",
+            template="applogo, {prompt}, vector logo, white background",
+            url="https://appstatic.app.nz/cutedsl/loras/4722c6c2-4b3b-4ab3-83f9-05e29d7af892/adapter_model.safetensors",
+            keywords=["logo", "app logo", "app icon", "brand logo", "logotype", "brand identity", "minimal logo", "startup logo", "icon design", "emblem", "badge design", "company logo", "logo design"],
+            negative_keywords=["photo", "photograph", "portrait", "landscape", "realistic", "scenery", "screenshot"],
+            # new_lora_eval 2026-07-11: 0.8 beats baseline on clip .311 vs .292 and aes 4.97 vs 4.79
+            scale=0.8,
+        ),
+        LoRAMetadata(
+            # Trained 2026-07-11 on agentsea/wave-ui-25k real UI screenshots,
+            # top-160 by aesthetic score (800 steps, r16, 512px, RunPod). PEFT format.
+            id="product_screenshots",
+            name="Product Screenshots",
+            trigger_word="prodshot",
+            template="prodshot, {prompt}, clean modern app interface screenshot",
+            url="https://appstatic.app.nz/cutedsl/loras/487e2209-f5d9-4089-9534-193d87d898e7/adapter_model.safetensors",
+            keywords=["screenshot", "app screenshot", "ui", "user interface", "web app", "dashboard", "landing page", "mobile app screen", "saas", "product ui", "app store screenshot", "website design", "ui design", "mockup"],
+            negative_keywords=["photo", "portrait", "landscape", "painting", "anime", "logo"],
+            # new_lora_eval 2026-07-11: 0.8 only safe scale (aes 4.67 vs 4.59 base; 1.0+ degrades);
+            # clip alignment slightly below baseline — review images before promoting further
+            scale=0.8,
         ),
     ]
 

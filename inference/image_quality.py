@@ -146,6 +146,80 @@ def compact_prompt(prompt: str, max_chars: int = 500) -> str:
     return shortened[:max_chars].rsplit(" ", 1)[0].strip(" ,.")
 
 
+PERSON_TERMS = frozenset({
+    "person", "people", "human", "man", "men", "woman", "women", "girl",
+    "girls", "boy", "boys", "guy", "guys", "lady", "ladies", "gentleman",
+    "portrait", "face", "selfie", "model", "couple", "child", "children",
+    "kid", "kids", "baby", "bride", "groom", "king", "queen", "prince",
+    "princess", "elf", "warrior", "knight", "wizard", "witch", "hero",
+    "heroine", "dancer", "singer", "chef", "doctor", "nurse", "teacher",
+    "soldier", "pirate", "samurai", "ninja", "astronaut", "cowboy",
+    "character", "actress", "actor", "goddess", "god", "mermaid", "vampire",
+})
+
+_STYLE_MARKERS = (
+    "masterpiece", "best quality", "high quality", "award-winning",
+    "award winning", "8k", "4k", "uhd", "highly detailed", "ultra detailed",
+    "ultra-detailed", "aesthetic", "trending on artstation",
+)
+
+# Winning variant from suffix_sweep.py (LAION aesthetic scorer, 2026-07-10):
+# person mean 6.60 vs 6.24 baseline, scene 6.15 vs 5.99, floors up ~0.4.
+PERSON_SUFFIX = (
+    "stunningly beautiful, radiant, captured in dramatic painterly light "
+    "with exquisite detail, award-winning portrait"
+)
+SCENE_SUFFIX = (
+    "breathtaking dramatic light and shadow, exquisite detail, "
+    "award-winning landscape photography"
+)
+
+
+_COUNT_WORDS = frozenset({
+    "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "both", "pair", "couple", "trio", "group",
+})
+_RELATION_TERMS = frozenset({
+    "riding", "hugging", "holding", "carrying", "juggling", "stacked",
+    "wearing", "chasing", "fighting", "kissing", "shaking", "pouring",
+    "feeding", "pushing", "pulling", "climbing", "balancing", "watering",
+    "above", "below", "beside", "between", "behind", "inside", "under",
+})
+
+
+def is_compositional_prompt(prompt: str) -> bool:
+    """Counts, spatial relations, or multi-subject interactions — where extra
+    style tokens measurably hurt instruction following (contrast acc 0.85->0.75)."""
+    lower = prompt.lower()
+    if re.search(r"\b\d+\b", lower):
+        return True
+    tokens = set(re.findall(r"[a-z']+", lower))
+    return bool(tokens & _COUNT_WORDS or tokens & _RELATION_TERMS)
+
+
+def is_person_prompt(prompt: str) -> bool:
+    tokens = re.findall(r"[a-z']+", prompt.lower())
+    return any(token in PERSON_TERMS for token in tokens)
+
+
+def enhance_prompt(prompt: str, max_chars: int = 560) -> str:
+    """Append aesthetic guidance unless the prompt is already style-engineered."""
+    cleaned = compact_prompt(prompt)
+    lower = cleaned.lower()
+    if any(marker in lower for marker in _STYLE_MARKERS):
+        return cleaned
+    if is_compositional_prompt(cleaned):
+        return cleaned
+    suffix = PERSON_SUFFIX if is_person_prompt(cleaned) else SCENE_SUFFIX
+    parts = [part.strip() for part in suffix.split(",") if part.strip().lower() not in lower]
+    if not parts:
+        return cleaned
+    enhanced = f"{cleaned}, {', '.join(parts)}"
+    if len(enhanced) > max_chars:
+        return cleaned
+    return enhanced
+
+
 def retry_prompt(prompt: str, max_chars: int = 360) -> str:
     """Build a shorter retry prompt for failed or bumpy generations."""
     suffix = "clean smooth detailed coherent image"
