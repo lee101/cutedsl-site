@@ -6,6 +6,7 @@ import Image from 'next/image';
 import { ArrowLeft, Upload, X, Loader2, Play, Lock, Sparkles, Check } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
 import { staticAssetPath } from '@/lib/static-assets';
+import { uploadToBucket } from '@/lib/uploads';
 
 const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
@@ -37,6 +38,8 @@ export default function LoraTrainerPage() {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [datasetName, setDatasetName] = useState('');
   const [modelType, setModelType] = useState<'zimage' | 'chronos2'>('zimage');
+  const [datasetMode, setDatasetMode] = useState<'standard' | 'texture'>('standard');
+  const [minTileability, setMinTileability] = useState(0.72);
   const [loraR, setLoraR] = useState(16);
   const [loraAlpha, setLoraAlpha] = useState(32);
   const [learningRate, setLearningRate] = useState(0.0001);
@@ -110,40 +113,22 @@ export default function LoraTrainerPage() {
   };
 
   // Upload one file via presigned PUT, returns the public URL
-  const uploadOne = async (item: UploadItem, dataset: string, idx: number): Promise<string> => {
-    const presignRes = await fetch(
-      `/api/uploads/presign?filename=${encodeURIComponent(item.file.name)}&content_type=${encodeURIComponent(item.file.type || 'image/jpeg')}&dataset=${encodeURIComponent(dataset)}`,
-      { headers: { Authorization: `Bearer ${apiKey}` } }
-    );
-    if (!presignRes.ok) {
-      const e = await presignRes.json().catch(() => ({}));
-      throw new Error(e.error || `Presign failed (${presignRes.status})`);
-    }
-    const { upload_url, public_url } = await presignRes.json();
-
-    // PUT direct to R2 using XHR for progress
-    await new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', upload_url);
-      xhr.setRequestHeader('Content-Type', item.file.type || 'application/octet-stream');
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 100);
-          setItems(prev => prev.map((it, i) => (i === idx ? { ...it, progress: pct } : it)));
-        }
-      });
-      xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Upload failed: ${xhr.status} ${xhr.responseText}`));
-      xhr.onerror = () => reject(new Error('Network error during upload'));
-      xhr.send(item.file);
+  const uploadOne = (item: UploadItem, dataset: string, idx: number): Promise<string> =>
+    uploadToBucket(item.file, {
+      apiKey,
+      dataset,
+      filename: item.file.name,
+      contentType: item.file.type || 'image/jpeg',
+      onProgress: pct => setItems(prev => prev.map((it, i) => (i === idx ? { ...it, progress: pct } : it))),
     });
-
-    return public_url;
-  };
 
   const startTraining = async () => {
     setError(null);
     if (!datasetName.trim()) { setError('Dataset name is required'); return; }
-    if (items.length === 0) { setError('Add at least one image'); return; }
+    if (items.length < (datasetMode === 'texture' ? 2 : 1)) {
+      setError(datasetMode === 'texture' ? 'Add at least two verified seamless tiles' : 'Add at least one image');
+      return;
+    }
 
     setIsUploading(true);
     const uploadedUrls: string[] = [];
@@ -163,7 +148,10 @@ export default function LoraTrainerPage() {
         }
       }
 
-      if (uploadedUrls.length === 0) throw new Error('All uploads failed');
+      const minimumUploads = datasetMode === 'texture' ? 2 : 1;
+      if (uploadedUrls.length < minimumUploads) {
+        throw new Error(datasetMode === 'texture' ? 'At least two texture uploads must succeed' : 'All uploads failed');
+      }
 
       setIsUploading(false);
       setIsTraining(true);
@@ -183,6 +171,8 @@ export default function LoraTrainerPage() {
           lora_alpha: loraAlpha,
           learning_rate: learningRate,
           num_steps: numSteps,
+          dataset_mode: datasetMode,
+          min_tileability: minTileability,
         }),
       });
       const data = await trainRes.json();
@@ -259,6 +249,42 @@ export default function LoraTrainerPage() {
                   </select>
                 </div>
               </div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Training objective</label>
+                  <select
+                    value={datasetMode}
+                    onChange={(e) => {
+                      const mode = e.target.value as 'standard' | 'texture';
+                      setDatasetMode(mode);
+                      if (mode === 'texture') setModelType('zimage');
+                    }}
+                    className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-300"
+                  >
+                    <option value="standard">General image / style LoRA</option>
+                    <option value="texture">Seamless texture LoRA (toroidal)</option>
+                  </select>
+                </div>
+                {datasetMode === 'texture' && (
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-1">Minimum tileability score</label>
+                    <input
+                      type="number"
+                      min="0.5"
+                      max="0.98"
+                      step="0.01"
+                      value={minTileability}
+                      onChange={(e) => setMinTileability(Math.max(0.5, Math.min(0.98, Number(e.target.value) || 0.72)))}
+                      className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-300"
+                    />
+                  </div>
+                )}
+              </div>
+              {datasetMode === 'texture' && (
+                <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm leading-6 text-emerald-900">
+                  Texture mode rejects examples with visible wrap seams before charging GPU time, then applies random cyclic latent rolls during every training step. Use source tiles from the <a className="font-bold underline" href="https://app.nz/textures">app.nz verified texture bank</a>; do not upload 2×2 preview images.
+                </div>
+              )}
             </section>
 
             {/* Image upload */}
@@ -274,7 +300,7 @@ export default function LoraTrainerPage() {
               >
                 <Upload size={32} className="text-slate-400 mx-auto mb-2" />
                 <p className="text-slate-600 font-medium">Drag & drop images here, or click to browse</p>
-                <p className="text-xs text-slate-400 mt-1">JPG, PNG, WebP. 10–50 images recommended.</p>
+                <p className="text-xs text-slate-400 mt-1">JPG, PNG, WebP. {datasetMode === 'texture' ? 'Use 16–100 individually verified source tiles.' : '10–50 images recommended.'}</p>
                 <input
                   ref={fileInputRef}
                   type="file"

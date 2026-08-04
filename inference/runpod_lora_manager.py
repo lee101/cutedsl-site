@@ -147,9 +147,8 @@ def _worker_script_b64() -> str:
 
 def _bootstrap_command() -> str:
     return (
-        "set -euo pipefail\n"
-        "python -m pip install --upgrade pip\n"
-        "python -m pip install --no-cache-dir diffusers transformers accelerate peft safetensors boto3 httpx pillow numpy\n"
+        "set -uo pipefail\n"
+        "for i in 1 2 3; do python -m pip install --no-cache-dir diffusers transformers accelerate peft safetensors boto3 httpx pillow numpy && break; sleep 15; done\n"
         "mkdir -p /workspace/cutedsl-lora-worker\n"
         "python - <<'PY'\n"
         "import base64, os, pathlib\n"
@@ -232,7 +231,7 @@ def _start_runpod_pod_training(jobs: dict[str, dict], job_id: str, payload: dict
 
     body = {
         "name": f"cutedsl-lora-{job_id[:8]}",
-        "imageName": os.getenv("RUNPOD_LORA_IMAGE", "runpod/pytorch:2.8.0-py3.11-cuda12.8-cudnn-devel-ubuntu22.04"),
+        "imageName": os.getenv("RUNPOD_LORA_IMAGE", "runpod/pytorch:1.0.7-cu1281-torch280-ubuntu2204"),
         "computeType": "GPU",
         "cloudType": os.getenv("RUNPOD_LORA_CLOUD_TYPE", "COMMUNITY"),
         "gpuTypeIds": [g.strip() for g in os.getenv("RUNPOD_LORA_GPU_TYPE_IDS", "NVIDIA GeForce RTX 4090,NVIDIA GeForce RTX 3090,NVIDIA RTX A5000,NVIDIA L4").split(",") if g.strip()],

@@ -3250,6 +3250,18 @@ class LoRATrainRequest(BaseModel):
     num_steps: int = 1000
     batch_size: int = 32
     train_size: Optional[int] = None
+    # "texture" enables a verified, toroidal-augmentation training path.
+    dataset_mode: str = "standard"
+    min_tileability: float = 0.72
+
+
+def _validate_training_mode(model: str, dataset_mode: str, min_tileability: float) -> None:
+    if dataset_mode not in ("standard", "texture"):
+        raise HTTPException(400, "dataset_mode must be 'standard' or 'texture'")
+    if not 0.0 < min_tileability <= 1.0:
+        raise HTTPException(400, "min_tileability must be in (0, 1]")
+    if dataset_mode == "texture" and model != "zimage":
+        raise HTTPException(400, "texture dataset mode currently supports zimage only")
 
 
 def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
@@ -3409,6 +3421,31 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         )
         if not image_paths:
             raise ValueError(f"no images found in {ds_dir}")
+
+        if req.dataset_mode == "texture":
+            from texture_quality import measure_tileability
+
+            verified_paths = []
+            tile_scores = []
+            for image_path in image_paths:
+                try:
+                    with PILImage.open(image_path) as candidate:
+                        metrics = measure_tileability(candidate, threshold=req.min_tileability)
+                    tile_scores.append(metrics.score)
+                    if metrics.verified:
+                        verified_paths.append(image_path)
+                except Exception as quality_err:
+                    logger.warning("Tileability check failed for %s: %s", os.path.basename(image_path), quality_err)
+            image_paths = verified_paths
+            job["tileability"] = {
+                "accepted": len(verified_paths),
+                "checked": len(tile_scores),
+                "minimum": req.min_tileability,
+                "mean_score": (sum(tile_scores) / len(tile_scores)) if tile_scores else 0,
+            }
+            _save_training_job(job_id)
+            if len(image_paths) < 2:
+                raise ValueError("texture training needs at least two tiles that pass the tileability gate")
         logger.info("Training job %s: %d images in dataset %s", job_id, len(image_paths), req.dataset_name)
 
         captions = {}
@@ -3419,6 +3456,11 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
                     captions[img_path] = f.read().strip() or "a photo"
             else:
                 captions[img_path] = "a photo"
+
+        if req.dataset_mode == "texture":
+            for img_path, caption in captions.items():
+                if "seamless" not in caption.lower():
+                    captions[img_path] = f"seamless tileable texture, {caption}"
 
         job["dataset_size"] = len(image_paths)
         job["status"] = "loading_model"
@@ -3550,12 +3592,20 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
                 continue
 
             try:
+                train_latent = latent
+                if req.dataset_mode == "texture":
+                    # Cyclic translation makes seam position uniformly random.
+                    # It preserves exact periodicity and discourages the LoRA
+                    # from treating any canvas edge as a privileged boundary.
+                    shift_y = int(torch.randint(0, latent.shape[-2], (1,)).item())
+                    shift_x = int(torch.randint(0, latent.shape[-1], (1,)).item())
+                    train_latent = torch.roll(latent, shifts=(shift_y, shift_x), dims=(-2, -1))
                 t_sample = torch.rand(1, device=DEVICE).to(DTYPE)
                 timestep = t_sample.expand(1)
 
-                noise = torch.randn_like(latent)
-                x_t = (1.0 - t_sample) * noise + t_sample * latent
-                target = latent - noise  # rectified flow velocity
+                noise = torch.randn_like(train_latent)
+                x_t = (1.0 - t_sample) * noise + t_sample * train_latent
+                target = train_latent - noise  # rectified flow velocity
 
                 x_in = x_t.unsqueeze(2)  # (1, C, 1, H, W)
                 x_list = list(x_in.unbind(0))
@@ -3668,6 +3718,8 @@ class LoRATrainFromURLsRequest(BaseModel):
     num_steps: int = 500
     batch_size: int = 1
     train_size: Optional[int] = None
+    dataset_mode: str = "standard"
+    min_tileability: float = 0.72
 
 
 @app.post("/train/from_urls")
@@ -3677,6 +3729,7 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         raise HTTPException(400, "model must be 'zimage' or 'chronos2'")
     if not req.image_urls:
         raise HTTPException(400, "image_urls must be non-empty")
+    _validate_training_mode(req.model, req.dataset_mode, req.min_tileability)
 
     if runpod_enabled():
         if req.model != "zimage":
@@ -3757,6 +3810,8 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         num_steps=req.num_steps,
         batch_size=req.batch_size,
         train_size=req.train_size,
+        dataset_mode=req.dataset_mode,
+        min_tileability=req.min_tileability,
     )
 
     job_id = str(uuid.uuid4())
@@ -3768,6 +3823,7 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         "progress": 0.0,
         "created_at": time.time(),
         "image_count": downloaded,
+        "dataset_mode": req.dataset_mode,
     }
     _save_training_job(job_id)
 
@@ -3806,6 +3862,7 @@ def start_training(req: LoRATrainRequest):
     """Start an async LoRA training job."""
     if req.model not in ("zimage", "chronos2"):
         raise HTTPException(400, "model must be 'zimage' or 'chronos2'")
+    _validate_training_mode(req.model, req.dataset_mode, req.min_tileability)
 
     job_id = str(uuid.uuid4())
     training_jobs[job_id] = {

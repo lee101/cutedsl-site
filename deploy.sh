@@ -3,6 +3,13 @@
 # Multi-tenant R2 bucket: appstatic (shared with app.nz, deepsite, etc.)
 set -e
 
+DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/tmp/cutedsl-site-deploy.lock}"
+exec 9>"$DEPLOY_LOCK_FILE"
+if ! flock -n 9; then
+    echo "ERROR: another CuteDSL deployment is already running"
+    exit 1
+fi
+
 echo "=== CuteDSL Site Deploy ==="
 echo ""
 
@@ -60,6 +67,18 @@ fi
 if [ -d "$OUT_DIR/images" ]; then
     "${AWS[@]}" s3 sync "$OUT_DIR/images" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/images/" "${SYNC_OPTS[@]}" --delete \
         --cache-control "public, max-age=31536000, immutable"
+fi
+
+# Do not publish route HTML until every hashed asset is present. A missing
+# chunk turns a successful 200 response into a client-side ChunkLoadError.
+asset_drift=$("${AWS[@]}" s3 sync "$OUT_DIR/_next" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/_next/" "${SYNC_OPTS[@]}" --delete \
+    --exclude '*.map' \
+    --cache-control "public, max-age=31536000, immutable" \
+    --dryrun)
+if [ -n "$asset_drift" ]; then
+    echo "ERROR: static asset upload did not converge; refusing to publish route HTML"
+    echo "$asset_drift" | head -20
+    exit 1
 fi
 
 "${AWS[@]}" s3 sync "$OUT_DIR" "s3://$R2_BUCKET/$BUCKET_PATH/" "${SYNC_OPTS[@]}" \

@@ -276,6 +276,10 @@ func handleStartLoraTraining(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 401, "invalid API key")
 		return
 	}
+	if err := validateLoraTrainingURLs(ctx.PostBody()); err != nil {
+		jsonError(ctx, 400, err.Error())
+		return
+	}
 
 	// Charge first
 	cuteCost := getServicePriceCUTE("lora_training")
@@ -330,4 +334,24 @@ func handleStartLoraTraining(ctx *fasthttp.RequestCtx) {
 		"credits_remain": newBalance,
 		"usd_equivalent": usdEquiv,
 	})
+}
+
+func validateLoraTrainingURLs(body []byte) error {
+	var request struct {
+		ImageURLs []string `json:"image_urls"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return fmt.Errorf("invalid training request")
+	}
+	if len(request.ImageURLs) < 1 || len(request.ImageURLs) > 100 {
+		return fmt.Errorf("image_urls must contain 1-100 uploaded images")
+	}
+	prefix := "/" + strings.Trim(r2PathPrefix, "/") + "/"
+	for _, rawURL := range request.ImageURLs {
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Hostname(), r2PublicHost) || parsed.Port() != "" || parsed.User != nil || !strings.HasPrefix(parsed.EscapedPath(), prefix) {
+			return fmt.Errorf("image_urls must use this account's uploaded dataset assets")
+		}
+	}
+	return nil
 }
