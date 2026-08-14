@@ -219,6 +219,30 @@ func (db *DB) migrate() error {
 	-- Full-text search via pg_trgm (fast ILIKE with GIN index)
 	CREATE EXTENSION IF NOT EXISTS pg_trgm;
 	CREATE INDEX IF NOT EXISTS idx_images_prompt_trgm ON generated_images USING GIN (prompt gin_trgm_ops);
+
+	CREATE TABLE IF NOT EXISTS generation_jobs (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		provider TEXT NOT NULL DEFAULT 'manifoldgen',
+		provider_job_id TEXT NOT NULL,
+		service TEXT NOT NULL DEFAULT 'video',
+		kind TEXT NOT NULL DEFAULT 'video',
+		status TEXT NOT NULL DEFAULT 'queued',
+		prompt TEXT NOT NULL,
+		result JSONB DEFAULT '{}'::jsonb,
+		error TEXT DEFAULT '',
+		is_public BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMPTZ DEFAULT NOW(),
+		updated_at TIMESTAMPTZ DEFAULT NOW(),
+		UNIQUE(provider, provider_job_id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_generation_jobs_user_created
+		ON generation_jobs(user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_generation_jobs_public_created
+		ON generation_jobs(is_public, created_at DESC) WHERE is_public = TRUE;
+	CREATE INDEX IF NOT EXISTS idx_generation_jobs_status
+		ON generation_jobs(status) WHERE status IN ('queued', 'processing');
 	`
 
 	_, err := db.conn.Exec(schema)

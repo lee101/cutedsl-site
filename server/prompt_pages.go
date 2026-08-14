@@ -329,6 +329,7 @@ footer a{color:#db2777}
         <a href="/" class="btn btn-primary">✨ Generate similar image</a>
         <a href="{{.FullImageURL}}" download class="btn btn-download">⬇ Download full resolution</a>
         <button onclick="navigator.clipboard.writeText(this.dataset.p);this.textContent='✓ Copied!';setTimeout(()=>this.textContent='📋 Copy prompt',2000)" data-p="{{.CopyPrompt}}" class="btn btn-secondary">📋 Copy prompt</button>
+        <button onclick="if(navigator.share){navigator.share({title:'CuteDSL AI artwork',text:this.dataset.p,url:location.href})}else{navigator.clipboard.writeText(location.href);this.textContent='✓ Link copied';setTimeout(()=>this.textContent='↗ Share image',2000)}" data-p="{{.CopyPrompt}}" class="btn btn-secondary">↗ Share image</button>
       </div>
 
       <div class="section-title">Details</div>
@@ -615,6 +616,8 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 
 	// Curated tag sitemap (SEO-rich landing pages per tag)
 	sb.WriteString("  <sitemap><loc>" + host + "/sitemap-tags.xml</loc></sitemap>\n")
+	// Explicitly published ManifoldGen video jobs.
+	sb.WriteString("  <sitemap><loc>" + host + "/sitemap-videos.xml</loc></sitemap>\n")
 
 	// Paginated image sitemaps
 	for i := 1; i <= numImgMaps; i++ {
@@ -629,7 +632,7 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 func handleSitemapPages(ctx *fasthttp.RequestCtx) {
 	host := "https://cutedsl.cc"
 	pages := []string{
-		"/", "/search", "/gallery", "/playground", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
+		"/", "/search", "/gallery", "/playground", "/video-gallery", "/generations", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
 		"/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
 		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/lora_training",
 	}
@@ -654,7 +657,7 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 	offset := (page - 1) * sitemapPageSize
 
 	rows, err := dbConn.conn.Query(
-		`SELECT id, prompt, file_path, med_path, thumb_path FROM generated_images
+		`SELECT id, prompt, file_path, med_path, thumb_path, created_at FROM generated_images
 		 WHERE (is_nsfw = FALSE OR is_nsfw IS NULL)
 		 ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
 		sitemapPageSize, offset,
@@ -674,7 +677,8 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 	n := 0
 	for rows.Next() {
 		var id, prompt, fp, med, thumb string
-		if err := rows.Scan(&id, &prompt, &fp, &med, &thumb); err != nil {
+		var createdAt time.Time
+		if err := rows.Scan(&id, &prompt, &fp, &med, &thumb, &createdAt); err != nil {
 			continue
 		}
 		imgPath := fp
@@ -691,6 +695,7 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
 		fmt.Fprintf(&sb,
 			`  <url>
     <loc>%s/image/%s</loc>
+    <lastmod>%s</lastmod>
     <changefreq>monthly</changefreq>
     <image:image>
       <image:loc>%s/images/%s</image:loc>
@@ -698,7 +703,7 @@ func handleSitemapImages(ctx *fasthttp.RequestCtx, pageStr string) {
       <image:title>%s</image:title>
     </image:image>
   </url>
-`, host, slug, host, imgPath, caption, title)
+`, host, slug, createdAt.UTC().Format(time.RFC3339), host, imgPath, caption, title)
 		n++
 	}
 	sb.WriteString(`</urlset>` + "\n")

@@ -219,6 +219,13 @@ var tagsIndexTemplate = template.Must(template.New("tagsIdx").Parse(`<!DOCTYPE h
 <meta property="og:title" content="All AI Art Tags — CuteDSL">
 <meta property="og:description" content="Browse every curated tag in the CuteDSL AI art gallery.">
 <meta property="og:url" content="https://cutedsl.cc/tags">
+<meta property="og:image" content="https://appstatic.app.nz/cutedsl/images/og-image.webp">
+<meta property="og:image:width" content="1360">
+<meta property="og:image:height" content="768">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="All AI Art Tags — CuteDSL">
+<meta name="twitter:description" content="Browse curated AI art tags across fantasy, anime, landscapes, characters, styles, and more.">
+<meta name="twitter:image" content="https://appstatic.app.nz/cutedsl/images/og-image.webp">
 <style>
 body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:linear-gradient(135deg,#fef6fb 0%,#faf5ff 50%,#f0f9ff 100%);color:#1e293b;line-height:1.6}
 a{color:inherit;text-decoration:none}

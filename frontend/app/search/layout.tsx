@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 
+const socialImage = 'https://appstatic.app.nz/cutedsl/images/og-image.webp';
+
 export const metadata: Metadata = {
   title: 'Search — CuteDSL AI Art Gallery',
   description:
@@ -10,6 +12,13 @@ export const metadata: Metadata = {
     description:
       'Browse 100,000+ AI-generated images with prompt search. Powered by CuteDSL Z-Image Turbo.',
     url: 'https://cutedsl.cc/search',
+    images: [{ url: socialImage, width: 1360, height: 768, alt: 'Search the CuteDSL AI art gallery' }],
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Search the CuteDSL AI Art Gallery',
+    description: 'Search 100,000+ AI-generated images by prompt, subject, and visual style.',
+    images: [socialImage],
   },
 };
 

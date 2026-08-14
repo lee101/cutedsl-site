@@ -277,7 +277,10 @@ export default function Home() {
     const savedEmail = localStorage.getItem('cutedsl_email');
     if (savedEmail) setEmail(savedEmail);
     // ?test=true triggers e2e API test
-    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('test') === 'true') {
+    const query = new URLSearchParams(window.location.search);
+    const similarPrompt = query.get('prompt');
+    if (similarPrompt) setDemoPrompt(similarPrompt);
+    if (query.get('test') === 'true') {
       setTestMode(true);
       runE2ETests();
     }
@@ -1126,7 +1129,7 @@ export default function Home() {
 
       {/* Try It - Image Gen Demo */}
       {walletAddress && apiKey && (
-        <section className="py-16 relative z-10">
+        <section id="try-it" className="py-16 relative z-10 scroll-mt-6">
           <div className="max-w-4xl mx-auto px-6">
             <div className="bg-white/90 rounded-3xl p-8 border border-pink-200 shadow-lg">
               <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>

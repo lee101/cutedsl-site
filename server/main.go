@@ -134,6 +134,10 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		handleSitemapTags(ctx)
 		return
 	}
+	if path == "/sitemap-videos.xml" && isSitemapMethod {
+		handleSitemapVideos(ctx)
+		return
+	}
 
 	// Server-rendered prompt detail page (SEO). /prompt/<image_id>
 	if strings.HasPrefix(path, "/prompt/") && method == "GET" {
@@ -302,6 +306,20 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 
 	case path == "/api/images/count" && method == "GET":
 		handleImageCount(ctx)
+
+	// Durable ManifoldGen-backed generation queue and public video gallery.
+	case path == "/api/generations" && method == "POST":
+		handleCreateGeneration(ctx)
+	case path == "/api/generations" && method == "GET":
+		handleListGenerations(ctx)
+	case path == "/api/generations/pricing" && method == "GET":
+		handleGenerationPricing(ctx)
+	case strings.HasPrefix(path, "/api/generations/") && strings.HasSuffix(path, "/publish") && method == "POST":
+		handlePublishGeneration(ctx, strings.TrimSuffix(strings.TrimPrefix(path, "/api/generations/"), "/publish"))
+	case strings.HasPrefix(path, "/api/generations/") && method == "GET":
+		handleGetGeneration(ctx, strings.TrimPrefix(path, "/api/generations/"))
+	case path == "/api/videos" && method == "GET":
+		handlePublicVideos(ctx)
 
 	// Swap (buy $CUTEDSL via bags.fm liquidity pool)
 	case path == "/api/swap/quote" && method == "GET":
@@ -929,6 +947,10 @@ func handleImageSearch(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 500, "search failed")
 		return
 	}
+	// Gallery pages are public and immutable for their short cache window. Let
+	// browsers and the edge absorb repeat/infinite-scroll traffic while keeping
+	// newly generated art visible quickly.
+	ctx.Response.Header.Set("Cache-Control", "public, max-age=30, s-maxage=60, stale-while-revalidate=300")
 	jsonResponse(ctx, 200, result)
 }
 
@@ -939,6 +961,7 @@ func handleImageCount(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 500, "count failed")
 		return
 	}
+	ctx.Response.Header.Set("Cache-Control", "public, max-age=300, s-maxage=600, stale-while-revalidate=3600")
 	jsonResponse(ctx, 200, map[string]int{"count": count})
 }
 
