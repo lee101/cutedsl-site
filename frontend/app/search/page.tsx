@@ -6,6 +6,7 @@ import Image from 'next/image';
 import { Search, ArrowLeft, X, Loader2, ImageIcon, Wand2, ChevronDown } from 'lucide-react';
 import { useAutocomplete } from '@/hooks/use-autocomplete';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
+import { ShareButton } from '@/lib/share-button';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -57,8 +58,10 @@ export default function SearchPage() {
   const [imageCount, setImageCount] = useState(0);
   const [allowNSFW, setAllowNSFW] = useState(false);
   const [semanticSuggestions, setSemanticSuggestions] = useState<string[]>([]);
+  const [searchFocused, setSearchFocused] = useState(false);
   const loaderRef = useRef<HTMLDivElement>(null);
-  const autocomplete = useAutocomplete(searchInput);
+  const initializedRef = useRef(false);
+  const autocomplete = useAutocomplete(searchInput, searchFocused);
 
   // Fetch total image count on mount
   useEffect(() => {
@@ -107,9 +110,14 @@ export default function SearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allowNSFW]);
 
-  // Initial load
+  // Initial load, including searches linked from the gallery and tag pages.
   useEffect(() => {
-    fetchImages('', 1);
+    if (initializedRef.current) return;
+    initializedRef.current = true;
+    const initialQuery = new URLSearchParams(window.location.search).get('q')?.trim() || '';
+    setSearchInput(initialQuery);
+    setQuery(initialQuery);
+    fetchImages(initialQuery, 1);
   }, [fetchImages]);
 
   // Re-fetch when NSFW toggle changes
@@ -209,6 +217,7 @@ export default function SearchPage() {
               type="text"
               value={searchInput}
               onChange={e => setSearchInput(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
               onKeyDown={e => {
                 const result = autocomplete.handleKeyDown(e);
                 if (result && result !== 'handled') {
@@ -280,6 +289,15 @@ export default function SearchPage() {
                 <>{total.toLocaleString()} images</>
               )}
             </p>
+            <div className="flex items-center gap-3">
+              {query && (
+                <ShareButton
+                  title={`CuteDSL search: ${query}`}
+                  text={`Explore AI artwork matching “${query}”`}
+                  url={`/search?q=${encodeURIComponent(query)}`}
+                  className="inline-flex items-center gap-1.5 text-sm font-bold text-purple-600 hover:text-purple-700"
+                />
+              )}
             <label className="flex items-center gap-2 text-sm text-slate-500 cursor-pointer select-none">
               <span>NSFW</span>
               <button
@@ -289,6 +307,7 @@ export default function SearchPage() {
                 <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${allowNSFW ? 'translate-x-5' : ''}`} />
               </button>
             </label>
+            </div>
           </div>
         )}
 
@@ -408,6 +427,12 @@ export default function SearchPage() {
                 >
                   Copy Prompt
                 </button>
+                <ShareButton
+                  title="CuteDSL AI artwork"
+                  text={selectedImage.prompt}
+                  url={`/image/${imageSlug(selectedImage.id, selectedImage.prompt)}`}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 bg-purple-50 text-purple-700 rounded-xl font-bold hover:bg-purple-100 transition-colors text-sm"
+                />
               </div>
             </div>
           </div>
