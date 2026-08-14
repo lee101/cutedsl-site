@@ -3,10 +3,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { Search, ArrowLeft, X, Loader2, ImageIcon, Wand2, ChevronDown } from 'lucide-react';
+import { Search, ArrowLeft, X, Loader2, ImageIcon, Wand2, ChevronDown, SlidersHorizontal } from 'lucide-react';
 import { useAutocomplete } from '@/hooks/use-autocomplete';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
 import { ShareButton } from '@/lib/share-button';
+import { MediaGradeEditor } from '@/lib/media-grade-editor';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -55,6 +56,7 @@ export default function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [initialLoad, setInitialLoad] = useState(true);
   const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
+  const [editingImage, setEditingImage] = useState(false);
   const [imageCount, setImageCount] = useState(0);
   const [allowNSFW, setAllowNSFW] = useState(false);
   const [semanticSuggestions, setSemanticSuggestions] = useState<string[]>([]);
@@ -433,11 +435,14 @@ export default function SearchPage() {
                   url={`/image/${imageSlug(selectedImage.id, selectedImage.prompt)}`}
                   className="inline-flex items-center gap-1.5 px-4 py-2 bg-purple-50 text-purple-700 rounded-xl font-bold hover:bg-purple-100 transition-colors text-sm"
                 />
+                <button onClick={() => setEditingImage(true)} className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 text-white rounded-xl font-bold hover:bg-slate-800 transition-colors text-sm"><SlidersHorizontal size={15} /> Grade &amp; export</button>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {selectedImage && editingImage && <MediaGradeEditor kind="image" src={`${IMG_BASE}/${selectedImage.file_path}`} title={selectedImage.prompt} onClose={() => setEditingImage(false)} />}
 
       {/* Footer */}
       <footer className="bg-white/90 border-t border-pink-200 py-8">

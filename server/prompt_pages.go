@@ -328,6 +328,7 @@ footer a{color:#db2777}
       <div class="actions">
         <a href="/" class="btn btn-primary">✨ Generate similar image</a>
         <a href="{{.FullImageURL}}" download class="btn btn-download">⬇ Download full resolution</a>
+        <a href="/editor?kind=image&amp;src={{urlquery .FullImageURL}}&amp;title={{urlquery .TitlePrompt}}" class="btn btn-secondary">🎛 Grade &amp; export</a>
         <button onclick="navigator.clipboard.writeText(this.dataset.p);this.textContent='✓ Copied!';setTimeout(()=>this.textContent='📋 Copy prompt',2000)" data-p="{{.CopyPrompt}}" class="btn btn-secondary">📋 Copy prompt</button>
         <button onclick="if(navigator.share){navigator.share({title:'CuteDSL AI artwork',text:this.dataset.p,url:location.href})}else{navigator.clipboard.writeText(location.href);this.textContent='✓ Link copied';setTimeout(()=>this.textContent='↗ Share image',2000)}" data-p="{{.CopyPrompt}}" class="btn btn-secondary">↗ Share image</button>
       </div>

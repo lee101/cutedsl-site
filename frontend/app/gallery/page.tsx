@@ -5,11 +5,12 @@ import Link from 'next/link';
 import Image from 'next/image';
 import {
   ArrowLeft, Loader2, ImageIcon, X, ExternalLink, Copy, Check,
-  Sparkles, Star, Heart, Search as SearchIcon, Wand2, Film,
+  Sparkles, Star, Heart, Search as SearchIcon, Wand2, Film, SlidersHorizontal,
 } from 'lucide-react';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
 import { useAutocomplete } from '@/hooks/use-autocomplete';
 import { ShareButton } from '@/lib/share-button';
+import { MediaGradeEditor } from '@/lib/media-grade-editor';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -87,6 +88,7 @@ export default function GalleryPage() {
   const [initialLoad, setInitialLoad] = useState(true);
   const [imageCount, setImageCount] = useState(0);
   const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
+  const [editingImage, setEditingImage] = useState(false);
   const [copied, setCopied] = useState(false);
   const [searchInput, setSearchInput] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
@@ -141,13 +143,13 @@ export default function GalleryPage() {
 
   // Close lightbox with Escape
   useEffect(() => {
-    if (!selectedImage) return;
+    if (!selectedImage || editingImage) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setSelectedImage(null);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedImage]);
+  }, [editingImage, selectedImage]);
 
   // Infinite scroll
   useEffect(() => {
@@ -492,6 +494,13 @@ export default function GalleryPage() {
                 <Film size={18} />
                 Animate this artwork
               </Link>
+              <button
+                onClick={() => setEditingImage(true)}
+                className="mt-2 w-full flex items-center justify-center gap-2 px-4 py-3 bg-purple-50 border border-purple-200 text-purple-800 rounded-xl font-bold hover:bg-purple-100 transition-colors"
+              >
+                <SlidersHorizontal size={18} />
+                Grade &amp; export
+              </button>
 
               <div className="flex flex-wrap gap-2 text-xs text-slate-400 my-5 pt-5 border-t border-slate-100">
                 <span className="bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg">
@@ -543,6 +552,15 @@ export default function GalleryPage() {
             </aside>
           </div>
         </div>
+      )}
+
+      {selectedImage && editingImage && (
+        <MediaGradeEditor
+          kind="image"
+          src={`${IMG_BASE}/${selectedImage.file_path}`}
+          title={selectedImage.prompt}
+          onClose={() => setEditingImage(false)}
+        />
       )}
 
       {/* Footer */}

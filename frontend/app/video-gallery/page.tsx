@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, ExternalLink, Film, Loader2, Plus, Sparkles } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Film, Loader2, Plus, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { ShareButton } from '@/lib/share-button';
+import { MediaGradeEditor } from '@/lib/media-grade-editor';
 
 interface PublicVideo {
   job_id: string;
@@ -20,6 +21,7 @@ function videoMIME(source: string): string {
 export default function VideoGalleryPage() {
   const [videos, setVideos] = useState<PublicVideo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [editingVideo, setEditingVideo] = useState<PublicVideo | null>(null);
 
   useEffect(() => {
     fetch('/api/videos?limit=60')
@@ -71,12 +73,14 @@ export default function VideoGalleryPage() {
                 <div className="flex items-center gap-4 mt-4 text-xs font-bold">
                   <a href={source} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-cyan-300 hover:text-cyan-200"><ExternalLink size={14} /> {source.toLowerCase().includes('.webm') ? 'AV1 source' : 'Source video'}</a>
                   <ShareButton title="CuteDSL AI video" text={video.prompt} url={`/video-gallery?video=${encodeURIComponent(video.job_id)}`} className="inline-flex items-center gap-1.5 text-purple-300 hover:text-purple-200" />
+                  <button onClick={() => setEditingVideo(video)} className="inline-flex items-center gap-1.5 text-pink-300 hover:text-pink-200"><SlidersHorizontal size={14} /> Grade &amp; export</button>
                 </div>
               </div>
             </article>;
           })}
         </section>
       )}
+      {editingVideo && editingVideo.result?.video_url && <MediaGradeEditor kind="video" src={editingVideo.result.video_url} title={editingVideo.prompt} onClose={() => setEditingVideo(null)} />}
     </main>
   );
 }

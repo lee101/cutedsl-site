@@ -2,8 +2,9 @@
 
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, ExternalLink, Film, Loader2, RefreshCw, Sparkles, Wand2 } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Film, Loader2, RefreshCw, SlidersHorizontal, Sparkles, Wand2 } from 'lucide-react';
 import { ShareButton } from '@/lib/share-button';
+import { MediaGradeEditor } from '@/lib/media-grade-editor';
 
 interface GenerationJob {
   job_id: string;
@@ -41,6 +42,7 @@ export default function GenerationsPage() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [editingJob, setEditingJob] = useState<GenerationJob | null>(null);
 
   const loadJobs = useCallback(async (key: string) => {
     if (!key) return;
@@ -209,6 +211,7 @@ export default function GenerationsPage() {
                       <a href={source} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-cyan-300 hover:text-cyan-200"><ExternalLink size={15} /> {source.toLowerCase().includes('.webm') ? 'AV1 source' : 'Source video'}</a>
                       <button onClick={() => setPublished(job, !job.is_public)} className="text-pink-300 hover:text-pink-200">{job.is_public ? 'Remove from gallery' : 'Publish to gallery'}</button>
                       <ShareButton title="CuteDSL AI video" text={job.prompt} url={job.is_public ? `/video-gallery?video=${encodeURIComponent(job.job_id)}` : source} className="inline-flex items-center gap-1.5 text-purple-300 hover:text-purple-200" />
+                      <button onClick={() => setEditingJob(job)} className="inline-flex items-center gap-1.5 text-pink-300 hover:text-pink-200"><SlidersHorizontal size={15} /> Grade &amp; export</button>
                     </div>}
                   </div>
                 </article>;
@@ -217,6 +220,7 @@ export default function GenerationsPage() {
           )}
         </div>
       </section>
+      {editingJob && videoURL(editingJob) && <MediaGradeEditor kind="video" src={videoURL(editingJob)} title={editingJob.prompt} onClose={() => setEditingJob(null)} />}
     </main>
   );
 }

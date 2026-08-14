@@ -197,6 +197,9 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 	case path == "/api/frontend-error" && method == "POST":
 		handleFrontendError(ctx)
 
+	case path == "/api/media-proxy" && (method == "GET" || method == "HEAD"):
+		handleMediaProxy(ctx)
+
 	// Crypto checkout - create deposit
 	case path == "/api/crypto-checkout" && method == "POST":
 		handleCryptoCheckout(ctx)
