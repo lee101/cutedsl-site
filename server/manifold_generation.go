@@ -18,6 +18,7 @@ import (
 )
 
 const maxManifoldResponseBytes = 4 << 20
+const maxManifoldFeaturedVideos = 18
 
 var manifoldHTTPClient = &http.Client{Timeout: 45 * time.Second}
 
@@ -460,6 +461,12 @@ type manifoldFeaturedVideo struct {
 }
 
 func getManifoldFeaturedVideos(limit int) ([]manifoldFeaturedVideo, error) {
+	// Older featured records can contain legacy inline media fields that make
+	// large pages unexpectedly multi-megabyte. The newest curated page is all
+	// the gallery needs and stays comfortably inside the response limit.
+	if limit < 1 || limit > maxManifoldFeaturedVideos {
+		limit = maxManifoldFeaturedVideos
+	}
 	request, err := http.NewRequest(http.MethodGet, manifoldOrigin()+"/api/videos/featured?limit="+strconv.Itoa(limit), nil)
 	if err != nil {
 		return nil, err

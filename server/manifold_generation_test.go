@@ -63,6 +63,24 @@ func TestManifoldJSONKeepsCredentialServerSide(t *testing.T) {
 	}
 }
 
+func TestFeaturedVideosClampsOversizedUpstreamPages(t *testing.T) {
+	var requestedLimit string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedLimit = r.URL.Query().Get("limit")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[],"count":0}`))
+	}))
+	defer server.Close()
+	t.Setenv("MANIFOLDGEN_ORIGIN", server.URL)
+
+	if _, err := getManifoldFeaturedVideos(60); err != nil {
+		t.Fatalf("getManifoldFeaturedVideos: %v", err)
+	}
+	if requestedLimit != "18" {
+		t.Fatalf("upstream limit = %q, want 18", requestedLimit)
+	}
+}
+
 func TestGenerationQueueEndToEnd(t *testing.T) {
 	upstreamID := fmt.Sprintf("video_e2e_%d", time.Now().UnixNano())
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
