@@ -95,18 +95,20 @@ type CryptoCheckoutResponse struct {
 // ServiceUsageRequest is the API request for using an AI service
 type ServiceUsageRequest struct {
 	WalletAddress string `json:"wallet_address"`
-	Service       string `json:"service"` // defaults to zimage; other values: chronos2, tts, stt, gemma4, caption
+	Service       string `json:"service"` // defaults to ra2; others: zimage, ra2-edit, chronos2, tts, stt, gemma4, caption
 	// Common fields
 	Prompt   string `json:"prompt,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	Text     string `json:"text,omitempty"`
 	AudioURL string `json:"audio_url,omitempty"`
-	// zimage fields
-	Width    int     `json:"width,omitempty"`
-	Height   int     `json:"height,omitempty"`
-	NumSteps int     `json:"num_steps,omitempty"`
-	Guidance float64 `json:"guidance,omitempty"`
-	Seed     int     `json:"seed,omitempty"`
+	// image fields (ra2, ra2-edit, zimage)
+	Width          int     `json:"width,omitempty"`
+	Height         int     `json:"height,omitempty"`
+	NumSteps       int     `json:"num_steps,omitempty"`
+	Guidance       float64 `json:"guidance,omitempty"`
+	Seed           int     `json:"seed,omitempty"`
+	NegativePrompt string  `json:"negative_prompt,omitempty"`
+	ImageBase64    string  `json:"image_base64,omitempty"` // source image for ra2-edit
 	// chronos2 fields
 	Values           []float64 `json:"values,omitempty"`
 	PredictionLength int       `json:"prediction_length,omitempty"`

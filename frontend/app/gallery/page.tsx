@@ -6,8 +6,8 @@ import Image from 'next/image';
 import {
   ArrowLeft, Loader2, ImageIcon, X, ExternalLink, Copy, Check,
   Sparkles, Star, Heart, Search as SearchIcon, Wand2, Film, SlidersHorizontal,
+  Wallet, Coins, RefreshCw, ArrowRight,
 } from 'lucide-react';
-import { linkifyPrompt } from '@/lib/prompt-linkify';
 import { useAutocomplete } from '@/hooks/use-autocomplete';
 import { ShareButton } from '@/lib/share-button';
 import { MediaGradeEditor } from '@/lib/media-grade-editor';
@@ -16,6 +16,14 @@ const API_BASE = '/api';
 const IMG_BASE = '/images';
 const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
 const PER_PAGE = 60;
+
+type ImageService = 'ra2' | 'zimage';
+
+// ra2 art generator is the default image model; Z-Image Turbo stays selectable.
+const IMAGE_SERVICES: { slug: ImageService; label: string; hint: string }[] = [
+  { slug: 'ra2', label: 'ra2 art generator', hint: 'higher quality, ~2x slower' },
+  { slug: 'zimage', label: 'Z-Image Turbo', hint: 'fastest' },
+];
 
 interface GeneratedImage {
   id: string;
@@ -90,11 +98,88 @@ export default function GalleryPage() {
   const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
   const [editingImage, setEditingImage] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [editablePrompt, setEditablePrompt] = useState('');
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [credits, setCredits] = useState<number | null>(null);
+  const [service, setService] = useState<ImageService>('ra2');
+  const [servicePricesUSD, setServicePricesUSD] = useState<Record<ImageService, number>>({ ra2: 1, zimage: 1 });
+  const generationPriceUSD = servicePricesUSD[service];
+  const [connectingWallet, setConnectingWallet] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [generationError, setGenerationError] = useState<string | null>(null);
+  const [needsPayment, setNeedsPayment] = useState(false);
+  const [paymentAmount, setPaymentAmount] = useState('1');
+  const [paymentLoading, setPaymentLoading] = useState(false);
+  const [paymentResult, setPaymentResult] = useState<{
+    intent_id: string;
+    amount_ui: string;
+    deposit_address: string;
+    solana_pay_url?: string;
+    status: 'pending' | 'paid';
+  } | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const paymentEventsRef = useRef<EventSource | null>(null);
   const [searchInput, setSearchInput] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
   const [semanticSuggestions, setSemanticSuggestions] = useState<string[]>([]);
   const loaderRef = useRef<HTMLDivElement>(null);
   const autocomplete = useAutocomplete(searchInput, searchFocused);
+
+  useEffect(() => {
+    const savedWallet = localStorage.getItem('cutedsl_wallet');
+    const savedApiKey = localStorage.getItem('cutedsl_api_key');
+    setWalletAddress(savedWallet);
+    setApiKey(savedApiKey);
+
+    fetch(`${API_BASE}/pricing`)
+      .then(res => res.json())
+      .then(data => {
+        const list: { service: string; price_usd: number }[] = data.pricing || [];
+        const priceFor = (slug: ImageService, fallback: number) => {
+          const usd = Number(list.find(item => item.service === slug)?.price_usd);
+          return Number.isFinite(usd) && usd > 0 ? usd : fallback;
+        };
+        setServicePricesUSD(prev => ({ ra2: priceFor('ra2', prev.ra2), zimage: priceFor('zimage', prev.zimage) }));
+      })
+      .catch(() => {});
+  }, []);
+
+  // Keep the top-up amount in step with the selected service price.
+  useEffect(() => {
+    setPaymentAmount(String(Math.max(1, Math.ceil(generationPriceUSD * 100) / 100)));
+  }, [generationPriceUSD]);
+
+  useEffect(() => {
+    if (!walletAddress) {
+      setCredits(null);
+      return;
+    }
+    fetch(`${API_BASE}/balance?wallet=${encodeURIComponent(walletAddress)}`)
+      .then(res => res.json())
+      .then(data => {
+        setCredits(Number(data.credits) || 0);
+      })
+      .catch(() => {});
+  }, [walletAddress]);
+
+  useEffect(() => {
+    paymentEventsRef.current?.close();
+    paymentEventsRef.current = null;
+    if (selectedImage) {
+      setEditablePrompt(selectedImage.prompt);
+      setGeneratedImage(null);
+      setGenerationError(null);
+      setNeedsPayment(false);
+      setPaymentError(null);
+      setPaymentResult(null);
+    }
+  }, [selectedImage]);
+
+  useEffect(() => {
+    return () => paymentEventsRef.current?.close();
+  }, []);
 
   useEffect(() => {
     fetch(`${API_BASE}/images/count`)
@@ -170,6 +255,147 @@ export default function GalleryPage() {
     await navigator.clipboard.writeText(prompt);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const connectWallet = async () => {
+    setConnectingWallet(true);
+    setGenerationError(null);
+    try {
+      const solana = (window as any).solana;
+      let address = '';
+      if (solana?.isPhantom) {
+        const response = await solana.connect();
+        address = response.publicKey.toString();
+      } else {
+        address = window.prompt('Enter your Solana wallet address:')?.trim() || '';
+      }
+
+      if (address.length < 30) {
+        setGenerationError('A Solana wallet is required to continue.');
+        return;
+      }
+
+      const res = await fetch(`${API_BASE}/auth/wallet`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wallet_address: address }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.api_key) throw new Error(data.error || 'Wallet login failed');
+
+      setWalletAddress(address);
+      setApiKey(data.api_key);
+      setCredits(Number(data.user?.credits) || 0);
+      localStorage.setItem('cutedsl_wallet', address);
+      localStorage.setItem('cutedsl_api_key', data.api_key);
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : 'Wallet login failed.');
+    } finally {
+      setConnectingWallet(false);
+    }
+  };
+
+  const generateImage = async () => {
+    const prompt = editablePrompt.trim();
+    if (!prompt) {
+      setGenerationError('Add a prompt before generating.');
+      return;
+    }
+    if (!walletAddress || !apiKey) {
+      setGenerationError('Log in with your Solana wallet to generate this image.');
+      return;
+    }
+
+    setGenerating(true);
+    setGeneratedImage(null);
+    setGenerationError(null);
+    setNeedsPayment(false);
+    try {
+      const res = await fetch(`${API_BASE}/service`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          service,
+          prompt,
+          width: 512,
+          height: 512,
+          num_steps: service === 'ra2' ? 20 : 4,
+        }),
+      });
+      const data = await res.json();
+      if (res.status === 402) {
+        setNeedsPayment(true);
+        setGenerationError('Add credits to generate this image.');
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || 'Image generation failed.');
+
+      const imageBase64 = data.result?.image_base64;
+      if (!imageBase64) throw new Error('The generation completed without an image preview.');
+      setGeneratedImage(`data:image/webp;base64,${imageBase64}`);
+      setCredits(typeof data.credits_remain === 'number' ? data.credits_remain : credits);
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : 'Image generation failed.');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const createPayment = async () => {
+    if (!walletAddress) {
+      setGenerationError('Log in with your Solana wallet before paying.');
+      return;
+    }
+    const amount = Number(paymentAmount);
+    if (!Number.isFinite(amount) || amount < 1) {
+      setPaymentError('Enter at least $1.00 to add generation credits.');
+      return;
+    }
+
+    paymentEventsRef.current?.close();
+    setPaymentLoading(true);
+    setPaymentError(null);
+    try {
+      const res = await fetch(`${API_BASE}/crypto-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wallet_address: walletAddress, method: 'cute', amount }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not start payment.');
+
+      setPaymentResult({ ...data, status: 'pending' });
+      const events = new EventSource(`${API_BASE}/crypto-checkout/${data.intent_id}/events`);
+      paymentEventsRef.current = events;
+      events.onmessage = event => {
+        const status = JSON.parse(event.data).status;
+        if (status === 'paid') {
+          events.close();
+          paymentEventsRef.current = null;
+          setPaymentResult(previous => previous ? { ...previous, status: 'paid' } : previous);
+          setTimeout(() => {
+            setPaymentResult(null);
+            setNeedsPayment(false);
+            void generateImage();
+          }, 800);
+        } else if (status === 'expired' || status === 'failed') {
+          events.close();
+          paymentEventsRef.current = null;
+          setPaymentError('This payment request expired. Start a new one to continue.');
+        }
+      };
+      events.onerror = () => {
+        // The checkout remains valid; the user can still use the Solana Pay link.
+        setPaymentError('Payment status is temporarily unavailable. Your payment request is still active.');
+      };
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : 'Could not start payment.');
+    } finally {
+      setPaymentLoading(false);
+    }
   };
 
   return (
@@ -410,7 +636,9 @@ export default function GalleryPage() {
           </p>
           <p className="text-slate-600 leading-relaxed">
             Want to generate your own? <Link href="/#api" className="text-pink-500 hover:text-pink-600 font-semibold">Grab an API key</Link>,
-            deposit some $CUTEDSL, and call <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-700">POST /api/service</code> with <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-700">service: &quot;zimage&quot;</code>.
+            deposit some $CUTEDSL, and call <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-700">POST /api/service</code> with <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-700">service: &quot;ra2&quot;</code> for
+            the default ra2 art generator, or <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-700">service: &quot;zimage&quot;</code> for the faster
+            Z-Image Turbo engine.
           </p>
         </section>
       </main>
@@ -459,9 +687,26 @@ export default function GalleryPage() {
                 <h2 className="font-fredoka text-2xl font-bold text-slate-900">Make Similar Art</h2>
               </div>
 
-              <div className="bg-pink-50/80 border border-pink-100 rounded-xl p-3 mb-4 text-slate-700 text-sm leading-relaxed max-h-32 overflow-y-auto">
-                {linkifyPrompt(selectedImage.prompt)}
-              </div>
+              <label htmlFor="gallery-generation-prompt" className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                Your prompt
+              </label>
+              <textarea
+                id="gallery-generation-prompt"
+                value={editablePrompt}
+                onChange={event => {
+                  setEditablePrompt(event.target.value);
+                  setGenerationError(null);
+                  setNeedsPayment(false);
+                }}
+                rows={5}
+                maxLength={4000}
+                disabled={Boolean(paymentResult)}
+                className="w-full resize-y rounded-xl border border-pink-200 bg-pink-50/80 p-3 text-sm leading-relaxed text-slate-700 outline-none transition focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
+                aria-describedby="gallery-prompt-help"
+              />
+              <p id="gallery-prompt-help" className="mt-1 text-xs text-slate-400">
+                Edit the prompt, then generate a new image without leaving the gallery.
+              </p>
 
               <div className="mb-5">
                 <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Explore similar tags</p>
@@ -480,13 +725,126 @@ export default function GalleryPage() {
                 </div>
               </div>
 
-              <Link
-                href={`/?prompt=${encodeURIComponent(selectedImage.prompt)}#try-it`}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3.5 bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-xl font-bold shadow-lg shadow-pink-200 hover:shadow-xl hover:scale-[1.01] transition-all"
-              >
-                <Wand2 size={18} />
-                Try this prompt
-              </Link>
+              <div className="mt-5 rounded-2xl border border-pink-200 bg-gradient-to-br from-pink-50 to-purple-50 p-4">
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">Generate on this page</p>
+                    <p className="text-xs text-slate-500">One image costs about ${generationPriceUSD.toFixed(2)} in credits.</p>
+                  </div>
+                  {walletAddress && credits !== null && (
+                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-white px-2 py-1 text-xs font-bold text-slate-600 border border-pink-100">
+                      <Coins size={13} className="text-yellow-500" /> {Math.floor(credits).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+
+                <div className="mb-3">
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">Model</p>
+                  <div className="flex gap-1 rounded-xl border border-pink-100 bg-white/70 p-1">
+                    {IMAGE_SERVICES.map(option => (
+                      <button
+                        key={option.slug}
+                        type="button"
+                        onClick={() => {
+                          setService(option.slug);
+                          setGeneratedImage(null);
+                          setGenerationError(null);
+                        }}
+                        className={`flex-1 rounded-lg px-3 py-2 text-xs font-bold transition ${service === option.slug ? 'bg-gradient-to-r from-pink-500 to-purple-500 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        {option.label}
+                        <span className={`block text-[10px] font-medium ${service === option.slug ? 'text-white/80' : 'text-slate-400'}`}>
+                          {option.hint} &middot; ${servicePricesUSD[option.slug].toFixed(2)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {!walletAddress || !apiKey ? (
+                  <button
+                    type="button"
+                    onClick={connectWallet}
+                    disabled={connectingWallet}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-3.5 bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-xl font-bold shadow-lg shadow-pink-200 hover:shadow-xl transition-all disabled:opacity-60"
+                  >
+                    {connectingWallet ? <RefreshCw size={18} className="animate-spin" /> : <Wallet size={18} />}
+                    {connectingWallet ? 'Logging in…' : 'Log in with Solana wallet'}
+                  </button>
+                ) : needsPayment ? (
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-600">Your balance is too low. Add credits, then generation will start automatically when payment is confirmed.</p>
+                    {!paymentResult ? (
+                      <div className="flex gap-2">
+                        <label className="relative flex-1">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">$</span>
+                          <input
+                            type="number"
+                            min="1"
+                            step="0.01"
+                            value={paymentAmount}
+                            onChange={event => setPaymentAmount(event.target.value)}
+                            className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-7 pr-3 text-sm outline-none focus:border-pink-400 focus:ring-2 focus:ring-pink-200"
+                            aria-label="Payment amount in US dollars"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={createPayment}
+                          disabled={paymentLoading}
+                          className="flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm font-bold text-white transition hover:bg-slate-800 disabled:opacity-60"
+                        >
+                          {paymentLoading ? <RefreshCw size={16} className="animate-spin" /> : <Wallet size={16} />}
+                          Pay &amp; continue
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-pink-200 bg-white p-3 text-sm">
+                        {paymentResult.status === 'paid' ? (
+                          <p className="flex items-center gap-2 font-bold text-green-600"><Check size={16} /> Payment received. Generating…</p>
+                        ) : (
+                          <>
+                            <p className="font-bold text-slate-700">Send {paymentResult.amount_ui} $CUTEDSL to:</p>
+                            <div className="mt-2 flex items-center gap-2">
+                              <code className="min-w-0 flex-1 break-all rounded-lg bg-slate-100 px-2 py-2 text-xs text-slate-600">{paymentResult.deposit_address}</code>
+                              <button type="button" onClick={() => copyPrompt(paymentResult.deposit_address)} className="shrink-0 rounded-lg p-2 hover:bg-slate-100" aria-label="Copy payment address">
+                                {copied ? <Check size={16} className="text-green-500" /> : <Copy size={16} className="text-slate-400" />}
+                              </button>
+                            </div>
+                            {paymentResult.solana_pay_url && (
+                              <a href={paymentResult.solana_pay_url} className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-purple-600 hover:text-purple-700">
+                                Open in wallet <ArrowRight size={13} />
+                              </a>
+                            )}
+                            <p className="mt-2 text-xs text-slate-400">Waiting for payment confirmation…</p>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {paymentError && <p className="text-xs font-medium text-red-600">{paymentError}</p>}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={generateImage}
+                    disabled={generating || !editablePrompt.trim()}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-3.5 bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-xl font-bold shadow-lg shadow-pink-200 hover:shadow-xl transition-all disabled:opacity-60"
+                  >
+                    {generating ? <RefreshCw size={18} className="animate-spin" /> : <Wand2 size={18} />}
+                    {generating ? 'Generating…' : 'Generate image'}
+                  </button>
+                )}
+                {generationError && <p className="mt-2 text-xs font-medium text-red-600">{generationError}</p>}
+                {generatedImage && (
+                  <div className="mt-4 border-t border-pink-100 pt-4">
+                    <p className="mb-2 text-xs font-bold uppercase tracking-wider text-pink-500">Your generated image</p>
+                    <img src={generatedImage} alt={`Generated from ${editablePrompt}`} className="w-full rounded-xl bg-slate-950 shadow-lg" />
+                    <a href={generatedImage} download="cutedsl-gallery-generation.webp" className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-bold text-slate-700 border border-slate-200 hover:bg-slate-50">
+                      Download image <ArrowRight size={14} />
+                    </a>
+                  </div>
+                )}
+              </div>
               <Link
                 href={`/generations?prompt=${encodeURIComponent(selectedImage.prompt)}&first_frame=${encodeURIComponent(`https://cutedsl.cc${IMG_BASE}/${selectedImage.file_path}`)}`}
                 className="mt-2 w-full flex items-center justify-center gap-2 px-4 py-3 bg-slate-900 text-white rounded-xl font-bold hover:bg-slate-800 transition-colors"

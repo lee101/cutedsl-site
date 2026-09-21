@@ -217,8 +217,8 @@ func TestWalletAuth_Register(t *testing.T) {
 		t.Fatalf("expected created=true, got %v", body["created"])
 	}
 	apiKey, ok := body["api_key"].(string)
-	if !ok || !strings.HasPrefix(apiKey, "cutedsl_") {
-		t.Fatalf("expected api_key with cutedsl_ prefix, got %v", body["api_key"])
+	if !ok || !strings.HasPrefix(apiKey, "sk-") {
+		t.Fatalf("expected api_key with sk- prefix, got %v", body["api_key"])
 	}
 
 	// Second call should return created=false
@@ -311,7 +311,7 @@ func TestPricing(t *testing.T) {
 		pm := p.(map[string]interface{})
 		services[pm["service"].(string)] = true
 	}
-	for _, expected := range []string{"zimage", "chronos2", "tts", "stt", "gemma4", "caption", "lora_training"} {
+	for _, expected := range []string{"ra2", "ra2-edit", "zimage", "chronos2", "tts", "stt", "gemma4", "caption", "lora_training"} {
 		if !services[expected] {
 			t.Errorf("missing service in pricing: %s", expected)
 		}
@@ -541,7 +541,7 @@ func TestFullAuthFlow(t *testing.T) {
 		t.Fatalf("register failed: %d", status)
 	}
 	apiKey := authBody["api_key"].(string)
-	if !strings.HasPrefix(apiKey, "cutedsl_") {
+	if !strings.HasPrefix(apiKey, "sk-") {
 		t.Fatalf("bad api key format: %s", apiKey)
 	}
 

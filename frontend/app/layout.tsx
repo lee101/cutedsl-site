@@ -3,6 +3,7 @@ import { Fredoka, Nunito } from 'next/font/google';
 import 'highlight.js/styles/github-dark.css';
 import './globals.css';
 import { FrontendErrorReporter } from './frontend-error-reporter';
+import { SiteCreateBar } from '@/lib/site-create-bar';
 
 const fredoka = Fredoka({
   subsets: ['latin'],
@@ -24,25 +25,31 @@ const imgBase = 'https://appstatic.app.nz/cutedsl/images';
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: 'CuteDSL — AI Model Acceleration on Solana',
+    default: 'AI Image Generator API — ra2, Z-Image Turbo, Video, TTS | CuteDSL',
     template: '%s | CuteDSL',
   },
   description:
-    'Accelerate AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, TTS, and more. Powered by $CUTEDSL on Solana.',
+    'Text-to-image API (ra2 art generator, Z-Image Turbo, Flux Schnell), ManifoldGen text-to-video, Kokoro TTS, speech-to-text, Chronos-2 time series forecasting, and a 100k+ AI art gallery. $CUTEDSL on Solana.',
   keywords: [
-    'AI inference',
-    'model acceleration',
-    'Triton kernels',
-    'CUDA',
-    'Solana',
-    'CUTEDSL',
-    'image generation',
-    'time series forecasting',
+    'AI image generator',
+    'text to image API',
+    'ra2 art generator',
+    'Z-Image Turbo',
+    'Flux Schnell',
+    'AI art generator',
+    'Stable Diffusion API',
+    'AI video generator',
+    'text to video',
+    'ManifoldGen',
     'text to speech',
-    'torch.compile',
-    'NVFP4',
-    'Z-Image',
+    'Kokoro TTS',
+    'speech to text',
+    'time series forecasting',
     'Chronos-2',
+    'AI art gallery',
+    'LoRA training',
+    'Solana AI',
+    'CUTEDSL',
   ],
   authors: [{ name: 'Applied AI NZ', url: 'https://app.nz' }],
   creator: 'Applied AI NZ',
@@ -58,23 +65,23 @@ export const metadata: Metadata = {
     locale: 'en_US',
     url: siteUrl,
     siteName: 'CuteDSL',
-    title: 'CuteDSL — AI Model Acceleration on Solana',
+    title: 'AI Image Generator API — ra2, Z-Image Turbo, Video, TTS',
     description:
-      'Accelerate AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, and more. Powered by $CUTEDSL.',
+      'Text-to-image (ra2 art generator, Z-Image Turbo, Flux Schnell), ManifoldGen text-to-video, Kokoro TTS, Chronos-2 forecasting. 100k+ AI art gallery. $CUTEDSL on Solana.',
     images: [
       {
         url: `${imgBase}/og-image.webp`,
         width: 1360,
         height: 768,
-        alt: 'CuteDSL — AI Model Acceleration',
+        alt: 'CuteDSL AI image generator — Z-Image Turbo',
       },
     ],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'CuteDSL — AI Model Acceleration on Solana',
+    title: 'AI Image Generator API — Z-Image Turbo, Video, TTS',
     description:
-      'Accelerate AI models with custom Triton kernels and fused pipelines. Powered by $CUTEDSL on Solana.',
+      'Text-to-image, ManifoldGen AV1 video, Kokoro TTS, Chronos-2 forecasting. $CUTEDSL on Solana.',
     images: [`${imgBase}/og-image.webp`],
   },
   alternates: {
@@ -99,7 +106,7 @@ const jsonLd = {
   name: 'CuteDSL',
   applicationCategory: 'DeveloperApplication',
   description:
-    'AI model acceleration and inference platform using custom Triton kernels and fused pipelines. Powered by $CUTEDSL on Solana.',
+    'AI image generator and inference API: ra2 art generator, Z-Image Turbo, Flux Schnell, Kokoro TTS, Chronos-2 forecasting. $CUTEDSL on Solana.',
   url: siteUrl,
   codeRepository: 'https://github.com/lee101/cutedsl',
   creator: {
@@ -110,7 +117,7 @@ const jsonLd = {
   offers: {
     '@type': 'Offer',
     priceCurrency: 'USD',
-    description: 'Pay-per-use AI inference with $CUTEDSL tokens',
+    description: 'Text-to-image, TTS, and forecasting API paid with $CUTEDSL',
   },
   sameAs: ['https://github.com/lee101/cutedsl'],
 };
@@ -122,6 +129,11 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
         <link rel="dns-prefetch" href="https://appstatic.app.nz" />
         <link rel="preconnect" href="https://appstatic.app.nz" crossOrigin="anonymous" />
         <script
+          async
+          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8598649123553748"
+          crossOrigin="anonymous"
+        />
+        <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
@@ -129,6 +141,7 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
       <body className="font-nunito antialiased bg-pink-50 text-slate-800 selection:bg-pink-300 selection:text-pink-900" suppressHydrationWarning>
         <FrontendErrorReporter />
         {children}
+        <SiteCreateBar />
       </body>
     </html>
   );

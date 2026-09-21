@@ -240,27 +240,37 @@ var promptPageTemplate = template.Must(template.New("prompt").Funcs(template.Fun
 *{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;background:#fef6fb;color:#1e293b;line-height:1.6}
 a{color:inherit;text-decoration:none}
-.nav{padding:1.25rem 2rem;display:flex;justify-content:space-between;align-items:center;max-width:80rem;margin:0 auto}
+.nav{padding:.75rem 1rem;display:flex;justify-content:space-between;align-items:center;width:100%;margin:0 auto}
 .nav-logo{font-size:1.5rem;font-weight:800;color:#db2777;display:flex;align-items:center;gap:.5rem}
 .nav-links a{color:#475569;font-weight:600;margin-left:1.5rem;font-size:.9rem;transition:color .15s}
 .nav-links a:hover{color:#db2777}
-.breadcrumb{max-width:80rem;margin:0 auto;padding:.5rem 2rem 0;font-size:.8rem;color:#94a3b8;display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
+.breadcrumb{width:100%;margin:0 auto;padding:.25rem 1rem;font-size:.8rem;color:#94a3b8;display:flex;flex-wrap:wrap;gap:.4rem;align-items:center}
 .breadcrumb a{color:#94a3b8;transition:color .15s}.breadcrumb a:hover{color:#db2777}
 .breadcrumb span{color:#cbd5e1}
-main{max-width:80rem;margin:0 auto;padding:1.25rem 2rem 5rem;display:grid;grid-template-columns:1fr 340px;gap:2rem}
-@media(max-width:900px){main{grid-template-columns:1fr;padding:1rem 1rem 4rem}}
+.creator-shell{width:100%;padding:.5rem 1rem 0;position:sticky;top:0;z-index:20}
+.creator{display:flex;align-items:center;gap:.5rem;width:100%;padding:.45rem;background:rgba(255,255,255,.96);backdrop-filter:blur(12px);border:1px solid #fbcfe8;border-radius:.5rem;box-shadow:0 8px 24px rgba(15,23,42,.08)}
+.creator-label{font-size:.75rem;font-weight:800;color:#be185d;padding:0 .4rem;white-space:nowrap}
+.creator input{min-width:8rem;flex:1;border:1px solid #e2e8f0;border-radius:.35rem;padding:.55rem .7rem;font:inherit;font-size:.85rem;color:#1e293b;outline:none}
+.creator input:focus{border-color:#ec4899;box-shadow:0 0 0 2px #fce7f3}
+.creator .create-btn,.creator .creator-link{display:inline-flex;align-items:center;justify-content:center;border-radius:.35rem;padding:.55rem .8rem;font-size:.78rem;font-weight:800;white-space:nowrap}
+.creator .create-btn{border:0;color:#fff;background:linear-gradient(135deg,#ec4899,#9333ea);cursor:pointer}
+.creator .video-btn{background:#0f172a}
+.creator .creator-link{color:#475569;background:#f8fafc;border:1px solid #e2e8f0}
+.creator .bags-link{color:#7e22ce;background:#faf5ff;border-color:#e9d5ff}
+main{width:100%;margin:0 auto;padding:.75rem 1rem 3rem;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:1rem}
+@media(max-width:900px){main{grid-template-columns:1fr;padding:.75rem .5rem 3rem}.nav-links{display:none}.creator-shell{padding:.35rem .5rem 0}.creator{flex-wrap:wrap}.creator-label{width:100%}.creator input{flex-basis:100%}.creator .create-btn{flex:1}.creator .creator-link{font-size:.72rem;padding:.45rem .6rem}}
 .hero-col{}
-.hero-img-wrap{background:#fff;border:1px solid #fbcfe8;border-radius:1.25rem;overflow:hidden;box-shadow:0 4px 24px rgba(219,39,119,.08)}
+.hero-img-wrap{background:transparent;border:0;border-radius:0;overflow:hidden;box-shadow:none}
 .hero-img-wrap img{width:100%;height:auto;display:block;max-height:75vh;object-fit:contain;background:#f8fafc}
 .info-col{}
-.info-card{background:#fff;border:1px solid #fce7f3;border-radius:1.25rem;padding:1.5rem;box-shadow:0 2px 12px rgba(219,39,119,.06);position:sticky;top:1.5rem}
+.info-card{background:#fff;border:1px solid #fce7f3;border-radius:.5rem;padding:1rem;box-shadow:0 2px 10px rgba(15,23,42,.04);position:sticky;top:4.5rem}
 h1{font-size:1.1rem;font-weight:700;color:#0f172a;line-height:1.5;margin:0 0 1.25rem}
 .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:1.25rem}
-.meta-item{background:#f8fafc;border:1px solid #e2e8f0;border-radius:.6rem;padding:.4rem .7rem}
+.meta-item{background:#f8fafc;border:1px solid #e2e8f0;border-radius:.35rem;padding:.35rem .55rem}
 .meta-label{font-size:.68rem;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 .meta-value{font-size:.85rem;font-weight:700;color:#334155}
 .actions{display:flex;flex-direction:column;gap:.6rem;margin-bottom:1.25rem}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;padding:.6rem 1rem;border-radius:.75rem;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .15s;border:none;text-align:center}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:.4rem;padding:.55rem .8rem;border-radius:.4rem;font-size:.82rem;font-weight:700;cursor:pointer;transition:all .15s;border:none;text-align:center}
 .btn-primary{background:linear-gradient(135deg,#ec4899,#a855f7);color:#fff;box-shadow:0 2px 12px rgba(236,72,153,.3)}
 .btn-primary:hover{box-shadow:0 4px 20px rgba(236,72,153,.45);transform:translateY(-1px)}
 .btn-secondary{background:#f1f5f9;color:#334155;border:1px solid #e2e8f0}
@@ -269,24 +279,24 @@ h1{font-size:1.1rem;font-weight:700;color:#0f172a;line-height:1.5;margin:0 0 1.2
 .btn-download:hover{border-color:#db2777;color:#db2777}
 .section-title{font-size:.85rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin:1.25rem 0 .6rem}
 .tags{display:flex;flex-wrap:wrap;gap:.4rem}
-.tag{font-size:.75rem;font-weight:600;padding:.25rem .65rem;border-radius:9999px;background:linear-gradient(135deg,#fdf2f8,#faf5ff);border:1px solid #f0abfc;color:#86198f;transition:all .15s}
+.tag{font-size:.75rem;font-weight:600;padding:.25rem .65rem;border-radius:.35rem;background:linear-gradient(135deg,#fdf2f8,#faf5ff);border:1px solid #f0abfc;color:#86198f;transition:all .15s}
 .tag:hover{background:linear-gradient(135deg,#f9a8d4,#d8b4fe);color:#fff;border-color:transparent}
-.prompt-box{background:#fdf2f8;border:1px solid #fce7f3;border-radius:.75rem;padding:.85rem 1rem;font-size:.82rem;color:#475569;line-height:1.7;margin-bottom:1.25rem}
+.prompt-box{background:#fdf2f8;border:1px solid #fce7f3;border-radius:.4rem;padding:.65rem .75rem;font-size:.82rem;color:#475569;line-height:1.6;margin-bottom:1rem}
 .prompt-box a.prompt-word{color:#86198f;font-weight:600;border-bottom:1px dotted #f0abfc;transition:all .15s;padding:0 1px;border-radius:3px}
 .prompt-box a.prompt-word:hover{background:#fce7f3;color:#db2777;border-bottom-color:transparent}
 /* Related section spans full width below */
 .related-section{grid-column:1/-1;margin-top:.5rem}
 h2{font-size:1.2rem;font-weight:800;color:#0f172a;margin:0 0 1rem;display:flex;align-items:center;gap:.5rem}
-.related-grid{columns:2;column-gap:.75rem}
+.related-grid{columns:2;column-gap:.5rem}
 @media(min-width:480px){.related-grid{columns:3}}
 @media(min-width:700px){.related-grid{columns:4}}
 @media(min-width:1000px){.related-grid{columns:5}}
 @media(min-width:1280px){.related-grid{columns:6}}
-.card{break-inside:avoid;margin-bottom:.75rem;background:#fff;border:1px solid #f1f5f9;border-radius:.875rem;overflow:hidden;transition:transform .15s,box-shadow .15s,border-color .15s}
-.card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(219,39,119,.12);border-color:#fbcfe8}
+.card{break-inside:avoid;margin-bottom:.5rem;background:transparent;border:0;border-radius:.25rem;overflow:hidden;transition:transform .15s,box-shadow .15s}
+.card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(15,23,42,.12)}
 .card a{display:block;color:inherit}
-.card img{width:100%;height:auto;display:block;background:#f1f5f9}
-.card p{font-size:.72rem;color:#64748b;padding:.45rem .6rem .5rem;line-height:1.4;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.card img{width:100%;height:auto;display:block;background:#f1f5f9;border-radius:.25rem}
+.card p{font-size:.72rem;color:#64748b;padding:.3rem .15rem .4rem;line-height:1.4;margin:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 footer{text-align:center;color:#94a3b8;font-size:.82rem;padding:2rem 0 3rem;border-top:1px solid #fce7f3}
 footer a{color:#db2777}
 </style>
@@ -301,6 +311,19 @@ footer a{color:#db2777}
     <a href="/">Generate</a>
   </div>
 </nav>
+
+<div class="creator-shell">
+  <form class="creator" action="/" method="get" aria-label="Create with CuteDSL">
+    <span class="creator-label">Create with CuteDSL</span>
+    <label for="create-prompt" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Describe what you want to create</label>
+    <input id="create-prompt" name="prompt" value="{{.CopyPrompt}}" maxlength="4000" placeholder="Describe an image or video…">
+    <input type="hidden" name="first_frame" value="https://cutedsl.cc{{.FullImageURL}}">
+    <button class="create-btn" type="submit">✨ Make image</button>
+    <button class="create-btn video-btn" type="submit" formaction="/generations">▶ Make video</button>
+    <a class="creator-link" href="/#api">Sign up / add credits</a>
+    <a class="creator-link bags-link" href="https://bags.fm/D322k7ykdgCmNGUZL5XvsgZXdHU4ks8iGoWtfrnmBAGS" target="_blank" rel="noopener">Buy $CUTEDSL on Bags ↗</a>
+  </form>
+</div>
 
 <nav class="breadcrumb" aria-label="Breadcrumb">
   <a href="/">Home</a>
@@ -326,7 +349,8 @@ footer a{color:#db2777}
       <div class="prompt-box" aria-label="Prompt (click any word to search)">{{linkify .Image.Prompt}}</div>
 
       <div class="actions">
-        <a href="/" class="btn btn-primary">✨ Generate similar image</a>
+        <a href="/?prompt={{urlquery .CopyPrompt}}#try-it" class="btn btn-primary">✨ Generate similar image</a>
+        <a href="/generations?prompt={{urlquery .CopyPrompt}}&amp;first_frame=https%3A%2F%2Fcutedsl.cc{{urlquery .FullImageURL}}" class="btn btn-secondary">▶ Animate this artwork</a>
         <a href="{{.FullImageURL}}" download class="btn btn-download">⬇ Download full resolution</a>
         <a href="/editor?kind=image&amp;src={{urlquery .FullImageURL}}&amp;title={{urlquery .TitlePrompt}}" class="btn btn-secondary">🎛 Grade &amp; export</a>
         <button onclick="navigator.clipboard.writeText(this.dataset.p);this.textContent='✓ Copied!';setTimeout(()=>this.textContent='📋 Copy prompt',2000)" data-p="{{.CopyPrompt}}" class="btn btn-secondary">📋 Copy prompt</button>
@@ -634,8 +658,35 @@ func handleSitemapPages(ctx *fasthttp.RequestCtx) {
 	host := "https://cutedsl.cc"
 	pages := []string{
 		"/", "/search", "/gallery", "/video-gallery", "/generations", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
-		"/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
-		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/lora_training",
+		"/docs/ra2", "/docs/ra2-edit", "/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
+		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/manifold_video", "/docs/lora_training",
+		"/blog/cutedsl-manifoldgen-video-api",
+		"/blog/manifoldgen-ai-video-generator",
+		"/blog/zimage-omniserve-native",
+		"/blog/go-c-migration-zimage",
+		"/blog/why-we-launched-cutedsl-token-on-bags-fm",
+		"/blog/generate-ai-images-with-solana",
+		"/blog/cutedsl-image-gallery-100k-images",
+		"/blog/generative-agents-cloud-infrastructure",
+		"/blog/anatomy-of-cloud-coding-agents",
+		"/blog/accelerating-agent-pipelines-cutedsl",
+		"/blog/bare-metal-vs-serverless-agents",
+		"/blog/cutechronos2-27x-speedup",
+		"/blog/cutezimage-fused-kernels",
+		"/blog/latent-teleportation",
+		"/blog/turboquant-vector-quantization",
+		"/blog/stable-diffusion-cpp",
+		"/blog/nvfp4-rtx-5090",
+		"/blog/turboquant-ablation-study",
+		"/blog/kernel-fusion-ablation",
+		"/blog/batched-inference-scaling",
+		"/blog/team-of-loras-hosting",
+		"/blog/zimage-gallery-ablation",
+		"/blog/fused-qkv-zimageaccelerated",
+		"/blog/latent-teleportation-visual-results",
+		"/blog/cuteparakeet-asr-acceleration",
+		"/blog/cutedsl-token-guide",
+		"/blog/chronos2-bitcoin-forecasting-guide",
 	}
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")

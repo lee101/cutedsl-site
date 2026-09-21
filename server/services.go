@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,8 @@ import (
 
 // Service pricing in USD (converted to $CUTE at current rate)
 var servicePricesUSD = map[string]float64{
+	"ra2":           1.00, // per generation (default image service)
+	"ra2-edit":      1.00, // per edit / style transfer (same price as ra2)
 	"zimage":        1.00, // per generation
 	"chronos2":      0.50, // per forecast
 	"tts":           0.10, // per 100 chars
@@ -30,6 +34,7 @@ var servicePricesUSD = map[string]float64{
 // First-party services run on our hardware — priced at ATH rate to reward early holders.
 // If you bought $CUTEDSL at $0.001 and ATH is $0.01, you pay 10x fewer tokens.
 var firstPartyServices = map[string]bool{
+	"ra2": true, "ra2-edit": true,
 	"zimage": true, "chronos2": true, "tts": true,
 	"stt": true, "gemma4": true, "caption": true, "lora_training": true,
 	"nsfw_detect": true,
@@ -37,6 +42,9 @@ var firstPartyServices = map[string]bool{
 
 // FAL API key for third-party proxied services
 var falAPIKey string
+
+// ra2 backend bearer/API-key secret (RA2_BACKEND_SECRET)
+var ra2BackendSecret string
 
 // Reusable HTTP client with connection pooling
 var backendClient = &http.Client{
@@ -55,6 +63,15 @@ var serviceBackends = map[string]string{}
 func initServices() {
 	// CuteDSL inference server serves zimage, chronos2, tts, stt, caption, gemma4
 	inferenceURL := getEnv("INFERENCE_BACKEND_URL", "http://localhost:8100")
+
+	// ra2 runs on its own omniserve-native instance (OpenAI images API).
+	ra2URL := getEnv("RA2_BACKEND_URL", "http://127.0.0.1:8792")
+	serviceBackends["ra2"] = ra2URL
+	serviceBackends["ra2-edit"] = ra2URL
+	ra2BackendSecret = getEnv("RA2_BACKEND_SECRET", "")
+	if ra2BackendSecret != "" {
+		log.Printf("ra2 backend secret configured")
+	}
 
 	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", inferenceURL)
 	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", inferenceURL)
@@ -89,11 +106,30 @@ func initServices() {
 		}
 	}
 
+	// ra2 tracks the zimage rate unless RA2_PRICE_USD is set.
+	servicePricesUSD["ra2"] = servicePricesUSD["zimage"]
+	servicePricesUSD["ra2-edit"] = servicePricesUSD["zimage"]
+	if p := os.Getenv("RA2_PRICE_USD"); p != "" {
+		ra2Price := parseFloat(p)
+		servicePricesUSD["ra2"] = ra2Price
+		servicePricesUSD["ra2-edit"] = ra2Price
+	}
+
 	log.Printf("Service pricing loaded: %v", servicePricesUSD)
 	log.Printf("Service backends: %v", serviceBackends)
 
 	// Initialize diffusionz C engine for direct GPU inference (optional)
 	initDiffusionzEngine()
+}
+
+// defaultServiceName is the service used when /api/service omits "service".
+// ra2 (art generator) is the default image service; set RA2_DEFAULT=0 to fall
+// back to zimage.
+func defaultServiceName() string {
+	if os.Getenv("RA2_DEFAULT") == "0" {
+		return "zimage"
+	}
+	return "ra2"
 }
 
 // getServicePriceCUTE returns the current $CUTE cost for a service.
@@ -124,6 +160,8 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	cutePrice := getCUTEPriceUSD()
 
 	units := map[string]string{
+		"ra2":           "per generation",
+		"ra2-edit":      "per edit",
 		"zimage":        "per generation",
 		"chronos2":      "per forecast",
 		"tts":           "per 100 characters",
@@ -167,13 +205,18 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	if req.Service == "" {
-		req.Service = "zimage"
+		req.Service = defaultServiceName()
 	}
 
 	// Validate service exists
 	_, ok := servicePricesUSD[req.Service]
 	if !ok {
 		jsonError(ctx, 400, "unknown service: "+req.Service)
+		return
+	}
+
+	if req.Service == "ra2-edit" && req.ImageBase64 == "" {
+		jsonError(ctx, 400, "ra2-edit requires image_base64")
 		return
 	}
 
@@ -388,6 +431,9 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	var method = "POST"
 
 	switch req.Service {
+	case "ra2", "ra2-edit":
+		return proxyToRA2(req, backendURL, ra2BackendSecret)
+
 	case "zimage":
 		// Fast path: use diffusionz C engine for direct GPU inference
 		if diffusionzAvailable {
@@ -416,6 +462,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 				// Return a JSON response matching the HTTP backend format
 				result, _ := json.Marshal(map[string]interface{}{
 					"image_bytes_len": len(imgBytes),
+					"image_base64":    base64.StdEncoding.EncodeToString(imgBytes),
 					"width":           width,
 					"height":          height,
 					"format":          "webp",
@@ -586,6 +633,139 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	}
 
 	return respBody, nil
+}
+
+// ra2Request is the omniserve-native/OpenAI images contract for the ra2 service.
+type ra2Request struct {
+	Prompt         string  `json:"prompt"`
+	NegativePrompt string  `json:"negative_prompt,omitempty"`
+	Width          int     `json:"width"`
+	Height         int     `json:"height"`
+	Steps          int     `json:"steps"`
+	Seed           int     `json:"seed"`
+	GuidanceScale  float64 `json:"guidance_scale"`
+	OutputFormat   string  `json:"output_format"`
+	N              int     `json:"n"`
+	Teleport       bool    `json:"teleport"`
+	ImageBase64    string  `json:"image_base64,omitempty"`
+}
+
+// ra2Response is the omniserve-native reply shape.
+type ra2Response struct {
+	Data []struct {
+		B64JSON         string `json:"b64_json"`
+		Seed            int64  `json:"seed"`
+		InferenceTimeMS int    `json:"inference_time_ms"`
+		Format          string `json:"format"`
+	} `json:"data"`
+	Model  string `json:"model"`
+	Format string `json:"format"`
+}
+
+// snap32 clamps a dimension to a positive multiple of 32 (ra2's engine limit).
+func snap32(v, fallback int) int {
+	if v <= 0 {
+		v = fallback
+	}
+	v -= v % 32
+	if v < 32 {
+		v = 32
+	}
+	return v
+}
+
+// proxyToRA2 translates a CuteDSL service request into the ra2 contract and
+// normalises the reply into the same JSON shape the zimage HTTP path returns.
+// ra2 is an omniserve-native instance: POST /v1/images/generations (text to
+// image) and /v1/images/edits (source image + prompt).
+func proxyToRA2(req ServiceUsageRequest, backendURL, secret string) ([]byte, error) {
+	endpoint := backendURL + "/v1/images/generations"
+	if req.Service == "ra2-edit" {
+		endpoint = backendURL + "/v1/images/edits"
+	}
+
+	width := snap32(req.Width, 1024)
+	height := snap32(req.Height, 1024)
+	steps := req.NumSteps
+	if steps <= 0 {
+		steps = 20
+	}
+	guidance := req.Guidance
+	if guidance <= 0 {
+		guidance = 1.0
+	}
+
+	payload := ra2Request{
+		Prompt:         req.Prompt,
+		NegativePrompt: req.NegativePrompt,
+		Width:          width,
+		Height:         height,
+		Steps:          steps,
+		Seed:           req.Seed,
+		GuidanceScale:  guidance,
+		OutputFormat:   "webp",
+		N:              1,
+		Teleport:       true,
+	}
+	if req.Service == "ra2-edit" {
+		payload.ImageBase64 = req.ImageBase64
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+secret)
+		httpReq.Header.Set("X-API-Key", secret)
+	}
+
+	resp, err := backendClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("ra2 backend returned %d: %s", resp.StatusCode, truncateString(string(respBody), 500))
+	}
+
+	var ra2Resp ra2Response
+	if err := json.Unmarshal(respBody, &ra2Resp); err != nil {
+		return nil, fmt.Errorf("ra2 invalid response: %w", err)
+	}
+	if len(ra2Resp.Data) == 0 || ra2Resp.Data[0].B64JSON == "" {
+		return nil, fmt.Errorf("ra2 response contained no image")
+	}
+
+	format := ra2Resp.Data[0].Format
+	if format == "" {
+		format = ra2Resp.Format
+	}
+	if format == "" {
+		format = "webp"
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"image_base64":      ra2Resp.Data[0].B64JSON,
+		"width":             width,
+		"height":            height,
+		"format":            format,
+		"engine":            "ra2",
+		"seed":              ra2Resp.Data[0].Seed,
+		"inference_time_ms": ra2Resp.Data[0].InferenceTimeMS,
+		"model":             ra2Resp.Model,
+	})
 }
 
 // handleTrainStatus proxies training job status from inference server

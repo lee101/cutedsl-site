@@ -5,11 +5,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   Sparkles, Wand2, Image as ImageIcon, LineChart, Coins, Heart, Star, Zap,
   Mic, Volume2, BookOpen, Cloud, Code, Globe, Cpu, Database, Layout, Search, Gamepad2, Users,
-  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff
+  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff, Film
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { CodeBlock } from '@/lib/code-block';
+import { AdSense } from '@/lib/adsense';
 
 const API_BASE = '/api';
 const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
@@ -63,6 +64,7 @@ export default function Home() {
   const [connectingWallet, setConnectingWallet] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [demoPrompt, setDemoPrompt] = useState('a cute fairy in an enchanted forest, digital art, pastel colors');
+  const [demoService, setDemoService] = useState<'ra2' | 'zimage'>('ra2');
   const [demoResult, setDemoResult] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState(false);
   const [testMode, setTestMode] = useState(false);
@@ -176,7 +178,13 @@ export default function Home() {
       const res = await fetch(`${API_BASE}/service`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 4 }),
+        body: JSON.stringify({
+          service: demoService,
+          prompt: demoPrompt,
+          width: 512,
+          height: 512,
+          num_steps: demoService === 'ra2' ? 20 : 4,
+        }),
       });
       const data = await res.json();
       if (data.result?.image_base64) {
@@ -467,8 +475,10 @@ export default function Home() {
           <span className="font-fredoka text-3xl font-bold text-pink-600 tracking-wide">CuteDSL</span>
         </Link>
         <div className="hidden md:flex gap-5 font-bold text-slate-700">
-          <Link href="#models" className="hover:text-pink-500 transition-colors">Models</Link>
+          <Link href="/tools" className="hover:text-pink-500 transition-colors">Tools</Link>
+          <Link href="/models" className="hover:text-pink-500 transition-colors">Models</Link>
           <Link href="/gallery" className="hover:text-pink-500 transition-colors">Gallery</Link>
+          <Link href="/video-gallery" className="hover:text-purple-500 transition-colors">Videos</Link>
           <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
           <Link href="#training" className="hover:text-purple-500 transition-colors">Training</Link>
           <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
@@ -656,10 +666,10 @@ export default function Home() {
             </div>
 
             <h1 className="font-fredoka text-6xl lg:text-8xl font-bold mb-6 leading-tight text-slate-800">
-              Make Your Models <span className="text-gradient-cute">Cute</span>
+              AI Image <span className="text-gradient-cute">Generator</span> API
             </h1>
             <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/40 p-4 rounded-2xl backdrop-blur-sm">
-              Cute DSL accelerates AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, and more. Powered exclusively by $CUTEDSL on Solana.
+              ra2 art generator, Z-Image Turbo, Flux Schnell, ManifoldGen text-to-video, Kokoro TTS, Chronos-2 forecasting, and a 100k AI art gallery. $CUTEDSL on Solana.
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start flex-wrap">
               <a href="#models" className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
@@ -687,7 +697,7 @@ export default function Home() {
               <div className="absolute inset-0 bg-gradient-to-tr from-pink-300 to-cyan-300 rounded-full blur-3xl opacity-50"></div>
               <Image
                 src={`${IMG_BASE}/hero.webp`}
-                alt="CuteDSL AI model acceleration platform"
+                alt="CuteDSL AI image generator — Z-Image Turbo fairy art"
                 fill
                 priority
                 className="object-cover rounded-full border-8 border-white/50 shadow-2xl"
@@ -705,6 +715,10 @@ export default function Home() {
           </motion.div>
         </div>
       </main>
+
+      <div className="relative z-10 mx-auto max-w-5xl px-6 py-4">
+        <AdSense />
+      </div>
 
       {/* E2E Test Panel (shown with ?test=true) */}
       {testMode && (
@@ -732,19 +746,36 @@ export default function Home() {
         <div className="absolute inset-0 bg-white/40 backdrop-blur-md -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16 relative">
-            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Our Models</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Custom fused Triton kernels and kernel-level optimizations for maximum throughput.</p>
+            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Text-to-Image, Video, TTS, Forecasting</h2>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">ra2 art generator, Z-Image Turbo, Flux Schnell, ManifoldGen AV1 video, Kokoro TTS, Chronos-2, Gemma4, and LTX — fused Triton kernels where we own the stack.</p>
           </div>
 
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <Link href="/docs/ra2">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+              <div className="bg-fuchsia-100 w-14 h-14 rounded-2xl flex items-center justify-center text-fuchsia-500 mb-4 shadow-inner">
+                <Sparkles size={28} />
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                <h3 className="font-fredoka text-2xl font-bold text-slate-800 group-hover:text-fuchsia-600 transition-colors">ra2 art generator</h3>
+                <span className="bg-fuchsia-100 text-fuchsia-700 text-xs font-bold px-2 py-0.5 rounded-full">default</span>
+              </div>
+              <p className="text-slate-600 mb-4 text-sm">
+                Cinematic and illustration-specialised text-to-image. Higher quality than Z-Image Turbo, roughly 2× slower per image.
+              </p>
+              <div className="flex items-center gap-2 text-fuchsia-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> {getServicePrice('ra2') > 0 ? `${formatCute(getServicePrice('ra2'))} $CUTEDSL` : '1000 $CUTEDSL'} / gen
+              </div>
+            </motion.div>
+            </Link>
             <Link href="/docs/zimage">
             <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-pink-100 w-14 h-14 rounded-2xl flex items-center justify-center text-pink-500 mb-4 shadow-inner">
                 <ImageIcon size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-pink-600 transition-colors">zimage</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-pink-600 transition-colors">Z-Image Turbo</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                CuteDSL-accelerated Z-Image Turbo with fused QK-norm+RoPE kernel and custom Triton kernels. 2x faster transformer blocks via kernel fusion and NVFP4 quantization on RTX 5090.
+                Text-to-image API. 1024×1024 AI art from a prompt. Fused QK-norm+RoPE Triton kernels and NVFP4 on Blackwell.
               </p>
               <div className="flex items-center gap-2 text-pink-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '1000 $CUTEDSL'} / gen
@@ -757,9 +788,9 @@ export default function Home() {
               <div className="bg-cyan-100 w-14 h-14 rounded-2xl flex items-center justify-center text-cyan-500 mb-4 shadow-inner">
                 <LineChart size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-cyan-600 transition-colors">chronos2</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-cyan-600 transition-colors">Chronos-2</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                SOTA time series forecasting. CuteDSL-accelerated Chronos-2 with 27x faster inference via 8 custom Triton kernels, fused preprocessing, and torch.compile. Quantile predictions for uncertainty estimation.
+                Time series forecasting API. Quantile forecasts with 27x faster Chronos-2 inference via 8 Triton kernels and torch.compile.
               </p>
               <div className="flex items-center gap-2 text-cyan-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '500 $CUTEDSL'} / forecast
@@ -774,7 +805,7 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-purple-600 transition-colors">Kokoro TTS</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Text-to-Speech with 20+ cute voices and languages. Beautiful, natural voices for your applications.
+                Text-to-speech API. 20+ voices, multilingual, WAV out. Natural speech for apps and agents.
               </p>
               <div className="flex items-center gap-2 text-purple-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '100 $CUTEDSL'} / 100 chars
@@ -789,7 +820,7 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors">Speech-to-Text</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Gemma4-powered audio transcription. High-accuracy speech recognition for your applications.
+                Speech-to-text / transcription API. Gemma4 ASR from an audio URL, multilingual.
               </p>
               <div className="flex items-center gap-2 text-blue-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '200 $CUTEDSL'} / minute
@@ -804,7 +835,7 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-emerald-600 transition-colors">Gemma4 Chat</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Google Gemma4 26B multimodal LLM. Text and vision understanding with OpenAI-compatible API. Powered by text-generator.io.
+                Gemma4 26B multimodal LLM. Chat and vision with an OpenAI-compatible messages API.
               </p>
               <div className="flex items-center gap-2 text-emerald-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('gemma4') > 0 ? `${formatCute(getServicePrice('gemma4'))} $CUTEDSL` : '50 $CUTEDSL'} / request
@@ -819,10 +850,25 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-orange-600 transition-colors">Image Caption</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                GitBase-powered image captioning. Generate accurate descriptions of any image for accessibility, search, or AI pipelines.
+                Image captioning API. GitBase captions for alt text, search, and vision pipelines.
               </p>
               <div className="flex items-center gap-2 text-orange-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('caption') > 0 ? `${formatCute(getServicePrice('caption'))} $CUTEDSL` : '50 $CUTEDSL'} / image
+              </div>
+            </motion.div>
+            </Link>
+
+            <Link href="/docs/manifold_video">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+              <div className="bg-violet-100 w-14 h-14 rounded-2xl flex items-center justify-center text-violet-500 mb-4 shadow-inner">
+                <Film size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-violet-600 transition-colors">ManifoldGen Video</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                AI video generator. Text-to-video and image-to-video via ManifoldGen native H3. Queued WebM with generated audio.
+              </p>
+              <div className="flex items-center gap-2 text-violet-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> queued · 3 jobs/day
               </div>
             </motion.div>
             </Link>
@@ -834,7 +880,7 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-red-600 transition-colors">LTX 2.3 Video</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Text-to-video generation via LTX 2.3. Generate 6-second 1080p videos from text prompts. Powered by fal.ai.
+                Text-to-video API. ~6 second 1080p/25fps clips from a prompt via LTX 2.3.
               </p>
               <div className="flex items-center gap-2 text-red-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('ltx_video') > 0 ? `${formatCute(getServicePrice('ltx_video'))} $CUTEDSL` : '300 $CUTEDSL'} / video
@@ -847,9 +893,9 @@ export default function Home() {
               <div className="bg-indigo-100 w-14 h-14 rounded-2xl flex items-center justify-center text-indigo-500 mb-4 shadow-inner">
                 <Globe size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Image</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Schnell</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Fast image generation via Flux Schnell. 4-step inference for quick 1024x1024 images. Also available through eBank.nz.
+                Fast AI image generator. 4-step Flux Schnell, 1024×1024. Also on eBank.nz.
               </p>
               <div className="flex items-center gap-2 text-indigo-500 font-bold text-sm mt-auto">
                 <Zap size={16} /> {getServicePrice('flux_image') > 0 ? `${formatCute(getServicePrice('flux_image'))} $CUTEDSL` : '40 $CUTEDSL'} / image
@@ -860,6 +906,10 @@ export default function Home() {
         </div>
       </section>
 
+      <div className="relative z-10 mx-auto max-w-5xl px-6 py-4">
+        <AdSense />
+      </div>
+
       {/* Try It - Image Gen Demo */}
       {walletAddress && apiKey && (
         <section id="try-it" className="py-16 relative z-10 scroll-mt-6">
@@ -867,6 +917,17 @@ export default function Home() {
             <div className="bg-white/80 backdrop-blur-xl rounded-3xl p-8 border border-pink-200 shadow-lg">
               <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>
               <p className="text-slate-500 mb-6 text-sm">Generate an image with your API key. This calls <code className="bg-slate-100 px-1 rounded">POST /api/service</code> with your credits.</p>
+              <div className="mb-4 flex gap-1 rounded-xl border border-pink-100 bg-white p-1">
+                {([['ra2', 'ra2 art generator'], ['zimage', 'Z-Image Turbo']] as const).map(([slug, label]) => (
+                  <button
+                    key={slug}
+                    onClick={() => { setDemoService(slug); setDemoResult(null); }}
+                    className={`flex-1 rounded-lg px-4 py-2 text-sm font-bold transition ${demoService === slug ? 'bg-gradient-to-r from-pink-400 to-purple-400 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
               <div className="flex gap-3 mb-4">
                 <input
                   type="text"
@@ -887,7 +948,7 @@ export default function Home() {
               <CodeBlock language="bash" className="text-xs bg-slate-950 p-3 rounded-lg mb-4 shadow-none" code={`curl -X POST ${clientOrigin}/api/service \\
   -H "Authorization: Bearer ${apiKey}" \\
   -H "Content-Type: application/json" \\
-  -d '{"prompt":"${demoPrompt}","width":512,"height":512}'`} />
+  -d '{"service":"${demoService}","prompt":"${demoPrompt}","width":512,"height":512}'`} />
               {demoResult && (
                 <div className="mt-4">
                   <img src={demoResult} alt="Generated" className="rounded-2xl shadow-lg max-w-full mx-auto" style={{maxHeight: 512}} />
@@ -906,9 +967,9 @@ export default function Home() {
               <div className="bg-purple-200 w-16 h-16 rounded-2xl flex items-center justify-center text-purple-600 mb-6 shadow-inner">
                 <Wand2 size={32} />
               </div>
-              <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">Training API</h2>
+              <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">LoRA Training API</h2>
               <p className="text-lg text-slate-700 mb-6 font-medium">
-                Fine-tune your own custom LoRAs for both <strong className="text-pink-600">zimage</strong> and <strong className="text-cyan-600">chronos2</strong> via our training API.
+                Fine-tune LoRAs for <strong className="text-pink-600">Z-Image Turbo</strong> and <strong className="text-cyan-600">Chronos-2</strong> on your dataset.
               </p>
               <p className="text-md text-slate-600 mb-8">
                 Upload your dataset and we&apos;ll train a personalized model for you, ready to query via our inference API.
@@ -946,8 +1007,8 @@ export default function Home() {
         <div className="absolute inset-0 bg-blue-50/60 backdrop-blur-md -z-10"></div>
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
-            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Developer API</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Integrate our models into your applications.</p>
+            <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Text-to-Image API</h2>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">One endpoint for Z-Image Turbo, Flux Schnell, TTS, STT, and Chronos-2.</p>
           </div>
 
           <div className="grid md:grid-cols-2 gap-8">
@@ -957,7 +1018,7 @@ export default function Home() {
                 <h3 className="font-fredoka text-3xl font-bold text-slate-800">API Usage Docs</h3>
               </div>
               <p className="text-slate-600 mb-8 text-lg">
-                Comprehensive documentation on how to authenticate, call our models (zimage, chronos2, Kokoro TTS, STT, Gemma4, Image Caption), and manage your custom LoRAs.
+                Auth, Z-Image Turbo / Flux text-to-image, Chronos-2, Kokoro TTS, speech-to-text, Gemma4, captions, and LoRA training.
               </p>
               <Link href="#api-docs" className="inline-flex items-center gap-2 text-blue-600 font-bold hover:text-blue-700">
                 Read the Docs &rarr;
@@ -1198,13 +1259,14 @@ export default function Home() {
             <CodeBlock language="bash" className="text-xs p-4 rounded-lg shadow-none" code={`curl -X POST https://cutedsl.cc/api/service \\
   -H "Authorization: Bearer ${apiKey || 'YOUR_API_KEY'}" \\
   -H "Content-Type: application/json" \\
-  -d '{"service": "zimage", "prompt": "a cute fairy in a forest", "width": 1024}'`} />
+  -d '{"service": "ra2", "prompt": "a cute fairy in a forest", "width": 1024}'`} />
           </div>
 
           {/* Preview cards */}
           <div className="grid md:grid-cols-3 gap-4 mb-10">
             {[
-              { name: 'Z-Image', slug: 'zimage', icon: <ImageIcon size={18} className="text-pink-500" />, desc: 'Text-to-image generation' },
+              { name: 'ra2 art generator', slug: 'ra2', icon: <Sparkles size={18} className="text-fuchsia-500" />, desc: 'Default text-to-image' },
+              { name: 'Z-Image', slug: 'zimage', icon: <ImageIcon size={18} className="text-pink-500" />, desc: 'Fast text-to-image' },
               { name: 'Chronos-2', slug: 'chronos2', icon: <LineChart size={18} className="text-cyan-500" />, desc: 'Time series forecasting' },
               { name: 'Kokoro TTS', slug: 'tts', icon: <Volume2 size={18} className="text-purple-500" />, desc: 'Text-to-speech synthesis' },
             ].map(s => (
@@ -1222,7 +1284,7 @@ export default function Home() {
             <Link href="/docs" className="inline-flex items-center gap-2 bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-8 py-3 rounded-full shadow-lg hover:shadow-pink-300/50 hover:scale-105 transition-all">
               View Full API Docs <ArrowRight size={18} />
             </Link>
-            <p className="text-sm text-slate-500 mt-3">9 services with interactive playgrounds, full parameter docs, and code examples</p>
+            <p className="text-sm text-slate-500 mt-3">12 models with interactive playgrounds, full parameter docs, and code examples</p>
           </div>
         </div>
       </section>
@@ -1234,9 +1296,9 @@ export default function Home() {
         
         <div className="max-w-4xl mx-auto px-6 text-center relative z-10">
           <Coins size={64} className="text-yellow-400 mx-auto mb-8 animate-bounce" />
-          <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTEDSL</h2>
+          <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">$CUTEDSL on Solana</h2>
           <p className="text-xl text-slate-200 mb-10 font-medium">
-            Pay for AI inference with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span> on Solana. First-party models (zimage, chronos2, TTS) are priced at the token&apos;s all-time high &mdash; so early holders get cheaper inference forever. The more $CUTEDSL grows, the better your rate locks in.
+            Pay for the text-to-image API with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span>. Z-Image, Chronos-2, and TTS are priced at the token ATH — early holders keep the cheaper inference rate.
           </p>
           
           <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-3xl p-8 mb-10">
@@ -1399,7 +1461,7 @@ export default function Home() {
                 <span className="font-fredoka text-2xl font-bold text-slate-800">CuteDSL</span>
               </div>
               <p className="text-slate-500 font-medium max-w-sm">
-                SOTA model acceleration &amp; inference platform. Part of the <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-700 underline">Applied AI NZ</a> ecosystem.
+                AI image generator, TTS, and forecasting API. Part of the <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:text-indigo-700 underline">Applied AI NZ</a> ecosystem.
               </p>
             </div>
             
@@ -1407,8 +1469,9 @@ export default function Home() {
               <h4 className="font-bold text-slate-800 mb-4">Explore</h4>
               <ul className="space-y-2 text-slate-500 font-medium">
                 <li><Link href="/gallery" className="hover:text-pink-500 transition-colors">AI Art Gallery</Link></li>
+                <li><Link href="/video-gallery" className="hover:text-purple-500 transition-colors">AI Video Gallery</Link></li>
                 <li><Link href="/search" className="hover:text-pink-500 transition-colors">Search Images</Link></li>
-                <li><Link href="#models" className="hover:text-pink-500 transition-colors">Models (zimage, chronos2)</Link></li>
+                <li><Link href="#models" className="hover:text-pink-500 transition-colors">Models (ra2, zimage, video, chronos2)</Link></li>
                 <li><Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals & Benchmarks</Link></li>
                 <li><Link href="/blog" className="hover:text-purple-500 transition-colors">Blog</Link></li>
                 <li><Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link></li>
@@ -1419,6 +1482,7 @@ export default function Home() {
             <div>
               <h4 className="font-bold text-slate-800 mb-4">Ecosystem</h4>
               <ul className="space-y-2 text-slate-500 font-medium">
+                <li><a href="https://manifoldgen.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">ManifoldGen.com — AI video</a></li>
                 <li><a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">App.nz — Applied AI NZ</a></li>
                 <li><a href="https://netwrck.com" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">Netwrck.com</a></li>
                 <li><a href="https://ebank.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500 transition-colors">eBank.nz</a></li>

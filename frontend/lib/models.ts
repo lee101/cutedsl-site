@@ -19,13 +19,80 @@ export interface ModelConfig {
   responseExample: Record<string, unknown>;
   pricingNote: string;
   pricingTier: 'first-party' | 'third-party';
+  /** Override playground POST path. Default `/service` with `{service: slug, ...}`. */
+  requestPath?: string;
 }
 
 export const MODELS: ModelConfig[] = [
   {
+    slug: 'ra2',
+    name: 'ra2 art generator',
+    description: 'ra2 art generator — cinematic and illustration-specialised text-to-image at 1024x1024. Higher quality than Z-Image Turbo, roughly 2x slower per image.',
+    category: 'image',
+    responseType: 'image',
+    pricingNote: '$1.00 per generation',
+    pricingTier: 'first-party',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'Text description of the image to generate', placeholder: 'cinematic portrait of a fox knight, volumetric light, 35mm film' },
+      { name: 'negative_prompt', type: 'string', required: false, description: 'Concepts to avoid in the image', placeholder: 'blurry, watermark, low detail' },
+      { name: 'width', type: 'int', required: false, default: 1024, description: 'Image width in pixels (rounded to a multiple of 32)' },
+      { name: 'height', type: 'int', required: false, default: 1024, description: 'Image height in pixels (rounded to a multiple of 32)' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Number of denoising steps (more = higher quality, slower)' },
+      { name: 'guidance', type: 'float', required: false, default: 1.0, description: 'Guidance scale — how closely to follow the prompt' },
+      { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/service \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "service": "ra2",
+    "prompt": "cinematic portrait of a fox knight, volumetric light, 35mm film",
+    "width": 1024,
+    "height": 1024,
+    "num_steps": 20,
+    "guidance": 1.0
+  }'`,
+    responseExample: {
+      result: { image_base64: '<base64-encoded WebP image>', width: 1024, height: 1024, format: 'webp', engine: 'ra2' },
+      credits_used: 1000,
+      credits_remain: 49000,
+      usd_equivalent: 1.0,
+    },
+  },
+  {
+    slug: 'ra2-edit',
+    name: 'ra2 art generator (edit)',
+    description: 'ra2 art generator style transfer and edit. Send a source image plus a prompt to restyle or refine it. Same engine and price as ra2.',
+    category: 'image',
+    responseType: 'image',
+    pricingNote: '$1.00 per edit',
+    pricingTier: 'first-party',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'How to restyle or refine the source image', placeholder: 'turn this into a watercolor illustration, soft pastel palette' },
+      { name: 'image_base64', type: 'string', required: true, description: 'Source image as raw base64 (no data: prefix)', placeholder: 'iVBORw0KGgoAAAANSUhEUg...' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Number of denoising steps (more = higher quality, slower)' },
+      { name: 'guidance', type: 'float', required: false, default: 1.0, description: 'Guidance scale — how closely to follow the prompt' },
+      { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/service \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "service": "ra2-edit",
+    "prompt": "turn this into a watercolor illustration, soft pastel palette",
+    "image_base64": "iVBORw0KGgoAAAANSUhEUg..."
+  }'`,
+    responseExample: {
+      result: { image_base64: '<base64-encoded WebP image>', width: 1024, height: 1024, format: 'webp', engine: 'ra2' },
+      credits_used: 1000,
+      credits_remain: 49000,
+      usd_equivalent: 1.0,
+    },
+  },
+  {
     slug: 'zimage',
     name: 'Z-Image Turbo',
-    description: 'Text-to-image generation powered by CuteZImage with fused Triton kernels. Generates high-quality 1024x1024 images in seconds.',
+    description: 'Z-Image Turbo text-to-image. 1024x1024 AI art from a prompt, fused Triton kernels, a few seconds per image.',
     category: 'image',
     responseType: 'image',
     pricingNote: '$1.00 per generation',
@@ -59,7 +126,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'chronos2',
     name: 'Chronos-2',
-    description: 'Time series forecasting with CuteChronos2 acceleration. Achieves 27x speedup over baseline with custom Triton kernels.',
+    description: 'Chronos-2 time series forecasting API. Quantile forecasts with 27x faster inference via custom Triton kernels.',
     category: 'timeseries',
     responseType: 'json',
     pricingNote: '$0.50 per forecast',
@@ -87,7 +154,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'tts',
     name: 'Kokoro TTS',
-    description: 'High-quality text-to-speech with 20+ voices powered by Kokoro. Natural-sounding speech synthesis with adjustable speed.',
+    description: 'Kokoro text-to-speech. 20+ voices, WAV output, adjustable speed.',
     category: 'audio',
     responseType: 'audio',
     pricingNote: '$0.10 per 100 characters',
@@ -116,7 +183,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'stt',
     name: 'Speech-to-Text',
-    description: 'Audio transcription powered by Gemma4. Accurately transcribes speech from audio URLs with support for multiple languages.',
+    description: 'Speech-to-text / transcription from an audio URL. Gemma4 ASR, multilingual.',
     category: 'audio',
     responseType: 'json',
     pricingNote: '$0.20 per minute',
@@ -141,7 +208,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'gemma4',
     name: 'Gemma4 Chat',
-    description: 'Gemma4 26B multimodal LLM for chat and vision tasks. Supports OpenAI-compatible message format with text and image inputs.',
+    description: 'Gemma4 26B multimodal LLM. Chat and vision with OpenAI-compatible messages.',
     category: 'text',
     responseType: 'json',
     pricingNote: '$0.05 per request',
@@ -170,7 +237,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'caption',
     name: 'Image Caption',
-    description: 'Automatic image captioning powered by GitBase. Generates descriptive captions for any image URL.',
+    description: 'Image captioning. GitBase captions from an image URL for alt text and search.',
     category: 'text',
     responseType: 'json',
     pricingNote: '$0.05 per image',
@@ -193,9 +260,53 @@ export const MODELS: ModelConfig[] = [
     },
   },
   {
+    slug: 'manifold_video',
+    name: 'ManifoldGen Video',
+    description: 'ManifoldGen text-to-video and image-to-video. Queued native H3 jobs, WebM, optional start frame and generated audio.',
+    category: 'video',
+    responseType: 'video',
+    pricingNote: 'queued · 3 jobs/day default',
+    pricingTier: 'third-party',
+    requestPath: '/generations',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'Motion description for the clip', placeholder: 'A glass whale swims through a flooded library, slow crane shot, volumetric light' },
+      { name: 'aspect_ratio', type: 'string', required: false, default: '16:9', description: 'Output aspect ratio', options: ['16:9', '9:16', '1:1'] },
+      { name: 'size', type: 'string', required: false, default: 'preview', description: 'Pixel-area tier: preview, balanced, or native H3', options: ['preview', 'balanced', 'native'] },
+      { name: 'duration', type: 'int', required: false, default: 5, description: 'Clip length in seconds (4–60)' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Denoising steps (8–40)' },
+      { name: 'first_frame', type: 'string', required: false, description: 'Public http(s) URL of a still to animate (image-to-video)', placeholder: 'https://cutedsl.cc/images/thumbs/example.webp' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/generations \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "prompt": "A glass whale swims through a flooded library, slow crane shot",
+    "aspect_ratio": "16:9",
+    "size": "preview",
+    "duration": 5,
+    "num_steps": 20,
+    "include_audio": true
+  }'
+
+# Poll until completed (do not re-POST):
+curl https://cutedsl.cc/api/generations/JOB_ID \\
+  -H "Authorization: Bearer YOUR_API_KEY"`,
+    responseExample: {
+      job: {
+        job_id: 'gen_abc123',
+        service: 'video',
+        kind: 'video',
+        status: 'queued',
+        prompt: 'A glass whale swims through a flooded library, slow crane shot',
+        is_public: false,
+      },
+      status_url: '/api/generations/gen_abc123',
+    },
+  },
+  {
     slug: 'ltx_video',
     name: 'LTX Video',
-    description: 'Text-to-video generation using LTX 2.3. Creates ~6 second 1080p videos at 25fps from text prompts.',
+    description: 'LTX 2.3 text-to-video. ~6 second 1080p 25fps clips from a prompt.',
     category: 'video',
     responseType: 'video',
     pricingNote: '$0.30 per ~6s video',
@@ -220,7 +331,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'flux_image',
     name: 'Flux Schnell',
-    description: 'Fast image generation using Flux Schnell via fal.ai. Produces 1024x1024 images with minimal latency.',
+    description: 'Flux Schnell AI image generator. Fast 1024x1024 text-to-image via fal.ai.',
     category: 'image',
     responseType: 'image',
     pricingNote: '$0.04 per image',
@@ -245,7 +356,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'lora_training',
     name: 'LoRA Training',
-    description: 'Fine-tune models with LoRA adapters. Train custom adapters for Z-Image or Chronos-2 on your own data.',
+    description: 'LoRA training for Z-Image Turbo or Chronos-2 on your dataset.',
     category: 'training',
     responseType: 'json',
     pricingNote: '$50.00 per training job',
