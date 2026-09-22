@@ -35,6 +35,16 @@ func TestMain(m *testing.M) {
 
 	devMode = true
 	frontendURL = "http://localhost:3000"
+	os.Setenv("ZIMAGE_PRICE_USD", "0.04")
+	os.Setenv("CHRONOS_PRICE_USD", "0.02")
+	os.Setenv("TTS_PRICE_USD_PER_100CHARS", "0.005")
+	os.Setenv("STT_PRICE_USD_PER_MINUTE", "0.02")
+	os.Setenv("GEMMA4_PRICE_USD", "0.01")
+	os.Setenv("CAPTION_PRICE_USD", "0.01")
+	os.Setenv("LORA_TRAINING_PRICE_USD", "5")
+	os.Setenv("LTX_VIDEO_PRICE_USD", "0.30")
+	os.Setenv("FLUX_IMAGE_PRICE_USD", "0.04")
+	os.Setenv("NSFW_DETECT_PRICE_USD", "0.001")
 	initServices()
 
 	// Find a free port
@@ -307,14 +317,85 @@ func TestPricing(t *testing.T) {
 
 	// Check that all expected services are present
 	services := map[string]bool{}
+	prices := map[string]float64{}
 	for _, p := range pricing {
 		pm := p.(map[string]interface{})
-		services[pm["service"].(string)] = true
+		service := pm["service"].(string)
+		services[service] = true
+		prices[service], _ = pm["price_usd"].(float64)
 	}
 	for _, expected := range []string{"ra2", "ra2-edit", "zimage", "chronos2", "tts", "stt", "gemma4", "caption", "lora_training"} {
 		if !services[expected] {
 			t.Errorf("missing service in pricing: %s", expected)
 		}
+	}
+	if prices["zimage"] != 0.04 {
+		t.Fatalf("expected zimage price_usd 0.04, got %v", prices["zimage"])
+	}
+}
+
+func TestImageSearchSkipTotal(t *testing.T) {
+	img := &GeneratedImage{
+		ID:       "test-skip-total-image",
+		Prompt:   "benchmark fairy gallery image",
+		Width:    1024,
+		Height:   1024,
+		FilePath: "test/skip-total.webp",
+		Model:    "zimage",
+		Steps:    8,
+	}
+	if err := dbConn.InsertGeneratedImage(img); err != nil {
+		t.Fatalf("insert image: %v", err)
+	}
+
+	status, body := doGet(t, "/api/images?page=1&per_page=1&skip_total=true")
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %#v", status, body)
+	}
+	if body["total"].(float64) != 0 {
+		t.Fatalf("skip_total should avoid COUNT(*) and return total 0, got %#v", body["total"])
+	}
+	images, ok := body["images"].([]interface{})
+	if !ok || len(images) != 1 {
+		t.Fatalf("expected one image, got %#v", body["images"])
+	}
+}
+
+func TestZImageRequestPricingTiers(t *testing.T) {
+	prevDefaultSteps := zimageDefaultSteps
+	prevHighStepPrice := zimageHighStepPriceUSD
+	prevBasePrice := servicePricesUSD["zimage"]
+	t.Cleanup(func() {
+		zimageDefaultSteps = prevDefaultSteps
+		zimageHighStepPriceUSD = prevHighStepPrice
+		servicePricesUSD["zimage"] = prevBasePrice
+	})
+
+	zimageDefaultSteps = 8
+	zimageHighStepPriceUSD = 0.10
+	servicePricesUSD["zimage"] = 0.04
+
+	cases := []struct {
+		name  string
+		steps int
+		want  float64
+	}{
+		{name: "default", steps: 0, want: 0.04},
+		{name: "below high tier", steps: 19, want: 0.04},
+		{name: "twenty steps", steps: 20, want: 0.10},
+		{name: "forty steps", steps: 40, want: 0.10},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getRequestServicePriceUSD(ServiceUsageRequest{
+				Service:  "zimage",
+				NumSteps: tc.steps,
+			})
+			if got != tc.want {
+				t.Fatalf("expected zimage USD price %.2f, got %.2f", tc.want, got)
+			}
+		})
 	}
 }
 

@@ -95,13 +95,13 @@ export const MODELS: ModelConfig[] = [
     description: 'Z-Image Turbo text-to-image. 1024x1024 AI art from a prompt, fused Triton kernels, a few seconds per image.',
     category: 'image',
     responseType: 'image',
-    pricingNote: '$1.00 per generation',
+    pricingNote: '$0.04 per generation; $0.10 for 20+ steps',
     pricingTier: 'first-party',
     params: [
       { name: 'prompt', type: 'string', required: true, description: 'Text description of the image to generate', placeholder: 'a cute cat wearing a tiny top hat, watercolor style' },
       { name: 'width', type: 'int', required: false, default: 1024, description: 'Image width in pixels (must be divisible by 64)' },
       { name: 'height', type: 'int', required: false, default: 1024, description: 'Image height in pixels (must be divisible by 64)' },
-      { name: 'num_steps', type: 'int', required: false, default: 4, description: 'Number of denoising steps (more = higher quality, slower)' },
+      { name: 'num_steps', type: 'int', required: false, default: 8, description: 'Number of denoising steps (more = higher quality, slower)' },
       { name: 'guidance', type: 'float', required: false, default: 3.5, description: 'Guidance scale — how closely to follow the prompt' },
       { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
     ],
@@ -113,14 +113,14 @@ export const MODELS: ModelConfig[] = [
     "prompt": "a cute cat wearing a tiny top hat, watercolor style",
     "width": 1024,
     "height": 1024,
-    "num_steps": 4,
+    "num_steps": 8,
     "guidance": 3.5
   }'`,
     responseExample: {
       result: { image_base64: '<base64-encoded WebP image>', width: 1024, height: 1024, format: 'webp' },
       credits_used: 1000,
       credits_remain: 49000,
-      usd_equivalent: 1.0,
+      usd_equivalent: 0.04,
     },
   },
   {
@@ -153,16 +153,18 @@ export const MODELS: ModelConfig[] = [
   },
   {
     slug: 'tts',
-    name: 'Kokoro TTS',
-    description: 'Kokoro text-to-speech. 20+ voices, WAV output, adjustable speed.',
+    name: 'Supertonic TTS',
+    description: 'Supertonic text-to-speech via text-generator.io. 20+ Kokoro voices with language, speed, and step controls.',
     category: 'audio',
     responseType: 'audio',
     pricingNote: '$0.10 per 100 characters',
     pricingTier: 'first-party',
     params: [
       { name: 'text', type: 'string', required: true, description: 'Text to convert to speech', placeholder: 'Hello! Welcome to CuteDSL, the fastest AI inference platform.' },
-      { name: 'voice', type: 'string', required: false, description: 'Voice ID to use', options: ['af_nicole', 'af_sarah', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bf_isabella', 'bm_george', 'bm_lewis'] },
+      { name: 'voice', type: 'string', required: false, description: 'Voice ID to use. M1-M5/F1-F5 use Supertonic; Kokoro voices such as af_nicole are still supported.', options: ['M1', 'M2', 'M3', 'M4', 'M5', 'F1', 'F2', 'F3', 'F4', 'F5', 'af_nicole', 'af_sarah', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bf_isabella', 'bm_george', 'bm_lewis'] },
+      { name: 'language', type: 'string', required: false, default: 'en', description: 'Supertonic language code. Kokoro derives language from the voice.', options: ['en', 'ko', 'ja', 'ar', 'bg', 'cs', 'da', 'de', 'el', 'es', 'et', 'fi', 'fr', 'hi', 'hr', 'hu', 'id', 'it', 'lt', 'lv', 'nl', 'pl', 'pt', 'ro', 'ru', 'sk', 'sl', 'sv', 'tr', 'uk', 'vi'] },
       { name: 'speed', type: 'float', required: false, default: 1.0, description: 'Speech speed multiplier (0.5 = half speed, 2.0 = double speed)' },
+      { name: 'steps', type: 'int', required: false, default: 4, description: 'Supertonic synthesis steps' },
     ],
     curlExample: `curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
@@ -170,11 +172,13 @@ export const MODELS: ModelConfig[] = [
   -d '{
     "service": "tts",
     "text": "Hello! Welcome to CuteDSL.",
-    "voice": "af_nicole",
-    "speed": 1.0
+    "voice": "M1",
+    "language": "en",
+    "speed": 1.0,
+    "steps": 4
   }'`,
     responseExample: {
-      result: { audio_base64: '<base64-encoded audio>', format: 'wav', duration_seconds: 2.1 },
+      result: { audio_base64: '<base64-encoded audio>', format: 'wav', voice: 'M1', language: 'en', characters: 25 },
       credits_used: 26,
       credits_remain: 49974,
       usd_equivalent: 0.026,
@@ -359,7 +363,7 @@ curl https://cutedsl.cc/api/generations/JOB_ID \\
     description: 'LoRA training for Z-Image Turbo or Chronos-2 on your dataset.',
     category: 'training',
     responseType: 'json',
-    pricingNote: '$50.00 per training job',
+    pricingNote: '$5.00 per training job',
     pricingTier: 'first-party',
     params: [
       { name: 'model', type: 'string', required: true, description: 'Base model to fine-tune', options: ['zimage', 'chronos2'] },
@@ -388,9 +392,9 @@ curl https://cutedsl.cc/api/train/JOB_ID \\
   -H "Authorization: Bearer YOUR_API_KEY"`,
     responseExample: {
       result: { job_id: 'train_abc123', status: 'queued', model: 'chronos2', dataset_name: 'my-timeseries', estimated_time_minutes: 15 },
-      credits_used: 50000,
-      credits_remain: 0,
-      usd_equivalent: 50.0,
+      credits_used: 5000,
+      credits_remain: 45000,
+      usd_equivalent: 5.0,
     },
   },
 ];

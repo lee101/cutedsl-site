@@ -4,7 +4,9 @@
 
 - Public route: `https://images.netwrck.com/create_and_upload_image`
 - Local inference: `http://localhost:8100/create_and_upload_image`
-- Default backend: vanilla diffusers Z-Image Turbo, `bfloat16`, no CPU offload.
+- Default backend in the shared worker: vanilla diffusers Z-Image Turbo,
+  `bfloat16`, CPU offload enabled. Dedicated workers can use
+  `ZIMAGE_CPU_OFFLOAD=0` or `auto` when enough VRAM is free.
 - Default steps: `4`
 - Exact-prompt latent teleport: opt-in with `teleport=true`
 - Perf metadata: opt-in with `perf=true`. This only adds timing/cache fields
@@ -78,6 +80,184 @@ Run reliability probes across prompt lengths and feature modes:
   --width 512 \
   --height 512
 ```
+
+Run a local visual step sweep. This writes a default 10-image set under the
+gitignored `evals/` directory: 2 prompts × `4,8,12,16,20` steps, with the
+20-step image treated as the local gold/reference for each prompt.
+
+```bash
+/nvme0n1-disk/code/.venv/bin/python scripts/zimage_step_eval.py \
+  --base-url http://127.0.0.1:8100 \
+  --steps 4,8,12,16,20
+```
+
+Run a first L2P pixel-space comparison from the sibling research checkout:
+
+```bash
+/nvme0n1-disk/code/.venv/bin/python scripts/zimage_l2p_eval.py \
+  --repo-path ../T2I-L2P \
+  --steps 20 \
+  --vram-limit 16
+```
+
+Run exact-prompt latent teleport eval for the production upload path. This
+uses full 20-step output as the reference, primes the latent cache, then
+measures replay speed and image equality/PSNR under `evals/`.
+
+```bash
+/nvme0n1-disk/code/.venv/bin/python scripts/zimage_teleport_eval.py \
+  --base-url http://127.0.0.1:8100 \
+  --steps 20
+```
+
+Sweep exact replay from a later cached latent:
+
+```bash
+/nvme0n1-disk/code/.venv/bin/python scripts/zimage_teleport_eval.py \
+  --base-url http://127.0.0.1:8100 \
+  --steps 20 \
+  --teleport-start-step 16
+```
+
+Run the experimental nearest-latent cache-miss path:
+
+```bash
+/nvme0n1-disk/code/.venv/bin/python scripts/zimage_approx_teleport_eval.py \
+  --base-url http://127.0.0.1:8100 \
+  --steps 20 \
+  --start-step 16 \
+  --min-similarity 0.0
+```
+
+Latest small live check:
+
+- Report: `evals/zimage_teleport_20260525T222050Z/report.md`
+- Requested steps: `20`
+- Server-reported effective steps: `8` because the live inference process had
+  not yet reloaded the new upload-route `num_inference_steps` parameter.
+- Baseline server inference: `19.716s`
+- Exact teleport replay server inference: `16.979s`
+- Replay cache hit: `true`
+- Replay quality versus baseline: `MSE=0`, `PSNR=inf`
+
+Restart the inference service before treating a `--steps 20` teleport run as a
+true 20-step measurement.
+
+Verified true 20-step check after reloading the inference process:
+
+- Report: `evals/zimage_teleport_20260525T222932Z/report.md`
+- Runtime mode: vanilla diffusers fallback (`zimage_use_cute=false`) because
+  the CuteZImage reload hung during post-checkpoint initialization.
+- Requested steps: `20`
+- Server-reported effective steps: `20`
+- Baseline server inference: `41.758s`
+- Exact teleport replay server inference: `26.864s`
+- Replay cache hit: `true`
+- Replay quality versus baseline: `MSE=0`, `PSNR=inf`
+
+This proves exact-prompt teleport replay preserves deterministic 20-step output
+and skips enough denoising to cut server inference by about `36%` in the
+vanilla fallback path. The same eval should be rerun on a healthy CuteZImage
+reload before using the absolute latency numbers for production.
+
+Later exact replay checks with configurable `teleport_start_step`:
+
+- `evals/zimage_teleport_20260525T231012Z/report.md`
+  - start step: `16` (4 refinement steps)
+  - baseline server inference: `33.827s`
+  - exact replay server inference: `16.979s`
+  - quality: `MSE=0`, `PSNR=inf`
+- `evals/zimage_teleport_20260525T231417Z/report.md`
+  - start step: `19` (1 refinement step)
+  - baseline server inference: `19.892s`
+  - exact replay server inference: `15.391s`
+  - quality: `MSE=0`, `PSNR=inf`
+
+Interpretation: exact cached replay remains pixel-exact even when resuming very
+late, but the vanilla fallback has a roughly `15s` floor at 512px because
+prompt setup, offload/onload, VAE decode, encoding, and upload overhead dominate
+after most denoising is skipped.
+
+Approximate nearest-latent replay was tested as a cache-miss accelerator:
+
+- `evals/zimage_approx_teleport_20260525T230533Z/report.md`
+  - start step: default `7`
+  - target full server inference: `20.462s`
+  - approximate replay server inference: `23.442s`
+  - quality: `PSNR=14.63`, visually retained the source red block instead of
+    the target orange block
+- `evals/zimage_approx_teleport_20260525T231203Z/report.md`
+  - start step: `16`
+  - target full server inference: `20.378s`
+  - approximate replay server inference: `22.309s`
+  - quality: `PSNR=14.46`, same source-color failure
+
+Conclusion for approximate teleport: nearest cached latents by pooled Z-Image
+text embedding are not production-usable yet. They were slower than warmed
+20-step full generation in these smoke runs and failed the visual target. Keep
+the endpoint path opt-in behind `teleport_approx=true` while experimenting with
+better cache selection or a trained latent delta/forecaster.
+
+No-offload vanilla diffusers was tested by restarting with
+`ZIMAGE_CPU_OFFLOAD=0` while leaving `askfelix` and `text-generator.io`
+resident:
+
+- partial report: `evals/zimage_teleport_20260525T231903Z/`
+- full 20-step baseline at `512x512`: `13.616s` server inference
+- warmed offload comparison from nearby runs: about `19.9-20.5s`
+- result: no-offload is a clear base-generation speed win when it fits
+- caveat: with the resident `text-generator.io` process using about `8.4 GB`,
+  no-offload left only tens of MB free, so prompt-embedding capture/replay OOMed
+  and exact teleport could not be used safely
+
+Recommendation: use no-offload vanilla Z-Image for a dedicated image worker or
+when enough VRAM is free; keep CPU offload on for the shared worker that runs
+beside text generation. The server now reports `zimage_cpu_offload` in `/health`
+and guards teleport replay/cache embedding capture when free CUDA memory is too
+low, so no-offload experiments fail back to full generation instead of returning
+500s.
+
+Deployment knob:
+
+- `ZIMAGE_CPU_OFFLOAD=1`: safe shared-worker mode; lower peak VRAM, higher
+  latency.
+- `ZIMAGE_CPU_OFFLOAD=0`: fastest base-generation mode; requires enough free
+  VRAM for transformer + text encoder + VAE plus request headroom.
+- `ZIMAGE_CPU_OFFLOAD=auto`: choose no-offload only when free CUDA memory is at
+  least `ZIMAGE_NO_OFFLOAD_MIN_FREE_MB` (default `24576` MB), otherwise use
+  CPU offload. If the no-offload `.to(cuda)` load still fails, the server
+  falls back to CPU offload and reports the effective mode in `/health`.
+
+Use `ZIMAGE_CPU_OFFLOAD=auto` for a worker that might run dedicated sometimes
+and shared other times. Keep `ZIMAGE_CPU_OFFLOAD=1` for the current always-shared
+worker beside `text-generator.io`.
+
+Run the L2P pixel-space runner with exact-prompt replay enabled. This is an
+experimental measurement path for combining L2P with latent replay; it is not
+cross-prompt visual-unit teleportation yet.
+
+```bash
+/nvme0n1-disk/code/.venv/bin/python scripts/zimage_l2p_eval.py \
+  --repo-path ../T2I-L2P \
+  --steps 20 \
+  --teleport \
+  --vram-limit 16
+```
+
+Latest L2P smoke:
+
+- Report: `evals/zimage_l2p_20260525T225802Z/report.md`
+- Runtime mode: disk-backed VRAM management for the L2P DiT, with resident
+  `askfelix` and `text-generator.io` GPU processes left running.
+- Size/steps: `256x256`, `4` steps
+- Baseline L2P wall time: `56.915s`
+- Exact replay from step 2 wall time: `28.188s`
+- Replay quality versus baseline: `MSE=0`, `PSNR=inf`
+
+This proves L2P exact-prompt replay is viable and deterministic, but it is not
+currently a production speed win under disk offload. Re-test L2P full-CUDA on a
+dedicated GPU window before comparing it against the production 4-20 step
+Z-Image path.
 
 Run slow pytest coverage for live GPU generation:
 

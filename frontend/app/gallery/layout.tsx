@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
+import { staticAssetPath } from '@/lib/static-assets';
 
 const siteUrl = 'https://cutedsl.cc';
-const imgBase = 'https://appstatic.app.nz/cutedsl/images';
 
 export const metadata: Metadata = {
   title: 'AI Art Gallery — 100,000+ Fairy, Fantasy & Anime Images',
@@ -31,7 +31,7 @@ export const metadata: Metadata = {
       'A Pinterest-style masonry of 100,000+ AI-generated images powered by CuteDSL Z-Image Turbo. Click any image for prompt, seed, and related art.',
     images: [
       {
-        url: `${imgBase}/og-image.webp`,
+        url: staticAssetPath('/images/og-image.webp'),
         width: 1360,
         height: 768,
         alt: 'CuteDSL AI Art Gallery — fairies, fantasy, anime and more',
@@ -43,7 +43,7 @@ export const metadata: Metadata = {
     title: 'CuteDSL AI Art Gallery',
     description:
       '100,000+ AI-generated fairy, fantasy, and anime images — all prompt-searchable.',
-    images: [`${imgBase}/og-image.webp`],
+    images: [staticAssetPath('/images/og-image.webp')],
   },
   robots: {
     index: true,

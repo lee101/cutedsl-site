@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass
@@ -17,6 +18,38 @@ import numpy as np
 from lora_fixtures import LoRAMetadata, get_all_zimage_loras, get_lora_map
 
 logger = logging.getLogger("cutedsl-inference")
+
+_STOPWORDS = {"a", "an", "and", "the", "with", "for", "to", "of", "in", "on", "by", "at", "is"}
+_ADULT_QUERY_TERMS = {
+    "nsfw", "adult", "explicit", "porn", "hentai", "nude", "naked",
+    "breast", "breasts", "ahegao", "erotic", "sensual", "xxx",
+}
+
+
+def _normalize_token(token: str) -> str:
+    token = re.sub(r"^[^\w]+|[^\w]+$", "", token.lower())
+    for suffix in ("istic", "ism", "ing", "ness", "tion", "es", "ed", "s"):
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _query_terms(text: str) -> list[str]:
+    terms = []
+    for raw in re.split(r"[\s,;:/|()\[\]{}]+", text.lower()):
+        term = _normalize_token(raw)
+        if len(term) > 2 and term not in _STOPWORDS:
+            terms.append(term)
+    return terms
+
+
+def _query_allows_adult(query: str) -> bool:
+    terms = set(_query_terms(query))
+    return any(term in terms for term in _ADULT_QUERY_TERMS)
+
+
+def _normalized_phrase(text: str) -> str:
+    return " ".join(_query_terms(text))
 
 
 @dataclass
@@ -160,7 +193,13 @@ class LoRASearchEngine:
             sim = self._cosine_similarity(query_emb, neg_emb)
             max_negative_sim = max(max_negative_sim, sim)
 
-        return max(max_positive_sim - max_negative_sim, 0.0)
+        score = max(max_positive_sim - max_negative_sim, 0.0)
+        query_norm = _normalized_phrase(query)
+        if lora.trigger_word and _normalized_phrase(lora.trigger_word) in query_norm:
+            score += 0.35
+        if _normalized_phrase(lora.name) in query_norm:
+            score += 0.25
+        return score * 1.2
 
     def search(self, query: str, top_k: int = 5) -> list[LoRASearchResult]:
         with self._lock:
@@ -176,8 +215,11 @@ class LoRASearchEngine:
 
         loras = get_lora_map()
         results = []
+        allow_adult = _query_allows_adult(query)
 
         for lora_id, lora in loras.items():
+            if lora.is_adult and not allow_adult:
+                continue
             score = self._compute_embedding_score(query_emb, lora_id, lora, query)
             if score <= 0:
                 continue
@@ -199,41 +241,65 @@ class LoRASearchEngine:
 
     def _search_keywords(self, query: str, top_k: int) -> list[LoRASearchResult]:
         query_lower = query.lower()
-        stopwords = {"a", "an", "and", "the", "with", "for", "to", "of", "in", "on", "by", "at", "is"}
-        words = [w for w in query_lower.split() if len(w) > 2 and w not in stopwords]
+        query_norm = _normalized_phrase(query)
+        query_word_set = set(_query_terms(query))
+        allow_adult = _query_allows_adult(query)
 
         loras = get_lora_map()
         scores: dict[str, float] = {}
         match_types: dict[str, str] = {}
 
         for lora_id, lora in loras.items():
+            if lora.is_adult and not allow_adult:
+                continue
+
             score = 0.0
             mt = "keyword"
 
-            if lora.trigger_word and lora.trigger_word.lower() in query_lower:
+            trigger_norm = _normalized_phrase(lora.trigger_word)
+            name_norm = _normalized_phrase(lora.name)
+            if trigger_norm and trigger_norm in query_norm:
                 score += 3.0
                 mt = "trigger"
 
-            if lora.name.lower() in query_lower:
+            if name_norm and name_norm in query_norm:
                 score += 2.0
                 if mt == "keyword":
                     mt = "name"
 
+            lora_id_norm = _normalize_token(lora_id.replace("_", " "))
+            if lora_id_norm and lora_id_norm in query_norm:
+                score += 2.0
+                if mt == "keyword":
+                    mt = "id"
+
+            for name_word in set(_query_terms(lora.name)):
+                if name_word in query_word_set:
+                    score += 1.5
+                    if mt == "keyword":
+                        mt = "name"
+
             matched_words = set()
             for kw in lora.keywords:
-                kw_lower = kw.lower()
-                for word in words:
-                    if word in kw_lower or kw_lower in word:
+                kw_terms = _query_terms(kw)
+                kw_norm = " ".join(kw_terms)
+                if kw_norm and kw_norm in query_norm:
+                    score += 1.25
+                for word in query_word_set:
+                    if word in kw_terms:
                         if word not in matched_words:
                             score += 1.0
                             matched_words.add(word)
 
             for neg_kw in lora.negative_keywords:
-                if neg_kw.lower() in query_lower:
+                neg_norm = _normalized_phrase(neg_kw)
+                if neg_norm and neg_norm in query_norm:
                     score -= 0.5
+                elif any(word in query_word_set for word in _query_terms(neg_kw)):
+                    score -= 0.25
 
             if score > 0:
-                scores[lora_id] = score
+                scores[lora_id] = score * 1.2
                 match_types[lora_id] = mt
 
         sorted_ids = sorted(scores, key=scores.get, reverse=True)

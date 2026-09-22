@@ -7,8 +7,9 @@ import { ArrowLeft, ArrowRight, Copy, Check, Lock, Key, BookOpen } from 'lucide-
 import { useAuth, replaceApiKey } from '@/hooks/use-auth';
 import { MODELS, CATEGORY_LABELS, CATEGORY_COLORS } from '@/lib/models';
 import { CodeBlock } from '@/lib/code-block';
+import { staticAssetPath } from '@/lib/static-assets';
 
-const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
+const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
 export default function DocsPage() {
   const { apiKey, isLoggedIn } = useAuth();

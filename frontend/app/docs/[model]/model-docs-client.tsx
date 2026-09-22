@@ -7,9 +7,11 @@ import { ArrowLeft, Copy, Check, Play, Loader2, Download, ChevronRight, Lock } f
 import { useAuth, replaceApiKey } from '@/hooks/use-auth';
 import { MODEL_MAP, CATEGORY_LABELS, CATEGORY_COLORS, type ModelConfig, type ModelParam } from '@/lib/models';
 import { CodeBlock } from '@/lib/code-block';
+import { parseJSONResponse } from '@/lib/http';
+import { staticAssetPath } from '@/lib/static-assets';
 
 const API_BASE = '/api';
-const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
+const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
 function ParamInput({ param, value, onChange }: { param: ModelParam; value: string; onChange: (v: string) => void }) {
   if (param.options) {
@@ -205,13 +207,9 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
         },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || `Request failed (${res.status})`);
-      } else {
-        setResponse(data);
-        setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
-      }
+      const data = await parseJSONResponse<Record<string, unknown>>(res, `Request failed (${res.status})`);
+      setResponse(data);
+      setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Request failed');
     } finally {

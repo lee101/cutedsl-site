@@ -161,7 +161,7 @@ ManifoldGen and CuteDSL are both Applied AI NZ. ManifoldGen is the creative stud
     excerpt: 'OpenAI-compatible POST /v1/images/generations through OmniServe Native: Z-Image Turbo Q4 GGUF, stable-diffusion.cpp, latent teleport, WebP out.',
     content: `CuteDSL's production text-to-image path is no longer "Python FastAPI on the hot path." Image requests hit OmniServe Native — a C HTTP gateway with an epoll reactor — then either the embedded stable-diffusion.cpp Z-Image Turbo runtime or a loopback worker.
 
-Every image in this post was generated with that stack: \`POST /v1/images/generations\`, Z-Image Turbo Q4 GGUF, Qwen3-4B text encoder, tiled VAE.
+Every image in this post was generated with that stack: \`POST /v1/images/generations\`, Z-Image Turbo Q4 GGUF, 4B text encoder, tiled VAE.
 
 ![Z-Image Turbo fairy generated with OmniServe Native](/blog-art/zimage-omniserve-native.webp)
 
@@ -205,9 +205,9 @@ Split weights (same layout as the systemd unit):
 | Env | File |
 | \`OMNISERVE_NATIVE_SD_DIFFUSION_MODEL\` | \`z_image_turbo-Q4_K.gguf\` |
 | \`OMNISERVE_NATIVE_SD_VAE\` | \`ae.safetensors\` |
-| \`OMNISERVE_NATIVE_SD_LLM\` | \`Qwen3-4B-Instruct-2507-Q4_K_M.gguf\` |
+| \`OMNISERVE_NATIVE_SD_LLM\` | \`<4B instruct text encoder>.gguf\` |
 
-Q4 is ~3.9 GB for the transformer. The 4B Qwen encoder is the other large resident. \`OMNISERVE_NATIVE_SD_STREAM_LAYERS=1\` plus VAE tiling (\`VAE_TILE_X/Y=64\`) is how this fits next to other GPU tenants.
+Q4 is ~3.9 GB for the transformer. The 4B text encoder is the other large resident. \`OMNISERVE_NATIVE_SD_STREAM_LAYERS=1\` plus VAE tiling (\`VAE_TILE_X/Y=64\`) is how this fits next to other GPU tenants.
 
 ![Z-Image Turbo pastel lab, OmniServe Native](/blog-art/zimage-omniserve-native-lab.webp)
 

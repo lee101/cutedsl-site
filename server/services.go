@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,19 +20,22 @@ import (
 
 // Service pricing in USD (converted to $CUTE at current rate)
 var servicePricesUSD = map[string]float64{
-	"ra2":           1.00, // per generation (default image service)
+	"ra2":           1.00, // per generation (default image service; tracks zimage rate at init)
 	"ra2-edit":      1.00, // per edit / style transfer (same price as ra2)
-	"zimage":        1.00, // per generation
-	"chronos2":      0.50, // per forecast
-	"tts":           0.10, // per 100 chars
-	"stt":           0.20, // per minute
-	"gemma4":        0.05, // per request
-	"caption":       0.05, // per image
-	"lora_training": 50.00,
-	"ltx_video":     0.30, // per ~6s 1080p video via fal.ai
-	"flux_image":    0.04, // per image via fal.ai or netwrck
-	"nsfw_detect":   0.01, // per image classification
+	"zimage":        0.04,  // per generation
+	"chronos2":      0.02,  // per forecast
+	"tts":           0.005, // per 100 chars
+	"stt":           0.02,  // per minute
+	"gemma4":        0.01,  // per request
+	"caption":       0.01,  // per image
+	"lora_training": 5.00,
+	"ltx_video":     0.30,  // per ~6s 1080p video via fal.ai
+	"flux_image":    0.04,  // per image via fal.ai or netwrck
+	"nsfw_detect":   0.001, // per image classification
 }
+
+var zimageDefaultSteps = 8
+var zimageHighStepPriceUSD = 0.10
 
 // First-party services run on our hardware — priced at ATH rate to reward early holders.
 // If you bought $CUTEDSL at $0.001 and ATH is $0.01, you pay 10x fewer tokens.
@@ -42,6 +48,7 @@ var firstPartyServices = map[string]bool{
 
 // FAL API key for third-party proxied services
 var falAPIKey string
+var textGeneratorAPIKey string
 
 // ra2 backend bearer/API-key secret (RA2_BACKEND_SECRET)
 var ra2BackendSecret string
@@ -63,6 +70,7 @@ var serviceBackends = map[string]string{}
 func initServices() {
 	// CuteDSL inference server serves zimage, chronos2, tts, stt, caption, gemma4
 	inferenceURL := getEnv("INFERENCE_BACKEND_URL", "http://localhost:8100")
+	textGeneratorURL := getEnv("TG_BACKEND_URL", "http://localhost:9080")
 
 	// ra2 runs on its own omniserve-native instance (OpenAI images API).
 	ra2URL := getEnv("RA2_BACKEND_URL", "http://127.0.0.1:8792")
@@ -75,7 +83,7 @@ func initServices() {
 
 	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", inferenceURL)
 	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", inferenceURL)
-	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", inferenceURL)
+	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", textGeneratorURL)
 	serviceBackends["stt"] = getEnv("STT_BACKEND_URL", inferenceURL)
 	serviceBackends["gemma4"] = getEnv("GEMMA4_BACKEND_URL", inferenceURL)
 	serviceBackends["caption"] = getEnv("CAPTION_BACKEND_URL", inferenceURL)
@@ -86,6 +94,10 @@ func initServices() {
 	falAPIKey = getEnv("FAL_KEY", getEnv("FAL_API_KEY", ""))
 	if falAPIKey != "" {
 		log.Printf("FAL API key configured for ltx_video and flux_image services")
+	}
+	textGeneratorAPIKey = getEnv("TG_API_KEY", getEnv("TEXT_GENERATOR_API_KEY", getEnv("TEXT_GENERATOR_SECRET", "")))
+	if textGeneratorAPIKey != "" {
+		log.Printf("Text-generator API key configured for tts service")
 	}
 
 	// Load custom prices from env
@@ -99,10 +111,19 @@ func initServices() {
 		"lora_training": "LORA_TRAINING_PRICE_USD",
 		"ltx_video":     "LTX_VIDEO_PRICE_USD",
 		"flux_image":    "FLUX_IMAGE_PRICE_USD",
+		"nsfw_detect":   "NSFW_DETECT_PRICE_USD",
 	}
 	for svc, envKey := range envPriceMap {
 		if p := os.Getenv(envKey); p != "" {
 			servicePricesUSD[svc] = parseFloat(p)
+		}
+	}
+	if p := os.Getenv("ZIMAGE_20_40_STEPS_PRICE_USD"); p != "" {
+		zimageHighStepPriceUSD = parseFloat(p)
+	}
+	if steps := os.Getenv("ZIMAGE_DEFAULT_STEPS"); steps != "" {
+		if parsed := parseInt(steps); parsed > 0 {
+			zimageDefaultSteps = parsed
 		}
 	}
 
@@ -116,6 +137,7 @@ func initServices() {
 	}
 
 	log.Printf("Service pricing loaded: %v", servicePricesUSD)
+	log.Printf("Z-Image default steps: %d, 20+ step price: $%.4f", zimageDefaultSteps, zimageHighStepPriceUSD)
 	log.Printf("Service backends: %v", serviceBackends)
 
 	// Initialize diffusionz C engine for direct GPU inference (optional)
@@ -155,6 +177,42 @@ func getServicePriceCUTE(service string) float64 {
 	return usdPrice / pricePerToken
 }
 
+func getRequestServicePriceUSD(req ServiceUsageRequest) float64 {
+	usdPrice, ok := servicePricesUSD[req.Service]
+	if !ok {
+		return 0
+	}
+	if req.Service == "zimage" && getZImageSteps(req) >= 20 {
+		return zimageHighStepPriceUSD
+	}
+	return usdPrice
+}
+
+func getRequestServicePriceCUTE(req ServiceUsageRequest) float64 {
+	usdPrice := getRequestServicePriceUSD(req)
+	if usdPrice <= 0 {
+		return 0
+	}
+
+	var pricePerToken float64
+	if firstPartyServices[req.Service] {
+		pricePerToken = getCUTEPriceATH()
+	} else {
+		pricePerToken = getCUTEPriceUSD()
+	}
+	if pricePerToken <= 0 {
+		return 0
+	}
+	return usdPrice / pricePerToken
+}
+
+func getZImageSteps(req ServiceUsageRequest) int {
+	if req.NumSteps > 0 {
+		return req.NumSteps
+	}
+	return zimageDefaultSteps
+}
+
 // handleGetPricing returns current pricing for all services
 func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	cutePrice := getCUTEPriceUSD()
@@ -162,7 +220,7 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	units := map[string]string{
 		"ra2":           "per generation",
 		"ra2-edit":      "per edit",
-		"zimage":        "per generation",
+		"zimage":        fmt.Sprintf("per generation (base); $%.2f for 20+ steps", zimageHighStepPriceUSD),
 		"chronos2":      "per forecast",
 		"tts":           "per 100 characters",
 		"stt":           "per minute",
@@ -175,10 +233,7 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 
 	var pricing []ServicePricing
 	for service, usdPrice := range servicePricesUSD {
-		cuteCost := float64(0)
-		if cutePrice > 0 {
-			cuteCost = usdPrice / cutePrice
-		}
+		cuteCost := getServicePriceCUTE(service)
 		pricing = append(pricing, ServicePricing{
 			Service:   service,
 			PriceUSD:  usdPrice,
@@ -243,15 +298,15 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Calculate cost in $CUTE
-	cuteCost := getServicePriceCUTE(req.Service)
+	cuteCost := getRequestServicePriceCUTE(req)
 	if cuteCost <= 0 {
 		jsonError(ctx, 503, "pricing unavailable")
 		return
 	}
 
-	// For TTS, scale by text length
-	if req.Service == "tts" && req.Text != "" {
-		chars := float64(len(req.Text))
+	// For TTS, scale by text length.
+	if req.Service == "tts" {
+		chars := float64(len(getTTSText(req)))
 		cuteCost = cuteCost * (chars / 100.0)
 		if cuteCost < getServicePriceCUTE("tts")*0.1 {
 			cuteCost = getServicePriceCUTE("tts") * 0.1 // Minimum charge
@@ -335,15 +390,113 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
+	if !user.UnlimitedAPI {
+		maybeTriggerAutoTopup(user.ID)
+	}
+
+	result, savedImage := persistGeneratedImage(req, user, result)
+
 	// Return backend response with billing info
-	jsonResponse(ctx, 200, map[string]interface{}{
+	response := map[string]interface{}{
 		"result":          json.RawMessage(result),
 		"credits_used":    billableCost,
 		"credits_remain":  newBalance,
 		"usd_equivalent":  billableCost * cutePrice,
 		"unlimited_api":   user.UnlimitedAPI,
 		"metered_credits": cuteCost,
-	})
+	}
+	if savedImage != nil {
+		response["saved_image"] = savedImage
+	}
+	jsonResponse(ctx, 200, response)
+}
+
+// persistGeneratedImage saves generated images (zimage and the default ra2
+// service) into the gallery so /api/service generations show up as saved_image.
+func persistGeneratedImage(req ServiceUsageRequest, user *User, result []byte) ([]byte, *GeneratedImage) {
+	if (req.Service != "zimage" && req.Service != "ra2") || req.Prompt == "" || user == nil {
+		return result, nil
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return result, nil
+	}
+	imageB64, _ := payload["image_base64"].(string)
+	if imageB64 == "" {
+		return result, nil
+	}
+	imageBytes, err := base64.StdEncoding.DecodeString(imageB64)
+	if err != nil || len(imageBytes) == 0 {
+		log.Printf("image persist decode failed: %v", err)
+		return result, nil
+	}
+
+	imageID := newUUID()
+	hash := sha1.Sum([]byte(req.Prompt))
+	fileName := fmt.Sprintf("%s_%s.webp", hex.EncodeToString(hash[:])[:16], imageID[:8])
+	relPath := filepath.ToSlash(filepath.Join("originals", fileName))
+	imageDir := getEnv("IMAGES_DIR", "/sdb-disk/cutedsl-images")
+	fullPath := filepath.Join(imageDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		log.Printf("image persist mkdir failed: %v", err)
+		return result, nil
+	}
+	if err := os.WriteFile(fullPath, imageBytes, 0644); err != nil {
+		log.Printf("image persist write failed: %v", err)
+		return result, nil
+	}
+
+	width := intFromPayload(payload, "width", req.Width)
+	if width <= 0 {
+		width = 1024
+	}
+	height := intFromPayload(payload, "height", req.Height)
+	if height <= 0 {
+		height = 1024
+	}
+	seed := int64(intFromPayload(payload, "seed", req.Seed))
+	steps := getZImageSteps(req)
+	img := &GeneratedImage{
+		ID:              imageID,
+		Prompt:          req.Prompt,
+		Width:           width,
+		Height:          height,
+		FilePath:        relPath,
+		ThumbPath:       relPath,
+		MedPath:         relPath,
+		FileSize:        int64(len(imageBytes)),
+		Model:           req.Service,
+		Seed:            seed,
+		Steps:           steps,
+		CreatedByUserID: user.ID,
+		CreatedAt:       time.Now(),
+	}
+	if err := dbConn.InsertGeneratedImage(img); err != nil {
+		log.Printf("image persist db insert failed: %v", err)
+		return result, nil
+	}
+
+	payload["gallery_image"] = img
+	updated, err := json.Marshal(payload)
+	if err != nil {
+		return result, img
+	}
+	return updated, img
+}
+
+func intFromPayload(payload map[string]interface{}, key string, fallback int) int {
+	switch v := payload[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case json.Number:
+		i, _ := v.Int64()
+		return int(i)
+	default:
+		return fallback
+	}
 }
 
 // settleLoraTrainingJob polls the inference server for a training job and
@@ -447,7 +600,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 			}
 			steps := req.NumSteps
 			if steps <= 0 {
-				steps = 4
+				steps = zimageDefaultSteps
 			}
 			guidance := req.Guidance
 			if guidance <= 0 {
@@ -483,9 +636,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		if req.Height > 0 {
 			payload["height"] = req.Height
 		}
-		if req.NumSteps > 0 {
-			payload["num_inference_steps"] = req.NumSteps
-		}
+		payload["num_inference_steps"] = getZImageSteps(req)
 		if req.Guidance > 0 {
 			payload["guidance_scale"] = req.Guidance
 		}
@@ -510,18 +661,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		body = strings.NewReader(string(jsonBody))
 
 	case "tts":
-		endpoint = fmt.Sprintf("%s/synthesize", backendURL)
-		payload := map[string]interface{}{
-			"text": req.Text,
-		}
-		if req.Voice != "" {
-			payload["voice"] = req.Voice
-		}
-		if req.Speed > 0 {
-			payload["speed"] = req.Speed
-		}
-		jsonBody, _ := json.Marshal(payload)
-		body = strings.NewReader(string(jsonBody))
+		return proxyTextGeneratorSpeech(req, backendURL)
 
 	case "stt":
 		endpoint = fmt.Sprintf("%s/transcribe", backendURL)
@@ -768,6 +908,106 @@ func proxyToRA2(req ServiceUsageRequest, backendURL, secret string) ([]byte, err
 	})
 }
 
+func getTTSText(req ServiceUsageRequest) string {
+	if strings.TrimSpace(req.Text) != "" {
+		return req.Text
+	}
+	return req.Input
+}
+
+func getTTSSteps(req ServiceUsageRequest) int {
+	if req.Steps > 0 {
+		return req.Steps
+	}
+	if req.NumSteps > 0 {
+		return req.NumSteps
+	}
+	return 4
+}
+
+func speechFormatFromContentType(contentType string) string {
+	contentType = strings.ToLower(contentType)
+	switch {
+	case strings.Contains(contentType, "mpeg"), strings.Contains(contentType, "mp3"):
+		return "mp3"
+	case strings.Contains(contentType, "ogg"):
+		return "ogg"
+	case strings.Contains(contentType, "webm"):
+		return "webm"
+	case strings.Contains(contentType, "wav"), strings.Contains(contentType, "wave"):
+		return "wav"
+	default:
+		return "wav"
+	}
+}
+
+func proxyTextGeneratorSpeech(req ServiceUsageRequest, backendURL string) ([]byte, error) {
+	text := strings.TrimSpace(getTTSText(req))
+	if text == "" {
+		return nil, fmt.Errorf("text or input is required for tts")
+	}
+
+	voice := strings.TrimSpace(req.Voice)
+	if voice == "" {
+		voice = "M1"
+	}
+	language := strings.TrimSpace(req.Language)
+	if language == "" {
+		language = "en"
+	}
+	speed := req.Speed
+	if speed <= 0 {
+		speed = 1
+	}
+	steps := getTTSSteps(req)
+
+	payload := map[string]interface{}{
+		"text":     text,
+		"voice":    voice,
+		"language": language,
+		"speed":    speed,
+		"steps":    steps,
+	}
+	jsonBody, _ := json.Marshal(payload)
+	endpoint := fmt.Sprintf("%s/api/v1/generate_speech", strings.TrimRight(backendURL, "/"))
+
+	httpReq, err := http.NewRequest("POST", endpoint, strings.NewReader(string(jsonBody)))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if textGeneratorAPIKey != "" {
+		httpReq.Header.Set("secret", textGeneratorAPIKey)
+	}
+
+	resp, err := backendClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("text-generator speech returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"audio_base64":  base64.StdEncoding.EncodeToString(respBody),
+		"format":        speechFormatFromContentType(resp.Header.Get("Content-Type")),
+		"content_type":  resp.Header.Get("Content-Type"),
+		"voice":         voice,
+		"language":      language,
+		"speed":         speed,
+		"steps":         steps,
+		"characters":    len(text),
+		"backend":       "text-generator.io",
+		"provider_path": "/api/v1/generate_speech",
+	})
+}
+
 // handleTrainStatus proxies training job status from inference server
 func handleTrainStatus(ctx *fasthttp.RequestCtx, jobID string) {
 	backendURL := serviceBackends["lora_training"]
@@ -864,11 +1104,21 @@ func handleGetBalance(ctx *fasthttp.RequestCtx) {
 
 	cutePrice := getCUTEPriceUSD()
 	jsonResponse(ctx, 200, WalletBalanceResponse{
-		WalletAddress:  user.WalletAddress,
-		Credits:        user.Credits,
-		CreditsUSD:     user.Credits * cutePrice,
-		CutePrice:      cutePrice,
-		TotalDeposited: user.TotalDeposited,
+		WalletAddress:         user.WalletAddress,
+		Credits:               user.Credits,
+		CreditsUSD:            user.Credits * cutePrice,
+		CutePrice:             cutePrice,
+		TotalDeposited:        user.TotalDeposited,
+		StripeCustomerID:      user.StripeCustomerID,
+		AutotopupEnabled:      user.AutotopupEnabled,
+		AutotopupThresholdUSD: user.AutotopupThresholdUSD,
+		AutotopupAmountUSD:    user.AutotopupAmountUSD,
+		HasPaymentMethod:      user.StripePaymentMethodID != "",
+		HasPassword:           user.PasswordHash != "",
+		UnlimitedAPI:          user.UnlimitedAPI,
+		SubscriptionStatus:    user.SubscriptionStatus,
+		SubscriptionPlan:      user.SubscriptionPlan,
+		StripePriceID:         user.StripePriceID,
 	})
 }
 

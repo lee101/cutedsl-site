@@ -23,6 +23,8 @@ server/cutedsl-site
 Thumbs.db
 *.zip
 images/
+!frontend/public/images/
+!frontend/public/images/**
 
 # Inference runtime data
 inference/.lora_cache/
@@ -36,9 +38,21 @@ inference.log
 
 # Screenshots / benchmarks output
 screenshots/
+evals/
 
 # Temp files
 swap_test.py
 .runlogs/
 images
+!frontend/public/images/
+!frontend/public/images/**
 frontend/tsconfig.tsbuildinfo
+visualbench
+frontend/test-results/
+frontend/playwright-report/
+monitoring/cutedsl_frontend_autofix_cron.log
+monitoring/cutedsl_frontend_autofix_monitor.log
+monitoring/cutedsl_inference_autofix_monitor.log
+inference/server.out
+frontend/public/lora-test-3d-white/
+frontend/.env.example

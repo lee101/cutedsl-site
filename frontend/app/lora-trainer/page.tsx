@@ -5,8 +5,9 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { ArrowLeft, Upload, X, Loader2, Play, Lock, Sparkles, Check } from 'lucide-react';
 import { useAuth } from '@/hooks/use-auth';
+import { staticAssetPath } from '@/lib/static-assets';
 
-const LOGO_IMG = 'https://appstatic.app.nz/cutedsl/images/logo.webp';
+const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
 interface UploadItem {
   file: File;
@@ -201,7 +202,6 @@ export default function LoraTrainerPage() {
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-white">
       <nav className="w-full p-6 flex justify-between items-center max-w-7xl mx-auto">
         <Link href="/" className="flex items-center gap-2">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <Image src={LOGO_IMG} alt="CuteDSL" width={40} height={40} className="rounded-lg" />
           <span className="font-fredoka text-3xl font-bold text-pink-600">CuteDSL</span>
         </Link>
@@ -218,7 +218,7 @@ export default function LoraTrainerPage() {
             <h1 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800">LoRA Trainer</h1>
           </div>
           <p className="text-lg text-slate-600 max-w-2xl">
-            Fine-tune Z-Image with your own images. Drag & drop your dataset, optionally add captions, and kick off training. Cost: <b className="text-pink-600">$50</b> per job.
+            Fine-tune Z-Image with your own images. Drag & drop your dataset, optionally add captions, and kick off training. Cost: <b className="text-pink-600">$5</b> per job.
           </p>
         </div>
 
@@ -362,7 +362,7 @@ export default function LoraTrainerPage() {
               >
                 {isUploading ? <><Loader2 size={18} className="animate-spin" /> Uploading…</> :
                  isTraining ? <><Loader2 size={18} className="animate-spin" /> Training…</> :
-                 <><Play size={18} /> Start training ($50 in $CUTEDSL)</>}
+                 <><Play size={18} /> Start training ($5 in $CUTEDSL)</>}
               </button>
 
               {error && (

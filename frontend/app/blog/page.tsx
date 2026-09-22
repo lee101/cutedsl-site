@@ -4,8 +4,10 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Wand2, ArrowLeft, ArrowRight, Calendar, Tag } from 'lucide-react';
 import { CodeBlock } from '@/lib/code-block';
+import { STATIC_BASE_URL } from '@/lib/static-assets';
+import { SiteFooter } from '../site-footer';
 
-const IMG_BASE = 'https://appstatic.app.nz/cutedsl/images';
+const IMG_BASE = `${STATIC_BASE_URL}/images`;
 const BAGS_CTA = `
 
 ---
@@ -29,6 +31,181 @@ interface BlogPost {
 }
 
 const posts: BlogPost[] = [
+  {
+    slug: 'zimage-teleportation-start-step-sweep',
+    title: 'Z-Image Teleportation: Why Exact Replay Now Starts at Step 7',
+    date: '2026-05-23',
+    tags: ['zimage', 'teleportation', 'latents', 'benchmarks', 'inference'],
+    image: `${IMG_BASE}/zimage-teleport-exact-start-sweep.jpg`,
+    excerpt: 'We swept Z-Image latent teleportation settings and found the useful production path: exact-prompt replay from step 7 is pixel-identical to a full 8-step generation while replaying only the final denoising step.',
+    content: `After moving Z-Image's normal default to 8 steps, the next question was teleportation. The site has a latent teleport path that can cache an intermediate latent and resume generation later. The parameter that matters most is where we resume.
+
+There are two different ideas under the same "teleportation" label:
+
+- **Exact-prompt replay**: cache a latent for the same prompt, seed, size, and step count, then resume that same denoising trajectory.
+- **Compositional unit teleport**: combine cached latents for prompt pieces, then refine the combined latent into a new image.
+
+The sweep showed a clean result: exact-prompt replay is production-useful, compositional unit teleport is still research.
+
+## Exact-prompt replay
+
+For the production path, we tested a full 8-step Z-Image generation and then replayed from cached latents captured after each earlier step. The prompt, seed, size, guidance, and step count stayed fixed.
+
+![Z-Image exact teleport start-step sweep](${IMG_BASE}/zimage-teleport-exact-start-sweep.jpg)
+
+| Resume step | Cached after step | Mean replay time at 512px | Quality vs full 8-step output | Verdict |
+|-------------|-------------------|---------------------------|--------------------------------|---------|
+| 1 | 0 | 0.745s | Pixel-identical | Correct, but too much replay |
+| 2 | 1 | 0.644s | Pixel-identical | Previous conservative default |
+| 3 | 2 | 0.544s | Pixel-identical | Correct |
+| 4 | 3 | 0.443s | Pixel-identical | Correct |
+| 5 | 4 | 0.344s | Pixel-identical | Correct |
+| 6 | 5 | 0.244s | Pixel-identical | Correct |
+| 7 | 6 | 0.142s | Pixel-identical | New default |
+
+Every exact replay setting produced the same pixels as the full 8-step generation. That is expected: we are not guessing a new latent; we are continuing the same trajectory from a cached point. Once the cache hit exists, starting at step 7 only reruns the final denoising step and VAE decode. On production, the first replay after a process restart can still pay a one-time compile warm-up; warmed replay measured 152 ms in the live API check.
+
+So the production setting changed from:
+
+\`\`\`bash
+LATENT_TELEPORT_START_STEP=2
+\`\`\`
+
+to:
+
+\`\`\`bash
+LATENT_TELEPORT_START_STEP=7
+\`\`\`
+
+With the current 8-step Z-Image default, that means the server stores the latent after step 6 and resumes at step 7 on cache hits.
+
+## Compositional teleport
+
+We also tested the more ambitious version: tokenize a new prompt into visual units, load cached unit latents, combine them with the tree combiner, then refine for 4, 6, 8, 10, 12, or 14 steps on a 20-step schedule.
+
+![Z-Image compositional teleport refinement sweep](${IMG_BASE}/zimage-teleport-composition-sweep.jpg)
+
+| Mode | Mean time at 512px | Mean SSIM vs 20-step reference | What happened |
+|------|--------------------|--------------------------------|---------------|
+| Direct 8-step generation | 0.974s | 0.803 | Strong baseline |
+| Teleport, 4 refine steps | 0.563s | 0.319 | Fast, but visually wrong |
+| Teleport, 6 refine steps | 0.768s | 0.320 | Still not enough structure |
+| Teleport, 8 refine steps | 0.964s | 0.311 | As slow as direct 8 and worse |
+| Teleport, 10 refine steps | 1.163s | 0.305 | More time, no useful gain |
+| Teleport, 12 refine steps | 1.366s | 0.306 | Still weak |
+| Teleport, 14 refine steps | 1.577s | 0.328 | Best compositional result, still not production-ready |
+
+The image sheet makes the problem obvious. Unit-level teleport can preserve pieces of cached concepts, but it does not yet compose them into the requested scene reliably. On the car prompt, it teleports into a plate-of-food latent. On the fairy and dragon prompts, it often creates overlays and mixed compositions instead of a clean target image.
+
+## Code changes from the sweep
+
+The sweep found two implementation issues in the research path:
+
+- Z-Image \`encode_prompt\` returns prompt embeddings as a list, so cache population needed to normalize list outputs before storing embeddings.
+- \`CombinerConfig.refinement_steps\` existed in the ablation grid but was not actually controlling the refinement count; fixed refinement now lines up the cached latent step with the denoising resume step.
+
+Those fixes make the compositional benchmark honest, but they do not make compositional teleport a production default yet.
+
+## Decision
+
+For production exact-prompt teleportation:
+
+- Use \`LATENT_TELEPORT_START_STEP=7\`.
+- Keep 8 total Z-Image steps as the normal generation default.
+- Treat teleport cache hits as exact replay acceleration, not creative regeneration.
+
+For compositional unit teleportation:
+
+- Keep it experimental.
+- Do not route normal user generations through it.
+- Use direct 8-step Z-Image for quality per second until the latent combiner learns prompt-level composition instead of just blending cached unit trajectories.
+
+The practical win is simple: exact-prompt replay can make repeated prompt/seed requests much faster without changing the image. The broader teleportation idea still needs model work before it beats direct generation.`,
+  },
+  {
+    slug: 'zimage-step-settings-8-default',
+    title: 'Z-Image Step Settings: Why 8 Is the New Default',
+    date: '2026-05-23',
+    tags: ['zimage', 'image-generation', 'settings', 'benchmarks', 'quality'],
+    image: `${IMG_BASE}/zimage-steps-narrow.jpg`,
+    excerpt: 'We generated the same Z-Image prompts from 4 to 20 denoising steps and compared actual output quality against latency. The best default is 8 steps.',
+    content: `We changed the default Z-Image setting after looking at actual generated images, not just timing charts. The question was simple: if users do not pass a step count, where does quality peak relative to latency?
+
+The old fast path used 4 steps. It was quick, but the output could look under-settled: softer edges, flatter textures, and more frequent quality retries from our bumpy-image detector. We briefly considered 20 steps, but the visual gains did not justify the time cost for normal API use.
+
+The result: **8 denoising steps is now the default**. Z-Image still supports explicit higher step counts, and 20+ step requests are priced separately at $0.10. The normal default path remains $0.04 per generation.
+
+## The setup
+
+We tested Z-Image Turbo on the local RTX 5090 inference server with fixed prompt, seed, resolution, guidance, and LoRA settings. That makes the comparison mostly about the denoising step count rather than prompt randomness.
+
+- Model: Z-Image Turbo
+- Resolution: 768x768 for the sweep, with production gallery checks at 1024x1024
+- Guidance: 0
+- Auto LoRA: disabled
+- Seeds: fixed per prompt
+- Step values: 4, 5, 6, 7, 8, 9, then broader checks at 10, 12, 16, 20
+
+![Z-Image step comparison from 4 to 9 steps](${IMG_BASE}/zimage-steps-narrow.jpg)
+
+## What changes as steps increase
+
+At low step counts the composition arrives early. Even at 4 steps, Z-Image usually knows the subject, framing, palette, and major shapes. The differences are in refinement.
+
+| Steps | What it looks like | Warm server time at 768px | Recommendation |
+|-------|--------------------|---------------------------|----------------|
+| 4 | Coherent, but softer and more likely to show unsettled texture | ~1.0s | Good for drafts only |
+| 5 | Slightly cleaner than 4, still not fully settled | ~1.2s | Still draft-quality |
+| 6 | Main forms sharpen; small details improve | ~1.4s | Usable when speed matters |
+| 7 | Good overall image with a little remaining softness | ~1.6s | Fast quality mode |
+| 8 | Edges, small structures, and foreground details look settled | ~1.8s | New default |
+| 9 | Very close to 8, with minor polish | ~2.0s | Fine for explicit requests |
+| 12 | Diminishing returns | ~2.7s | Rarely worth it |
+| 16 | Mostly slower, not meaningfully better | ~3.5s | Not a default candidate |
+| 20 | About 2.4x slower than 8 in this sweep | ~4.35s | Premium/manual setting |
+
+## The broader sweep
+
+The first pass covered 4, 6, 8, 9, 10, 12, 16, and 20 steps on the same robot greenhouse prompt. Once the model was warm, the time curve was roughly linear after 8 steps, while visual quality flattened quickly.
+
+![Z-Image broader step comparison from 4 to 20 steps](${IMG_BASE}/zimage-steps-broad.jpg)
+
+The 8-step and 9-step images were almost indistinguishable side by side. 10, 12, 16, and 20 did not add enough visible improvement to make them good defaults. In some cases, higher steps simply changed small local details rather than making the whole image better.
+
+## Why not keep 4?
+
+4 steps is attractive because it is fast. But the actual output told us it is too aggressive for the default user experience.
+
+On production-sized 1024x1024 gallery generations, 4-step outputs repeatedly triggered the bumpy-image heuristic and retried. A retry erases the apparent speed advantage, and users get less predictable results. After restarting the gallery generator with the 8-step default, new generated images started coming through at 8 steps with the expected steadier look.
+
+## Why not make 20 the default?
+
+20 steps is useful as an explicit choice, especially if someone wants to spend more time and money on a single image. It is not the right default.
+
+In this sweep, 20 steps took about 4.35 seconds of server inference at 768px versus about 1.82 seconds for 8 steps. The image was not 2.4x better. For the default API path, that is the wrong tradeoff: users pay in latency, queue time, and GPU capacity without getting a proportional quality gain.
+
+## The default we shipped
+
+The default is now:
+
+\`\`\`json
+{
+  "service": "zimage",
+  "num_steps": 8
+}
+\`\`\`
+
+If you omit num_steps, the backend sends 8 to the inference server. If you explicitly request 20 or more steps, the request uses the premium 20+ step pricing tier.
+
+## Practical guidance
+
+- Use **4-6 steps** for throwaway drafts or internal experiments.
+- Use **8 steps** for normal API calls and production defaults.
+- Use **9-12 steps** when you want a small polish pass and can tolerate the extra latency.
+- Use **20+ steps** only when the request is worth premium latency and pricing.
+
+The important part is that this is based on actual generated images. Z-Image reaches composition early, but the visible quality knee lands around 8 steps. That is the setting we want most users to hit by default.`,
+  },
   {
     slug: 'go-c-migration-zimage',
     title: 'From Python to Go+C: Migrating Z-Image Inference',
@@ -411,12 +588,12 @@ That last point matters. We want CuteDSL to be the inference layer for AI agents
 Current service pricing in $CUTEDSL:
 
 | Service | Price (USD) | What you get |
-| zimage | $1.00 | One 1024x1024 CuteDSL-accelerated image |
-| chronos2 | $0.50 | One time series forecast |
+| zimage | $0.04 | One 1024x1024 CuteDSL-accelerated image |
+| chronos2 | $0.02 | One time series forecast |
 | flux_image | $0.04 | One Flux Schnell image (via fal.ai) |
-| tts | $0.10 | 100 characters of Kokoro TTS audio |
-| stt | $0.20 | 1 minute of speech-to-text |
-| gemma4 | $0.05 | One Gemma4 chat/vision request |
+| tts | $0.005 | 100 characters of Kokoro TTS audio |
+| stt | $0.02 | 1 minute of speech-to-text |
+| gemma4 | $0.01 | One Gemma4 chat/vision request |
 | ltx_video | $0.30 | One LTX 2.3 text-to-video |
 
 The $CUTEDSL amount per call floats with the token price. As the token appreciates, each token buys more compute. As it depreciates, you need more tokens. But ATH-locked pricing means your effective rate can only improve if you bought early.
@@ -433,7 +610,7 @@ Ready to try accelerated AI inference paid with crypto?
     date: '2026-04-04',
     tags: ['zimage', 'flux', 'solana', 'image-generation', 'tutorial'],
     image: `${IMG_BASE}/blog-generate-images-sol.webp`,
-    excerpt: 'A step-by-step guide to generating AI images using CuteDSL — connect a Solana wallet, deposit $CUTEDSL, and start creating. Two engines: Flux Schnell ($0.04) and Z-Image Turbo ($1.00).',
+    excerpt: 'A step-by-step guide to generating AI images using CuteDSL — connect a Solana wallet, deposit $CUTEDSL, and start creating. Two engines: Flux Schnell ($0.04) and Z-Image Turbo ($0.04).',
     content: `You can generate AI images through CuteDSL starting at **$0.04 per image**. No account creation, no email, no API key application. Just a Solana wallet and some $CUTEDSL tokens.
 
 This post walks through the entire flow and explains the two image generation engines available.
@@ -444,7 +621,7 @@ CuteDSL offers two image generation services:
 
 **Flux Schnell ($0.04/image)** — Our fast, affordable option. Powered by fal.ai's Flux Schnell model. 1024x1024 images in ~2 seconds. Great for prototyping, placeholder art, and bulk generation. This is a third-party proxy priced at market rate.
 
-**Z-Image Turbo ($1.00/image)** — Our flagship, CuteDSL-accelerated engine. Custom fused Triton kernels, NVFP4 quantization on RTX 5090, and the full CuteZImage pipeline. Higher quality, supports custom LoRAs, and every generation saves latent tensors for future [latent teleportation](/blog#latent-teleportation) optimization. Priced at ATH rate — early $CUTEDSL holders get this cheaper forever.
+**Z-Image Turbo ($0.04/image)** — Our flagship, CuteDSL-accelerated engine. Custom fused Triton kernels, NVFP4 quantization on RTX 5090, and the full CuteZImage pipeline. Higher quality, supports custom LoRAs, and every generation saves latent tensors for future [latent teleportation](/blog#latent-teleportation) optimization. Priced at ATH rate — early $CUTEDSL holders get this cheaper forever.
 
 ## Step 1: Get $CUTEDSL tokens
 
@@ -476,7 +653,7 @@ curl -X POST https://cutedsl.cc/api/service \\
     "prompt": "a cute fairy with pink wings in an enchanted forest"
   }'
 
-# Z-Image Turbo — CuteDSL accelerated ($1.00)
+# Z-Image Turbo — CuteDSL accelerated ($0.04)
 curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -500,7 +677,7 @@ The gallery stores three sizes per image (1024px original, 512px medium, 256px t
 
 Flux Schnell via fal.ai costs us roughly $0.02-0.03 per generation. We add a small margin and pass it through at market rate. There's no subscription, no minimum spend, no monthly commitment. Generate one image or ten thousand — same price per image.
 
-Z-Image at $1.00 reflects the cost of running CuteDSL's custom Triton kernels on our own RTX 5090 GPU infrastructure, plus the LoRA auto-selection, latent saving, and NSFW classification that runs on every generation. The ATH pricing means this rate only improves for early holders as the token appreciates.
+Z-Image at $0.04 reflects the cost of running CuteDSL's custom Triton kernels on our own RTX 5090 GPU infrastructure, plus the LoRA auto-selection, latent saving, and NSFW classification that runs on every generation. The ATH pricing means this rate only improves for early holders as the token appreciates.
 
 ## Use cases we're seeing
 
@@ -873,7 +1050,7 @@ Total tool-wait time: ~25 seconds for 25 AI service calls. The agent spent more 
 
 ## The Kokoro TTS integration
 
-One underappreciated use case: agents that generate audio. A [Codex Infinity](https://codex-infinity.com) agent building a presentation app used CuteDSL's TTS service to auto-generate narration for each slide. At $0.10 per 100 characters and ~200ms latency, the agent generated 20 slide narrations in about 4 seconds total.
+One underappreciated use case: agents that generate audio. A [Codex Infinity](https://codex-infinity.com) agent building a presentation app used CuteDSL's TTS service to auto-generate narration for each slide. At $0.005 per 100 characters and ~200ms latency, the agent generated 20 slide narrations in about 4 seconds total.
 
 The agent didn't need to be taught how to use TTS — it discovered the CuteDSL API endpoint in its environment, read the docs, and decided narration would improve the presentation. This is the kind of emergent behavior you get when tools are fast enough that agents don't avoid using them.
 
@@ -1482,7 +1659,7 @@ We're experimenting with learned LoRA composition — training a small network t
     title: 'Z-Image Turbo: Ablation Gallery — Steps, Guidance, and Seed Sweeps',
     date: '2026-04-04',
     tags: ['zimage', 'ablation', 'gallery', 'image-generation', 'benchmarks'],
-    image: `${IMG_BASE}/blog-zimage-gallery.webp`,
+    image: `${IMG_BASE}/blog-image-gallery.webp`,
     excerpt: 'Visual ablation study across inference steps, guidance scales, and random seeds — showing how each parameter affects Z-Image Turbo output quality and style.',
     content: `One of the most common questions we get: "what settings should I use for Z-Image?" Instead of guessing, we ran a systematic ablation across the three most impactful parameters: inference steps, classifier-free guidance scale, and random seed.
 
@@ -1615,14 +1792,14 @@ The implementation gracefully falls back to separate projections when n_heads !=
 
 ## Try it
 
-Generate images via the CuteDSL API at [$1.00 per generation](https://cutedsl.cc/#api-docs). All generations use the full acceleration stack including fused QKV.`,
+Generate images via the CuteDSL API at [$0.04 per generation](https://cutedsl.cc/#api-docs). All generations use the full acceleration stack including fused QKV.`,
   },
   {
     slug: 'latent-teleportation-visual-results',
     title: 'Latent Teleportation: Visual Results and Quality Analysis',
     date: '2026-04-04',
     tags: ['latent-teleportation', 'diffusion', 'research', 'slerp', 'gallery'],
-    image: `${IMG_BASE}/blog-latent-teleport.webp`,
+    image: `${IMG_BASE}/blog-generate-images-sol.webp`,
     excerpt: 'We cached intermediate diffusion latents and used SLERP interpolation to skip denoising steps — reducing 20 steps to 5 with measurable quality tradeoffs.',
     content: `Latent Teleportation is our research technique for speeding up diffusion inference by caching and reusing intermediate latent states. Instead of denoising from pure noise every time, we "teleport" to a cached latent that's already partially denoised, then refine from there.
 
@@ -1732,7 +1909,7 @@ Parakeet supports word-level timestamp extraction — useful for subtitle genera
 
 ## Production deployment
 
-CuteDSL's STT service currently uses Gemma4-powered transcription proxied through text-generator.io at $0.20/minute. We're evaluating whether to bring Parakeet in-house for lower latency and cost. The tradeoff is:
+CuteDSL's STT service currently uses Gemma4-powered transcription proxied through text-generator.io at $0.02/minute. We're evaluating whether to bring Parakeet in-house for lower latency and cost. The tradeoff is:
 
 - **Gemma4 STT**: Higher accuracy on diverse accents, multilingual, no GPU needed on our side
 - **Parakeet**: Lower latency (89ms vs ~500ms), lower marginal cost, but English-focused
@@ -1751,7 +1928,7 @@ We're working on:
     title: 'The Complete $CUTEDSL Token Guide: Buy, Deposit, and Use AI Credits',
     date: '2026-04-04',
     tags: ['cutedsl', 'solana', 'token', 'credits', 'guide'],
-    image: `${IMG_BASE}/blog-token-guide.webp`,
+    image: `${IMG_BASE}/blog-why-solana-token.webp`,
     excerpt: 'Everything you need to know about acquiring $CUTEDSL tokens, depositing them for API credits, and understanding the pricing model.',
     content: `CuteDSL is powered exclusively by the **$CUTEDSL** token on Solana. This guide covers everything from buying tokens to using them for AI inference.
 
@@ -1791,13 +1968,13 @@ CuteDSL uses a dual pricing system:
 
 | Service | USD Price | What You Get |
 |---------|-----------|-------------|
-| Z-Image Turbo | $1.00/image | 1024x1024 text-to-image with fused Triton kernels |
-| Chronos-2 | $0.50/forecast | Time series forecasting with 27x acceleration |
-| Kokoro TTS | $0.10/100 chars | 20+ voices, WAV output |
-| Gemma4 Chat | $0.05/request | 26B multimodal LLM |
-| STT | $0.20/minute | Speech-to-text transcription |
-| Image Caption | $0.05/image | Automated image descriptions |
-| LoRA Training | $50.00/job | Custom model fine-tuning |
+| Z-Image Turbo | $0.04/image | 1024x1024 text-to-image with fused Triton kernels |
+| Chronos-2 | $0.02/forecast | Time series forecasting with 27x acceleration |
+| Kokoro TTS | $0.005/100 chars | 20+ voices, WAV output |
+| Gemma4 Chat | $0.01/request | 26B multimodal LLM |
+| STT | $0.02/minute | Speech-to-text transcription |
+| Image Caption | $0.01/image | Automated image descriptions |
+| LoRA Training | $5.00/job | Custom model fine-tuning |
 
 **Third-party proxies** (LTX Video, Flux Image) are priced at current market rate since we pay per-request to upstream providers.
 
@@ -2035,7 +2212,7 @@ This means:
 
 ## Pricing
 
-Chronos2 is a first-party service priced at the $CUTEDSL all-time high rate. If the token price goes up, your effective cost per forecast goes down permanently. Currently $0.50/forecast in USD equivalent.`,
+Chronos2 is a first-party service priced at the $CUTEDSL all-time high rate. If the token price goes up, your effective cost per forecast goes down permanently. Currently $0.02/forecast in USD equivalent.`,
   },
 ];
 
@@ -2069,7 +2246,7 @@ export default function BlogPage() {
             <a key={post.slug} href={`#${post.slug}`} className="block bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow overflow-hidden">
               {post.image && (
                 <div className="w-full h-48 relative">
-                  <Image src={post.image} alt={post.title} fill className="object-cover" />
+                  <Image src={post.image} alt={post.title} fill sizes="(min-width: 768px) 768px, calc(100vw - 48px)" className="object-cover" />
                 </div>
               )}
               <div className="p-8">
@@ -2095,7 +2272,7 @@ export default function BlogPage() {
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
               {post.image && (
                 <div className="w-full h-64 relative">
-                  <Image src={post.image} alt={post.title} fill className="object-cover" />
+                  <Image src={post.image} alt={post.title} fill sizes="(min-width: 768px) 768px, calc(100vw - 48px)" className="object-cover" />
                 </div>
               )}
               <div className="p-10">
@@ -2199,16 +2376,7 @@ export default function BlogPage() {
         ))}
       </main>
 
-      {/* Footer */}
-      <footer className="bg-white/90 border-t border-pink-200 py-8">
-        <div className="max-w-7xl mx-auto px-6 flex justify-between items-center">
-          <p className="text-slate-400 text-sm">&copy; 2026 <a href="https://app.nz" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-500">Applied AI NZ</a></p>
-          <div className="flex gap-4 text-sm font-bold">
-            <Link href="/" className="text-slate-500 hover:text-pink-500">Home</Link>
-            <Link href="/evals" className="text-slate-500 hover:text-cyan-500">Evals</Link>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

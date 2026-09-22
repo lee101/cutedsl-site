@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import { staticAssetPath } from '@/lib/static-assets';
 
 export const metadata: Metadata = {
   title: 'Blog — CuteDSL Engineering',
@@ -12,7 +13,7 @@ export const metadata: Metadata = {
     url: 'https://cutedsl.cc/blog',
     images: [
       {
-        url: 'https://appstatic.app.nz/cutedsl/images/og-blog.webp',
+        url: staticAssetPath('/images/og-blog.webp'),
         width: 1360,
         height: 768,
         alt: 'CuteDSL Blog — Engineering Deep Dives',
@@ -24,7 +25,7 @@ export const metadata: Metadata = {
     title: 'CuteDSL Blog — Engineering Deep Dives',
     description:
       'Technical deep dives into AI model acceleration with custom Triton kernels, CUDA optimizations, and more.',
-    images: ['https://appstatic.app.nz/cutedsl/images/og-blog.webp'],
+    images: [staticAssetPath('/images/og-blog.webp')],
   },
 };
 

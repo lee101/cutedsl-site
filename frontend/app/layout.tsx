@@ -4,6 +4,7 @@ import 'highlight.js/styles/github-dark.css';
 import './globals.css';
 import { FrontendErrorReporter } from './frontend-error-reporter';
 import { SiteCreateBar } from '@/lib/site-create-bar';
+import { STATIC_BASE_URL, staticAssetPath } from '@/lib/static-assets';
 
 const fredoka = Fredoka({
   subsets: ['latin'],
@@ -20,7 +21,7 @@ const nunito = Nunito({
 });
 
 const siteUrl = 'https://cutedsl.cc';
-const imgBase = 'https://appstatic.app.nz/cutedsl/images';
+const staticOrigin = STATIC_BASE_URL.startsWith('http') ? new URL(STATIC_BASE_URL).origin : null;
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -55,10 +56,10 @@ export const metadata: Metadata = {
   creator: 'Applied AI NZ',
   icons: {
     icon: [
-      { url: `${imgBase}/favicon.ico`, sizes: '32x32', type: 'image/x-icon' },
-      { url: `${imgBase}/logo.png`, sizes: '512x512', type: 'image/png' },
+      { url: staticAssetPath('/images/favicon.ico'), sizes: '32x32', type: 'image/x-icon' },
+      { url: staticAssetPath('/images/logo.png'), sizes: '512x512', type: 'image/png' },
     ],
-    apple: `${imgBase}/apple-touch-icon.png`,
+    apple: staticAssetPath('/images/apple-touch-icon.png'),
   },
   openGraph: {
     type: 'website',
@@ -70,7 +71,7 @@ export const metadata: Metadata = {
       'Text-to-image (ra2 art generator, Z-Image Turbo, Flux Schnell), ManifoldGen text-to-video, Kokoro TTS, Chronos-2 forecasting. 100k+ AI art gallery. $CUTEDSL on Solana.',
     images: [
       {
-        url: `${imgBase}/og-image.webp`,
+        url: staticAssetPath('/images/og-image.webp'),
         width: 1360,
         height: 768,
         alt: 'CuteDSL AI image generator — Z-Image Turbo',
@@ -82,7 +83,7 @@ export const metadata: Metadata = {
     title: 'AI Image Generator API — Z-Image Turbo, Video, TTS',
     description:
       'Text-to-image, ManifoldGen AV1 video, Kokoro TTS, Chronos-2 forecasting. $CUTEDSL on Solana.',
-    images: [`${imgBase}/og-image.webp`],
+    images: [staticAssetPath('/images/og-image.webp')],
   },
   alternates: {
     canonical: siteUrl,
@@ -126,8 +127,8 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
   return (
     <html lang="en" className={`${fredoka.variable} ${nunito.variable}`}>
       <head>
-        <link rel="dns-prefetch" href="https://appstatic.app.nz" />
-        <link rel="preconnect" href="https://appstatic.app.nz" crossOrigin="anonymous" />
+        {staticOrigin && <link rel="dns-prefetch" href={staticOrigin} />}
+        {staticOrigin && <link rel="preconnect" href={staticOrigin} crossOrigin="anonymous" />}
         <script
           async
           src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8598649123553748"

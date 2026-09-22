@@ -202,6 +202,7 @@ def main() -> int:
     parser.add_argument("--prompt", action="append", default=[])
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--steps", type=int, default=None, help="Override server Z-Image inference steps")
     parser.add_argument("--runs", type=int, default=2, help="Steady-state replay runs per prompt")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--output-dir", default="/nvme0n1-disk/tmp/zimage-perf")
@@ -224,19 +225,22 @@ def main() -> int:
     }
 
     def call(prompt: str, mode: str, save_path: str, teleport: bool) -> dict:
+        params = {
+            "prompt": prompt,
+            "width": args.width,
+            "height": args.height,
+            "model": "zimage-turbo",
+            "auto_lora": "false",
+            "secret": args.secret,
+            "save_path": save_path,
+            "teleport": "true" if teleport else "false",
+            "perf": "true",
+        }
+        if args.steps is not None:
+            params["num_inference_steps"] = args.steps
         payload, wall_s = request_json(
             args.base_url,
-            {
-                "prompt": prompt,
-                "width": args.width,
-                "height": args.height,
-                "model": "zimage-turbo",
-                "auto_lora": "false",
-                "secret": args.secret,
-                "save_path": save_path,
-                "teleport": "true" if teleport else "false",
-                "perf": "true",
-            },
+            params,
             args.timeout,
         )
         perf = payload.get("perf", {})

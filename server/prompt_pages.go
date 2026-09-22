@@ -657,7 +657,7 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 func handleSitemapPages(ctx *fasthttp.RequestCtx) {
 	host := "https://cutedsl.cc"
 	pages := []string{
-		"/", "/search", "/gallery", "/video-gallery", "/generations", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
+		"/", "/search", "/gallery", "/playground", "/video-gallery", "/generations", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
 		"/docs/ra2", "/docs/ra2-edit", "/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
 		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/manifold_video", "/docs/lora_training",
 		"/blog/cutedsl-manifoldgen-video-api",

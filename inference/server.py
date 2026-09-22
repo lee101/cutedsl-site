@@ -34,6 +34,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from image_quality import bumpy_metrics, compact_prompt, detect_too_bumpy, retry_prompt
+from training_store import load_jobs, save_job, update_job, upload_training_artifacts
+from runpod_lora_manager import refresh_runpod_status, runpod_enabled, start_runpod_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("cutedsl-inference")
@@ -55,6 +57,19 @@ DTYPE_MAP = {
 }
 DTYPE = DTYPE_MAP.get(DTYPE_STR, torch.bfloat16)
 
+
+def _chronos_device_dtype() -> tuple[str, torch.dtype]:
+    """Chronos2 is small enough to fall back to CPU when local CUDA is unhealthy."""
+    if DEVICE.startswith("cuda"):
+        try:
+            if torch.cuda.is_available():
+                return DEVICE, DTYPE
+        except Exception:
+            pass
+        logger.warning("Chronos2 CUDA unavailable; falling back to CPU float32")
+        return "cpu", torch.float32
+    return DEVICE, DTYPE
+
 # NVFP4 quantization (RTX 5090 Blackwell) - uses torchao NVFP4InferenceConfig
 # Block size is fixed at 16 in the NVFP4 spec (float4_e2m1fn_x2 + float8_e4m3fn scales)
 ENABLE_NVFP4 = os.getenv("ENABLE_NVFP4", "0") == "1"
@@ -67,8 +82,12 @@ AITUNE_ENGINES_PATH = os.getenv("AITUNE_ENGINES_PATH", "")
 # Model paths
 ZIMAGE_MODEL_PATH = os.getenv("ZIMAGE_MODEL_PATH", "Tongyi-MAI/Z-Image-Turbo")
 CHRONOS_MODEL_PATH = os.getenv("CHRONOS_MODEL_PATH", "amazon/chronos-bolt-base")
-ZIMAGE_COMPILE_MODE = os.getenv("ZIMAGE_COMPILE_MODE", "reduce-overhead") or None
-CHRONOS_COMPILE_MODE = os.getenv("CHRONOS_COMPILE_MODE", "reduce-overhead") or None
+ZIMAGE_COMPILE_MODE = os.getenv("ZIMAGE_COMPILE_MODE", "default") or None
+_zimage_compile_mode = ZIMAGE_COMPILE_MODE
+_zimage_compile_mode_lock = threading.Lock()
+# Chronos has hit CUDA graph assertion failures under torch.compile in local
+# inference, so keep it eager by default unless explicitly enabled.
+CHRONOS_COMPILE_MODE = os.getenv("CHRONOS_COMPILE_MODE", "") or None
 
 # Text-generator.io backend for TTS, STT, captioning, gemma4
 TG_BACKEND_URL = os.getenv("TG_BACKEND_URL", "http://localhost:9080")
@@ -80,13 +99,17 @@ LOAD_CHRONOS = os.getenv("LOAD_CHRONOS", "1") == "1"
 ZIMAGE_USE_CUTE = os.getenv("ZIMAGE_USE_CUTE", "1") == "1"
 
 # Inference defaults
-ZIMAGE_DEFAULT_STEPS = int(os.getenv("ZIMAGE_DEFAULT_STEPS", "4"))
+ZIMAGE_DEFAULT_STEPS = int(os.getenv("ZIMAGE_DEFAULT_STEPS", "8"))
 ZIMAGE_DEFAULT_GUIDANCE = float(os.getenv("ZIMAGE_DEFAULT_GUIDANCE", "0.0"))
 ZIMAGE_DEFAULT_WIDTH = int(os.getenv("ZIMAGE_DEFAULT_WIDTH", "1024"))
 ZIMAGE_DEFAULT_HEIGHT = int(os.getenv("ZIMAGE_DEFAULT_HEIGHT", "1024"))
 LATENT_TELEPORT_ENABLED = os.getenv("LATENT_TELEPORT_ENABLED", "0") == "1"
 LATENT_TELEPORT_CACHE_DIR = os.getenv("LATENT_TELEPORT_CACHE_DIR", "/nvme0n1-disk/tmp/latentteleport-cache")
-LATENT_TELEPORT_START_STEP = int(os.getenv("LATENT_TELEPORT_START_STEP", "2"))
+LATENT_TELEPORT_START_STEP = int(os.getenv("LATENT_TELEPORT_START_STEP", "7"))
+LATENT_TELEPORT_APPROX_MIN_SIM = float(os.getenv("LATENT_TELEPORT_APPROX_MIN_SIM", "0.92"))
+LATENT_TELEPORT_MIN_FREE_MB = int(os.getenv("LATENT_TELEPORT_MIN_FREE_MB", "512"))
+ZIMAGE_NO_OFFLOAD_MIN_FREE_MB = int(os.getenv("ZIMAGE_NO_OFFLOAD_MIN_FREE_MB", "24576"))
+ZIMAGE_FAST_LORA_CPU_OFFLOAD = os.getenv("ZIMAGE_FAST_LORA_CPU_OFFLOAD", "1") == "1"
 
 # ---------------------------------------------------------------------------
 # Model memory manager — lazy load, LRU eviction, idle unload
@@ -108,6 +131,7 @@ gpu_semaphore = None
 # LoRA search engine (lazy init)
 lora_engine = None
 latent_teleport_cache = None
+_zimage_effective_cpu_offload: bool | None = None
 
 
 class PriorityGPUSemaphore:
@@ -291,9 +315,11 @@ class ModelManager:
 
     def _drop_locked(self, model_name: str):
         """Caller must hold self._lock."""
-        global zimage_pipeline, chronos_pipeline
+        global zimage_pipeline, chronos_pipeline, _zimage_effective_cpu_offload
         if model_name == "zimage":
             zimage_pipeline = None
+            _zimage_effective_cpu_offload = None
+            _clear_zimage_external_caches()
             # Active LoRA metadata must be cleared with the pipeline. We avoid
             # caching full transformer weights because that doubles GPU memory.
             _active_lora_cache.clear()
@@ -330,7 +356,7 @@ class ModelManager:
 
     def ensure_loaded(self, model_name: str):
         """Ensure model is loaded (lazy load if needed). Evicts other models if needed."""
-        global zimage_pipeline, chronos_pipeline
+        global zimage_pipeline, chronos_pipeline, _zimage_effective_cpu_offload
         with self._lock:
             if model_name in self._loaded:
                 self.touch(model_name)
@@ -343,6 +369,8 @@ class ModelManager:
                     logger.info("Evicting %s to load %s", oldest, model_name)
                     if oldest == "zimage":
                         zimage_pipeline = None
+                        _zimage_effective_cpu_offload = None
+                        _clear_zimage_external_caches()
                     elif oldest == "chronos2":
                         chronos_pipeline = None
                     self._loaded.discard(oldest)
@@ -418,6 +446,108 @@ def _optimize_for_inference():
         logger.info("GPU: %s (%.1f GB)", gpu_name, gpu_mem)
 
 
+def _get_zimage_compile_mode() -> str | None:
+    with _zimage_compile_mode_lock:
+        return _zimage_compile_mode
+
+
+def _downgrade_zimage_compile_mode(reason: str) -> bool:
+    """Disable CUDA-graph compilation after an inductor runtime fault."""
+    global _zimage_compile_mode
+    with _zimage_compile_mode_lock:
+        old_mode = _zimage_compile_mode
+        if old_mode is None:
+            return False
+        new_mode = "default" if old_mode != "default" else None
+        _zimage_compile_mode = new_mode
+
+    logger.warning(
+        "downgrading Z-Image compile mode from %s to %s after %s",
+        old_mode,
+        new_mode or "eager",
+        reason,
+    )
+    try:
+        torch._dynamo.reset()
+    except Exception:
+        pass
+    return True
+
+
+def _clear_zimage_external_caches():
+    """Drop CuteZImage's module-level pipeline cache during server unloads."""
+    try:
+        from cutezimage.pipeline import clear_pipeline_caches
+    except Exception:
+        return
+    try:
+        clear_pipeline_caches()
+    except Exception as exc:
+        logger.warning("failed to clear CuteZImage pipeline cache: %s", exc)
+
+
+def _zimage_cpu_offload_mode() -> str:
+    raw = os.getenv("ZIMAGE_CPU_OFFLOAD", "1").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return "on"
+    if raw in {"0", "false", "no", "off"}:
+        return "off"
+    if raw == "auto":
+        return "auto"
+    logger.warning("invalid ZIMAGE_CPU_OFFLOAD=%r; using CPU offload", raw)
+    return "on"
+
+
+def _resolve_zimage_cpu_offload() -> bool:
+    mode = _zimage_cpu_offload_mode()
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+
+    free_mb = _cuda_free_mb()
+    if free_mb is None:
+        logger.info("ZIMAGE_CPU_OFFLOAD=auto: no CUDA free-memory reading; using CPU offload")
+        return True
+    use_offload = free_mb < ZIMAGE_NO_OFFLOAD_MIN_FREE_MB
+    logger.info(
+        "ZIMAGE_CPU_OFFLOAD=auto: free CUDA memory=%d MB, no-offload threshold=%d MB, cpu_offload=%s",
+        free_mb,
+        ZIMAGE_NO_OFFLOAD_MIN_FREE_MB,
+        use_offload,
+    )
+    return use_offload
+
+
+def _zimage_cpu_offload_enabled() -> bool:
+    return _zimage_effective_cpu_offload if _zimage_effective_cpu_offload is not None else _resolve_zimage_cpu_offload()
+
+
+def _cuda_free_mb() -> int | None:
+    if not torch.cuda.is_available():
+        return None
+    try:
+        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+        return int(free_bytes / (1024 * 1024))
+    except Exception:
+        return None
+
+
+def _pipeline_execution_device(pipe) -> torch.device:
+    try:
+        device = getattr(pipe, "_execution_device", None)
+    except Exception:
+        device = None
+    if device is None:
+        device = getattr(pipe, "device", DEVICE)
+    return torch.device(device)
+
+
+def _make_pipeline_generator(pipe, seed: int) -> torch.Generator:
+    device = _pipeline_execution_device(pipe)
+    return torch.Generator(device=device).manual_seed(int(seed))
+
+
 def _load_zimage():
     """Load and optimize the Z-Image pipeline.
 
@@ -436,20 +566,23 @@ def _load_zimage():
     subclasses. The trained PEFT LoRAs are saved against this same vanilla
     base so they load cleanly on top.
     """
-    global zimage_pipeline
+    global zimage_pipeline, _zimage_effective_cpu_offload
 
     import sys
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "cutedsl")))
 
+    compile_mode = _get_zimage_compile_mode()
     logger.info(
-        "Loading Z-Image from %s (NVFP4=%s, CuteZImage=%s)...",
+        "Loading Z-Image from %s (NVFP4=%s, CuteZImage=%s, compile_mode=%s)...",
         ZIMAGE_MODEL_PATH,
         ENABLE_NVFP4,
         ZIMAGE_USE_CUTE,
+        compile_mode or "eager",
     )
     t0 = time.time()
 
-    enable_offload = os.getenv("ZIMAGE_CPU_OFFLOAD", "1") == "1"
+    enable_offload = _resolve_zimage_cpu_offload()
+    _zimage_effective_cpu_offload = enable_offload
     skip_warmup = os.getenv("ZIMAGE_SKIP_WARMUP", "0") == "1" or ENABLE_NVFP4
 
     if ENABLE_NVFP4 or not ZIMAGE_USE_CUTE:
@@ -489,7 +622,21 @@ def _load_zimage():
                     if comp is not None:
                         comp.to(DEVICE)
             except Exception as e:
-                logger.warning("Z-Image component .to(%s) failed: %s", DEVICE, e)
+                if (
+                    str(DEVICE).startswith("cuda")
+                    and not ENABLE_NVFP4
+                    and hasattr(text2img_pipe, "enable_model_cpu_offload")
+                ):
+                    logger.warning(
+                        "Z-Image component .to(%s) failed; enabling CPU offload fallback: %s",
+                        DEVICE,
+                        e,
+                    )
+                    text2img_pipe.enable_model_cpu_offload()
+                    enable_offload = True
+                    _zimage_effective_cpu_offload = True
+                else:
+                    raise RuntimeError(f"Z-Image component .to({DEVICE}) failed") from e
 
         img2img_pipe = ZImageImg2ImgPipeline(**text2img_pipe.components)
 
@@ -513,13 +660,13 @@ def _load_zimage():
             model_path=ZIMAGE_MODEL_PATH,
             torch_dtype=DTYPE,
             use_cute=True,
-            compile_mode=ZIMAGE_COMPILE_MODE,
+            compile_mode=compile_mode,
             device=DEVICE,
             enable_cpu_offload=enable_offload,
         )
 
     zimage_pipeline = (text2img_pipe, img2img_pipe)
-    logger.info("Z-Image loaded in %.1fs", time.time() - t0)
+    logger.info("Z-Image loaded in %.1fs (cpu_offload=%s)", time.time() - t0, enable_offload)
 
     # Optional: load AITune TRT engines for text_encoder + VAE.
     # Only applies to vanilla (non-CuteZImage) paths since CuteZImage already
@@ -545,7 +692,7 @@ def _load_zimage():
             width=512, height=512,
             num_inference_steps=1,
             guidance_scale=0.0,
-            generator=torch.Generator(device=DEVICE).manual_seed(0),
+            generator=_make_pipeline_generator(text2img_pipe, 0),
         )
         logger.info("Z-Image warmup complete")
     except Exception as e:
@@ -563,13 +710,14 @@ def _load_chronos():
 
     logger.info("Loading Chronos2 from %s...", CHRONOS_MODEL_PATH)
     t0 = time.time()
+    chronos_device, chronos_dtype = _chronos_device_dtype()
 
     chronos_pipeline = CuteChronos2Pipeline.from_pretrained(
         CHRONOS_MODEL_PATH,
-        device=DEVICE,
-        dtype=DTYPE,
+        device=chronos_device,
+        dtype=chronos_dtype,
         use_cute=True,
-        compile_mode=CHRONOS_COMPILE_MODE,
+        compile_mode=CHRONOS_COMPILE_MODE if chronos_device.startswith("cuda") else None,
     )
 
     # Apply NVFP4 to model weights
@@ -581,7 +729,7 @@ def _load_chronos():
     # Warmup
     logger.info("Chronos2 warmup...")
     try:
-        dummy = torch.randn(1, 64, device=DEVICE)
+        dummy = torch.randn(1, 64, device=chronos_device)
         chronos_pipeline.predict(dummy, prediction_length=16)
         logger.info("Chronos2 warmup complete")
     except Exception as e:
@@ -761,10 +909,17 @@ def health():
         "gpu_queue": gpu_queue,
         "nvfp4": ENABLE_NVFP4,
         "zimage_use_cute": ZIMAGE_USE_CUTE,
+        "zimage_cpu_offload": _zimage_cpu_offload_enabled(),
+        "zimage_cpu_offload_mode": _zimage_cpu_offload_mode(),
+        "zimage_effective_cpu_offload": _zimage_effective_cpu_offload,
+        "zimage_no_offload_min_free_mb": ZIMAGE_NO_OFFLOAD_MIN_FREE_MB,
+        "zimage_compile_mode": _get_zimage_compile_mode() or "eager",
         "latent_teleport": {
             "enabled": LATENT_TELEPORT_ENABLED,
             "cache_dir": LATENT_TELEPORT_CACHE_DIR,
             "start_step": LATENT_TELEPORT_START_STEP,
+            "approx_min_similarity": LATENT_TELEPORT_APPROX_MIN_SIM,
+            "min_free_mb": LATENT_TELEPORT_MIN_FREE_MB,
         },
         "device": DEVICE,
         "dtype": DTYPE_STR,
@@ -957,6 +1112,42 @@ def _download_lora(url: str) -> str:
     return local_path
 
 
+def _first_parameter_device(module) -> torch.device:
+    try:
+        return next(module.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+@contextlib.contextmanager
+def _lora_apply_device(transformer):
+    original_device = _first_parameter_device(transformer)
+    moved = False
+    should_move = (
+        ZIMAGE_FAST_LORA_CPU_OFFLOAD
+        and torch.cuda.is_available()
+        and str(DEVICE).startswith("cuda")
+        and original_device.type == "cpu"
+    )
+
+    if should_move:
+        try:
+            transformer.to(device=DEVICE)
+            moved = True
+        except Exception as exc:
+            logger.warning("LoRA GPU staging failed; applying on %s: %s", original_device, exc)
+
+    try:
+        yield
+    finally:
+        if moved:
+            try:
+                transformer.to(device=original_device)
+                torch.cuda.empty_cache()
+            except Exception as exc:
+                logger.warning("LoRA GPU staging cleanup failed: %s", exc)
+
+
 def _apply_lora_weights_direct(transformer, lora_path: str, scale: float = 1.0):
     """Apply Z-Image LoRA weights directly to transformer parameters.
 
@@ -976,48 +1167,49 @@ def _apply_lora_weights_direct(transformer, lora_path: str, scale: float = 1.0):
         "adaLN_modulation.0": "adaLN_modulation.1",
     }
 
-    with safe_open(lora_path, framework="pt", device="cpu") as sf:
-        applied = 0
-        for key in sf.keys():
-            if not key.startswith("diffusion_model.layers."):
-                continue
-            parts = key.replace("diffusion_model.layers.", "").split(".")
-            layer_idx = int(parts[0])
-            rest = ".".join(parts[1:])
+    with _lora_apply_device(transformer):
+        with safe_open(lora_path, framework="pt", device="cpu") as sf:
+            applied = 0
+            for key in sf.keys():
+                if not key.startswith("diffusion_model.layers."):
+                    continue
+                parts = key.replace("diffusion_model.layers.", "").split(".")
+                layer_idx = int(parts[0])
+                rest = ".".join(parts[1:])
 
-            is_lora_a = rest.endswith(".lora_A.weight")
-            is_lora_b = rest.endswith(".lora_B.weight")
-            if not (is_lora_a or is_lora_b):
-                continue
+                is_lora_a = rest.endswith(".lora_A.weight")
+                is_lora_b = rest.endswith(".lora_B.weight")
+                if not (is_lora_a or is_lora_b):
+                    continue
 
-            module_key = rest.replace(".lora_A.weight", "").replace(".lora_B.weight", "")
-            mapped = key_map.get(module_key)
-            if not mapped:
-                continue
+                module_key = rest.replace(".lora_A.weight", "").replace(".lora_B.weight", "")
+                mapped = key_map.get(module_key)
+                if not mapped:
+                    continue
 
-            if layer_idx >= len(transformer.layers):
-                continue
+                if layer_idx >= len(transformer.layers):
+                    continue
 
-            block = transformer.layers[layer_idx]
-            param_parts = mapped.split(".")
-            target = block
-            for p in param_parts:
-                target = getattr(target, p, None)
+                block = transformer.layers[layer_idx]
+                param_parts = mapped.split(".")
+                target = block
+                for p in param_parts:
+                    target = getattr(target, p, None)
+                    if target is None:
+                        break
                 if target is None:
-                    break
-            if target is None:
-                continue
+                    continue
 
-            target_device = target.weight.device
-            target_dtype = target.weight.dtype
-            with torch.no_grad():
-                if is_lora_b:
-                    lora_a_key = key.replace("lora_B", "lora_A")
-                    lora_weight = sf.get_tensor(key).to(device=target_device, dtype=target_dtype)
-                    lora_a = sf.get_tensor(lora_a_key).to(device=target_device, dtype=target_dtype)
-                    delta = (lora_weight @ lora_a) * scale
-                    target.weight.add_(delta.to(device=target_device, dtype=target_dtype))
-                    applied += 1
+                target_device = target.weight.device
+                target_dtype = target.weight.dtype
+                with torch.no_grad():
+                    if is_lora_b:
+                        lora_a_key = key.replace("lora_B", "lora_A")
+                        lora_weight = sf.get_tensor(key).to(device=target_device, dtype=target_dtype)
+                        lora_a = sf.get_tensor(lora_a_key).to(device=target_device, dtype=target_dtype)
+                        delta = (lora_weight @ lora_a) * scale
+                        target.weight.add_(delta.to(device=target_device, dtype=target_dtype))
+                        applied += 1
 
     logger.info("applied %d LoRA layers from %s (scale=%.2f)", applied, os.path.basename(lora_path), scale)
     return applied > 0
@@ -1043,7 +1235,7 @@ def _detect_lora_format(path: str) -> str:
     """Detect if LoRA is zimage-native or sdxl-kohya format."""
     from safetensors import safe_open
     with safe_open(path, framework="pt") as sf:
-        keys = list(sf.keys())[:5]
+        keys = list(sf.keys())[:128]
         if any(k.startswith("diffusion_model") for k in keys):
             return "zimage-native"
         return "sdxl-kohya"
@@ -1066,6 +1258,12 @@ def _load_lora_onto_pipe(pipe, lora_url: str, lora_scale: float = 1.0):
     transformer = pipe.transformer
     _apply_lora_weights_direct(transformer, local_path, scale=lora_scale)
     _active_lora_cache.setdefault(id(transformer), []).append((local_path, lora_scale))
+
+
+def _effective_lora_scale(lora, requested_scale: float | None = None) -> float:
+    if requested_scale is not None and requested_scale != 1.0:
+        return requested_scale
+    return getattr(lora, "scale", 1.0) or 1.0
 
 
 def _reset_zimage_scheduler(pipe):
@@ -1124,7 +1322,7 @@ def _generate_image_once_sync(req: ZImageRequest):
     height = (req.height // 64) * 64 or 1024
 
     t0 = time.time()
-    generator = torch.Generator(device=DEVICE).manual_seed(req.seed)
+    generator = _make_pipeline_generator(text2img_pipe, req.seed)
 
     # Reset the scheduler state between calls — the vanilla diffusers
     # ZImagePipeline doesn't always re-init step_index, so a leaked _step_index
@@ -1140,9 +1338,9 @@ def _generate_image_once_sync(req: ZImageRequest):
         generator=generator,
     )
 
-    if lora and hasattr(text2img_pipe, "load_lora_weights"):
+    if lora:
         try:
-            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=req.lora_scale)
+            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=_effective_lora_scale(lora, req.lora_scale))
             try:
                 result = text2img_pipe(**pipe_kwargs)
             finally:
@@ -1234,9 +1432,24 @@ def _is_cuda_oom(exc: Exception) -> bool:
     return "out of memory" in text and ("cuda" in text or "accelerator" in type(exc).__name__.lower())
 
 
-def _recover_from_cuda_oom():
-    logger.warning("recovering from CUDA OOM: unloading zimage and clearing CUDA cache")
+def _is_zimage_cudagraph_list_assertion(exc: Exception) -> bool:
+    if not isinstance(exc, AssertionError):
+        return False
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return (
+        "<class 'list'>" in text
+        and "cudagraph_trees.py" in text
+        and "CUDAGraphNode" in text
+    )
+
+
+def _recover_from_zimage_runtime_fault(reason: str):
+    logger.warning("recovering from %s: unloading zimage and clearing compiler/CUDA cache", reason)
     model_manager.force_unload("zimage")
+    try:
+        torch._dynamo.reset()
+    except Exception:
+        pass
     if torch.cuda.is_available():
         try:
             torch.cuda.synchronize()
@@ -1246,9 +1459,13 @@ def _recover_from_cuda_oom():
         torch.cuda.ipc_collect()
 
 
+def _recover_from_cuda_oom():
+    _recover_from_zimage_runtime_fault("CUDA OOM")
+
+
 def _with_zimage_model_retry(operation_name: str, fn):
     last_exc = None
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             with model_manager.use("zimage"):
                 if zimage_pipeline is None:
@@ -1256,14 +1473,25 @@ def _with_zimage_model_retry(operation_name: str, fn):
                 return fn()
         except Exception as e:
             last_exc = e
-            if not _is_cuda_oom(e):
-                raise
-            if attempt > 0:
+            if _is_cuda_oom(e):
+                if attempt > 0:
+                    _recover_from_cuda_oom()
+                    raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery")
+                logger.warning("%s hit CUDA OOM; reloading model and retrying once", operation_name)
                 _recover_from_cuda_oom()
-                raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery")
-            logger.warning("%s hit CUDA OOM; reloading model and retrying once", operation_name)
-            _recover_from_cuda_oom()
-    raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery: {last_exc}")
+                continue
+            if _is_zimage_cudagraph_list_assertion(e):
+                downgraded = _downgrade_zimage_compile_mode("torch inductor CUDA graph list-output assertion")
+                _recover_from_zimage_runtime_fault("torch inductor CUDA graph assertion")
+                if not downgraded or attempt >= 2:
+                    raise HTTPException(503, f"{operation_name} failed after compile-mode recovery")
+                logger.warning(
+                    "%s hit torch inductor CUDA graph assertion; reloading model and retrying",
+                    operation_name,
+                )
+                continue
+            raise
+    raise HTTPException(503, f"{operation_name} failed after zimage recovery: {last_exc}")
 
 
 def _generate_image_with_model_sync(req: ZImageRequest):
@@ -1308,7 +1536,8 @@ def list_loras():
         "count": len(loras),
         "loras": [
             {"id": l.id, "name": l.name, "trigger_word": l.trigger_word,
-             "template": l.template, "keywords": l.keywords}
+             "template": l.template, "scale": l.scale, "is_adult": l.is_adult,
+             "keywords": l.keywords}
             for l in loras
         ],
     }
@@ -1324,7 +1553,8 @@ def search_loras(q: str = Query(..., min_length=1), top_k: int = 5):
         "results": [
             {"id": r.lora.id, "name": r.lora.name, "score": round(r.score, 3),
              "match_type": r.match_type, "trigger_word": r.lora.trigger_word,
-             "template": r.lora.template}
+             "template": r.lora.template, "scale": r.lora.scale,
+             "is_adult": r.lora.is_adult}
             for r in results
         ],
     }
@@ -1377,7 +1607,11 @@ def _forecast_sync(req: ChronosRequest):
 async def forecast(req: ChronosRequest):
     if not LOAD_CHRONOS:
         raise HTTPException(503, "chronos2 disabled")
-    model_manager.ensure_loaded("chronos2")
+    try:
+        model_manager.ensure_loaded("chronos2")
+    except Exception as e:
+        logger.exception("chronos2 load failed")
+        raise HTTPException(503, f"chronos2 model failed to load: {e}") from e
     if chronos_pipeline is None:
         raise HTTPException(503, "chronos2 model failed to load")
 
@@ -1455,7 +1689,11 @@ def _forecast_batch_sync(req: ChronosBatchRequest):
 async def forecast_batch(req: ChronosBatchRequest):
     if not LOAD_CHRONOS:
         raise HTTPException(503, "chronos2 disabled")
-    model_manager.ensure_loaded("chronos2")
+    try:
+        model_manager.ensure_loaded("chronos2")
+    except Exception as e:
+        logger.exception("chronos2 load failed")
+        raise HTTPException(503, f"chronos2 model failed to load: {e}") from e
     if chronos_pipeline is None:
         raise HTTPException(503, "chronos2 model failed to load")
 
@@ -1637,16 +1875,23 @@ def _nvtx_range(name: str):
     yield
 
 
-def _fallback_image_path(prompt: str, seed: int) -> str:
+def _fallback_image_path(prompt: str, seed: int, steps: int | None = None) -> str:
     slug = prompt[:60].replace(" ", "_").replace("/", "_")
-    return f"{slug}_{seed}.webp"
+    step_suffix = f"_s{steps}" if steps is not None and steps != ZIMAGE_DEFAULT_STEPS else ""
+    return f"{slug}_{seed}{step_suffix}.webp"
+
+
+def _normalize_zimage_steps(value: int | None) -> int:
+    return max(1, int(value if value is not None else ZIMAGE_DEFAULT_STEPS))
 
 
 def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: str,
                                auto_lora: bool = True, lora_id: str | None = None,
-                               return_perf: bool = False) -> dict:
+                               return_perf: bool = False,
+                               num_inference_steps: int | None = None) -> dict:
     seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % (2**31)
-    target_path = save_path or _fallback_image_path(prompt, seed)
+    steps = _normalize_zimage_steps(num_inference_steps)
+    target_path = save_path or _fallback_image_path(prompt, seed, steps)
     if target_path and check_if_blob_exists(target_path):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         url = f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{target_path}"
@@ -1661,6 +1906,7 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
     req = ZImageRequest(
         prompt=prompt, width=width, height=height,
         seed=seed,
+        num_inference_steps=steps,
         auto_lora=auto_lora,
         lora_id=lora_id,
     )
@@ -1670,19 +1916,19 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
     h = (height // 64) * 64 or 1024
 
     t0 = time.time()
-    generator = torch.Generator(device=DEVICE).manual_seed(req.seed)
+    generator = _make_pipeline_generator(text2img_pipe, req.seed)
 
     pipe_kwargs = dict(
         prompt=final_prompt, width=w, height=h,
-        num_inference_steps=ZIMAGE_DEFAULT_STEPS,
+        num_inference_steps=steps,
         guidance_scale=ZIMAGE_DEFAULT_GUIDANCE,
         generator=generator,
     )
     _reset_zimage_scheduler(text2img_pipe)
 
-    if lora and hasattr(text2img_pipe, "load_lora_weights"):
+    if lora:
         try:
-            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=1.0)
+            _load_lora_onto_pipe(text2img_pipe, lora.url, lora_scale=_effective_lora_scale(lora))
             try:
                 with _nvtx_range("zimage.full.pipeline_lora"):
                     result = text2img_pipe(**pipe_kwargs)
@@ -1722,7 +1968,7 @@ def _generate_and_upload_sync(prompt: str, width: int, height: int, save_path: s
             "upload_time_ms": int(upload_elapsed * 1000),
             "width": w,
             "height": h,
-            "steps": ZIMAGE_DEFAULT_STEPS,
+            "steps": steps,
             "lora": lora.id if lora else None,
         }
     return result
@@ -1765,12 +2011,17 @@ def _run_zimage_with_capture(pipe, pipe_kwargs: dict, capture_step: int) -> tupl
 
 def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, save_path: str,
                                        auto_lora: bool = True, lora_id: str | None = None,
-                                       return_perf: bool = False) -> dict:
+                                       return_perf: bool = False,
+                                       num_inference_steps: int | None = None,
+                                       teleport_approx: bool = False,
+                                       teleport_approx_min_sim: float | None = None,
+                                       teleport_start_step: int | None = None) -> dict:
     if not LATENT_TELEPORT_ENABLED:
         raise HTTPException(400, "latent teleportation disabled")
 
     seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % (2**31)
-    target_path = save_path or _fallback_image_path(prompt, seed)
+    steps = _normalize_zimage_steps(num_inference_steps)
+    target_path = save_path or _fallback_image_path(prompt, seed, steps)
     if target_path and check_if_blob_exists(target_path):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         url = f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{target_path}"
@@ -1791,19 +2042,22 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
     if lora:
         # LoRA-mutated transformer weights invalidate cached base-model latents.
         logger.info("latent teleport skipped for LoRA prompt (lora=%s)", lora.id)
-        return _generate_and_upload_sync(prompt, width, height, save_path, auto_lora, lora_id, return_perf)
+        return _generate_and_upload_sync(prompt, width, height, save_path, auto_lora, lora_id, return_perf, num_inference_steps)
 
     w = (width // 64) * 64 or 1024
     h = (height // 64) * 64 or 1024
-    steps = ZIMAGE_DEFAULT_STEPS
-    capture_step = max(0, min(LATENT_TELEPORT_START_STEP - 1, steps - 2))
-    resume_step = capture_step + 1
+    requested_resume_step = LATENT_TELEPORT_START_STEP if teleport_start_step is None else teleport_start_step
+    resume_step = max(1, min(int(requested_resume_step), steps - 1))
+    capture_step = resume_step - 1
     cache = _get_latent_teleport_cache(w, h)
     unit = _latent_teleport_unit(final_prompt, w, h, steps, req.seed)
     cached_latent = cache.load_latent(unit, capture_step)
     cached_prompt_emb = cache.load_text_embedding_full(unit) if cached_latent is not None else None
+    approximate_hit = False
+    approximate_source = None
+    approximate_similarity = None
 
-    generator = torch.Generator(device=DEVICE).manual_seed(req.seed)
+    generator = _make_pipeline_generator(text2img_pipe, req.seed)
     pipe_kwargs = dict(
         prompt=final_prompt,
         width=w,
@@ -1820,12 +2074,17 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
         "capture_step": capture_step,
         "resume_step": resume_step,
         "total_steps": steps,
+        "requested_resume_step": requested_resume_step,
+        "approx_enabled": teleport_approx,
     }
 
     if cached_latent is not None:
         from latentteleport.refine import refine_from_latent
 
         try:
+            free_mb = _cuda_free_mb()
+            if cached_prompt_emb is None and free_mb is not None and free_mb < LATENT_TELEPORT_MIN_FREE_MB:
+                raise RuntimeError(f"insufficient free CUDA memory for prompt embedding replay ({free_mb} MB)")
             with _nvtx_range("zimage.teleport.replay"):
                 image = refine_from_latent(
                     text2img_pipe,
@@ -1850,23 +2109,87 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
             teleport_meta["cache_hit"] = False
             teleport_meta["fallback_reason"] = type(e).__name__
 
+    if cached_latent is None and teleport_approx:
+        from latentteleport.refine import refine_from_latent
+
+        min_sim = LATENT_TELEPORT_APPROX_MIN_SIM if teleport_approx_min_sim is None else teleport_approx_min_sim
+        try:
+            with _nvtx_range("zimage.teleport.approx_prompt_embed"):
+                text_emb, _ = text2img_pipe.encode_prompt(
+                    prompt=final_prompt,
+                    negative_prompt=None,
+                    do_classifier_free_guidance=False,
+                    device=DEVICE,
+                )
+            target_emb = text_emb[0].detach().cpu() if isinstance(text_emb, list) else text_emb.detach().cpu()
+            pooled_emb = target_emb.float().mean(0) if target_emb.dim() == 2 else target_emb.float()
+            nearest = cache.find_nearest(pooled_emb, top_k=1)
+            if nearest:
+                source_unit_id, source_text, sim = nearest[0]
+                source_unit = cache.load_unit_by_id(source_unit_id)
+                source_latent = cache.load_latent(source_unit, capture_step) if source_unit is not None else None
+                if source_latent is not None and sim >= min_sim:
+                    with _nvtx_range("zimage.teleport.approx_replay"):
+                        image = refine_from_latent(
+                            text2img_pipe,
+                            source_latent,
+                            final_prompt,
+                            None,
+                            resume_step,
+                            prompt_embeds=[target_emb],
+                            num_total_steps=steps,
+                            height=h,
+                            width=w,
+                            guidance_scale=ZIMAGE_DEFAULT_GUIDANCE,
+                            seed=req.seed,
+                            device=DEVICE,
+                        )
+                    cached_latent = source_latent
+                    approximate_hit = True
+                    approximate_source = source_text
+                    approximate_similarity = sim
+                    teleport_meta.update({
+                        "cache_hit": True,
+                        "approx_cache_hit": True,
+                        "method": "approx_nearest_latent_replay",
+                        "approx_similarity": sim,
+                        "approx_source": source_text,
+                    })
+                elif nearest:
+                    teleport_meta.update({
+                        "approx_cache_hit": False,
+                        "approx_similarity": sim,
+                        "approx_min_similarity": min_sim,
+                        "approx_rejected": True,
+                    })
+        except Exception as e:
+            logger.warning("latent teleport approximate replay failed, falling back to full generation: %s", e)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            teleport_meta["approx_fallback_reason"] = type(e).__name__
+
     if cached_latent is None:
         with _nvtx_range("zimage.teleport.prime_pipeline"):
             result, captured = _run_zimage_with_capture(text2img_pipe, pipe_kwargs, capture_step)
         image = result.images[0]
         if capture_step in captured:
-            try:
-                with _nvtx_range("zimage.teleport.prompt_embed_cache"):
-                    text_emb, _ = text2img_pipe.encode_prompt(
-                        prompt=final_prompt,
-                        negative_prompt=None,
-                        do_classifier_free_guidance=False,
-                        device=DEVICE,
-                    )
-                emb = text_emb[0].detach().cpu() if isinstance(text_emb, list) else text_emb.detach().cpu()
-            except Exception as e:
-                logger.warning("latent teleport text embedding capture failed: %s", e)
+            free_mb = _cuda_free_mb()
+            if free_mb is not None and free_mb < LATENT_TELEPORT_MIN_FREE_MB:
+                logger.info("latent teleport prompt embedding cache skipped: only %d MB free", free_mb)
                 emb = None
+            else:
+                try:
+                    with _nvtx_range("zimage.teleport.prompt_embed_cache"):
+                        text_emb, _ = text2img_pipe.encode_prompt(
+                            prompt=final_prompt,
+                            negative_prompt=None,
+                            do_classifier_free_guidance=False,
+                            device=DEVICE,
+                        )
+                    emb = text_emb[0].detach().cpu() if isinstance(text_emb, list) else text_emb.detach().cpu()
+                except Exception as e:
+                    logger.warning("latent teleport text embedding capture failed: %s", e)
+                    emb = None
             cache.store_latents(
                 unit,
                 {capture_step: captured[capture_step]},
@@ -1877,8 +2200,9 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
 
     elapsed = time.time() - t0
     logger.info(
-        "compat teleport: %dx%d in %.2fs (method=%s, hit=%s)",
+        "compat teleport: %dx%d in %.2fs (method=%s, hit=%s, approx=%s, sim=%s)",
         w, h, elapsed, teleport_meta["method"], teleport_meta["cache_hit"],
+        approximate_hit, f"{approximate_similarity:.3f}" if approximate_similarity is not None else "n/a",
     )
 
     encode_t0 = time.time()
@@ -1894,7 +2218,7 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
     result = {"path": url, "teleport": teleport_meta}
     if return_perf:
         result["perf"] = {
-            "cache_hit": False,
+            "cache_hit": teleport_meta["cache_hit"],
             "inference_time_ms": int(elapsed * 1000),
             "encode_time_ms": int(encode_elapsed * 1000),
             "upload_time_ms": int(upload_elapsed * 1000),
@@ -1903,25 +2227,47 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
             "steps": steps,
             "teleport_method": teleport_meta["method"],
             "teleport_cache_hit": teleport_meta["cache_hit"],
+            "teleport_capture_step": capture_step,
+            "teleport_resume_step": resume_step,
+            "teleport_approx_cache_hit": approximate_hit,
+            "teleport_approx_similarity": approximate_similarity,
+            "teleport_approx_source": approximate_source,
         }
     return result
 
 
 def _generate_and_upload_with_model_sync(prompt: str, width: int, height: int, save_path: str,
                                          auto_lora: bool = True, lora_id: str | None = None,
-                                         return_perf: bool = False) -> dict:
+                                         return_perf: bool = False,
+                                         num_inference_steps: int | None = None) -> dict:
     return _with_zimage_model_retry(
         "create_and_upload_image",
-        lambda: _generate_and_upload_sync(prompt, width, height, save_path, auto_lora, lora_id, return_perf),
+        lambda: _generate_and_upload_sync(prompt, width, height, save_path, auto_lora, lora_id, return_perf, num_inference_steps),
     )
 
 
 def _generate_and_upload_teleport_with_model_sync(prompt: str, width: int, height: int, save_path: str,
                                                   auto_lora: bool = True, lora_id: str | None = None,
-                                                  return_perf: bool = False) -> dict:
+                                                  return_perf: bool = False,
+                                                  num_inference_steps: int | None = None,
+                                                  teleport_approx: bool = False,
+                                                  teleport_approx_min_sim: float | None = None,
+                                                  teleport_start_step: int | None = None) -> dict:
     return _with_zimage_model_retry(
         "create_and_upload_image_teleport",
-        lambda: _generate_and_upload_teleport_sync(prompt, width, height, save_path, auto_lora, lora_id, return_perf),
+        lambda: _generate_and_upload_teleport_sync(
+            prompt,
+            width,
+            height,
+            save_path,
+            auto_lora,
+            lora_id,
+            return_perf,
+            num_inference_steps,
+            teleport_approx,
+            teleport_approx_min_sim,
+            teleport_start_step,
+        ),
     )
 
 
@@ -1943,7 +2289,7 @@ def _style_transfer_and_upload_sync(prompt: str, image_url: str, save_path: str,
 
     t0 = time.time()
     seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % (2**31)
-    generator = torch.Generator(device=DEVICE).manual_seed(seed)
+    generator = _make_pipeline_generator(img2img_pipe, seed)
 
     # Re-enable offload hooks before img2img call to avoid stale device state
     if hasattr(img2img_pipe, "_offload_gpu_id"):
@@ -1992,6 +2338,10 @@ async def create_and_upload_image(
     auto_lora: bool = True,
     teleport: bool = True,
     perf: bool = False,
+    num_inference_steps: int = ZIMAGE_DEFAULT_STEPS,
+    teleport_approx: bool = False,
+    teleport_approx_min_sim: float | None = None,
+    teleport_start_step: int | None = None,
     low_priority: bool = False,
     background: bool = False,
 ):
@@ -2001,10 +2351,33 @@ async def create_and_upload_image(
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         return {"path": f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{sp}"}
     async with gpu_slot(low_priority or background):
-        fn = _generate_and_upload_teleport_with_model_sync if teleport else _generate_and_upload_with_model_sync
+        if teleport:
+            return await asyncio.get_event_loop().run_in_executor(
+                None,
+                _generate_and_upload_teleport_with_model_sync,
+                prompt,
+                width,
+                height,
+                sp,
+                auto_lora,
+                lora_id,
+                perf,
+                num_inference_steps,
+                teleport_approx,
+                teleport_approx_min_sim,
+                teleport_start_step,
+            )
         return await asyncio.get_event_loop().run_in_executor(
-            None, fn, prompt, width, height, sp,
-            auto_lora, lora_id, perf,
+            None,
+            _generate_and_upload_with_model_sync,
+            prompt,
+            width,
+            height,
+            sp,
+            auto_lora,
+            lora_id,
+            perf,
+            num_inference_steps,
         )
 
 
@@ -2057,7 +2430,7 @@ async def style_transfer_bytes_and_upload_image(
         def _do():
             if hasattr(img2img_pipe, "_offload_gpu_id"):
                 img2img_pipe.enable_model_cpu_offload()
-            generator = torch.Generator(device=DEVICE).manual_seed(seed)
+            generator = _make_pipeline_generator(img2img_pipe, seed)
             result = img2img_pipe(
                 prompt=prompt, image=input_image, strength=strength,
                 num_inference_steps=ZIMAGE_DEFAULT_STEPS,
@@ -2091,8 +2464,15 @@ async def style_transfer_bytes_and_upload_image(
 # LoRA Training API
 # ---------------------------------------------------------------------------
 
-# In-memory job store (swap for Redis/DB in production)
-training_jobs: dict[str, dict] = {}
+# In-memory cache backed by JSON status files so long-running jobs survive a
+# process restart and frontend polling can resume cleanly.
+training_jobs: dict[str, dict] = load_jobs()
+
+
+def _save_training_job(job_id: str) -> None:
+    job = training_jobs.get(job_id)
+    if job:
+        save_job(job)
 
 
 class LoRATrainRequest(BaseModel):
@@ -2106,6 +2486,7 @@ class LoRATrainRequest(BaseModel):
     learning_rate: float = 1e-4
     num_steps: int = 1000
     batch_size: int = 32
+    train_size: Optional[int] = None
 
 
 def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
@@ -2117,20 +2498,23 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "loading_model"
         job["progress"] = 0.05
+        _save_training_job(job_id)
 
         from cutechronos.pipeline import CuteChronos2Pipeline
 
         # Load base model for fine-tuning
         base_model_path = os.getenv("CHRONOS_MODEL_PATH", "amazon/chronos-2")
+        train_device, train_dtype = _chronos_device_dtype()
         pipeline = CuteChronos2Pipeline.from_pretrained(
             base_model_path,
-            device=DEVICE,
-            dtype=DTYPE,
+            device=train_device,
+            dtype=train_dtype,
             use_cute=False,  # no custom kernels during training
         )
 
         job["status"] = "preparing_data"
         job["progress"] = 0.1
+        _save_training_job(job_id)
 
         # Prepare training data from provided values
         if not req.values or len(req.values) == 0:
@@ -2140,6 +2524,7 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "training"
         job["progress"] = 0.15
+        _save_training_job(job_id)
 
         # Apply LoRA adapters
         try:
@@ -2170,7 +2555,7 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
 
         for step in range(total_steps):
             idx = step % len(train_tensors)
-            series = train_tensors[idx].to(DEVICE, dtype=DTYPE)
+            series = train_tensors[idx].to(train_device, dtype=train_dtype)
 
             future_len = PATCH * NUM_FUTURE_PATCHES
             if len(series) < future_len + 32:
@@ -2194,26 +2579,34 @@ def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
             job["progress"] = 0.15 + 0.8 * (step / total_steps)
             if step % 5 == 0:
                 job["loss"] = float(loss.item())
+                _save_training_job(job_id)
                 logger.info("Training job %s: step %d/%d loss=%.4f", job_id, step, total_steps, loss.item())
 
         # Save the trained LoRA adapter
-        output_dir = os.path.join("trained_loras", job_id)
+        output_dir = os.path.join(TRAINED_LORA_ROOT, job_id)
         os.makedirs(output_dir, exist_ok=True)
         pipeline.model.save_pretrained(output_dir)
 
         job["status"] = "completed"
         job["progress"] = 1.0
         job["output_path"] = output_dir
+        try:
+            job.update(upload_training_artifacts(job_id, output_dir))
+        except Exception as upload_err:
+            logger.warning("Training job %s artifact upload failed: %s", job_id, upload_err)
+            job["artifact_upload_error"] = str(upload_err)
+        _save_training_job(job_id)
         logger.info("Training job %s completed: %s", job_id, output_dir)
 
     except Exception as e:
         logger.error("Training job %s failed: %s", job_id, e)
         job["status"] = "failed"
         job["error"] = str(e)
+        _save_training_job(job_id)
 
 
-DATASET_ROOT = os.getenv("LORA_DATASET_ROOT", "lora_datasets")
-TRAINED_LORA_ROOT = os.getenv("TRAINED_LORA_ROOT", "trained_loras")
+DATASET_ROOT = os.getenv("LORA_DATASET_ROOT", os.path.join(os.path.dirname(__file__), "lora_datasets"))
+TRAINED_LORA_ROOT = os.getenv("TRAINED_LORA_ROOT", os.path.join(os.path.dirname(__file__), "trained_loras"))
 
 
 def _dataset_dir(dataset_name: str) -> str:
@@ -2242,6 +2635,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
 
         job["status"] = "loading_dataset"
         job["progress"] = 0.02
+        _save_training_job(job_id)
 
         ds_dir = _dataset_dir(req.dataset_name)
         if not os.path.isdir(ds_dir):
@@ -2266,6 +2660,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         job["dataset_size"] = len(image_paths)
         job["status"] = "loading_model"
         job["progress"] = 0.05
+        _save_training_job(job_id)
 
         # Load a VANILLA zimage pipeline for training — NOT the cute-accelerated
         # one. CuteZImageTransformer uses q_proj/k_proj/v_proj (Qwen-style) and
@@ -2276,57 +2671,37 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
             os.getenv("ZIMAGE_MODEL_PATH", "Tongyi-MAI/Z-Image-Turbo"),
             torch_dtype=DTYPE,
         )
-        # Move components individually (pipeline.to() can fail on meta tensors
-        # when components were initialized with low_cpu_mem_usage)
-        for comp_name in ("transformer", "vae", "text_encoder"):
-            comp = getattr(text2img_pipe, comp_name, None)
-            if comp is not None:
-                try:
-                    comp.to(DEVICE)
-                except Exception:
-                    # Fallback: to_empty then load params
-                    comp.to_empty(device=DEVICE)
-
-        torch.cuda.empty_cache()
-        gc.collect()
-
         transformer = text2img_pipe.transformer
         vae = text2img_pipe.vae
 
+        def _move_component(comp, device):
+            if comp is None:
+                return
+            try:
+                comp.to(device)
+            except Exception:
+                # Fallback for components initialized with meta tensors.
+                comp.to_empty(device=device)
+
+        def _free_cuda():
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         job["status"] = "preparing_lora"
         job["progress"] = 0.1
+        _save_training_job(job_id)
 
         try:
             from peft import LoraConfig, get_peft_model
         except ImportError:
             raise ValueError("peft package required for LoRA training: pip install peft")
 
-        for p in transformer.parameters():
-            p.requires_grad = False
-        for p in vae.parameters():
-            p.requires_grad = False
-
-        lora_config = LoraConfig(
-            r=req.lora_r,
-            lora_alpha=req.lora_alpha,
-            target_modules=["to_q", "to_k", "to_v"],
-            lora_dropout=0.0,
-            bias="none",
-        )
-        transformer = get_peft_model(transformer, lora_config)
-        text2img_pipe.transformer = transformer
-        transformer.train()
-
-        trainable = [p for p in transformer.parameters() if p.requires_grad]
-        n_trainable = sum(p.numel() for p in trainable)
-        logger.info("Training job %s: %d trainable LoRA params", job_id, n_trainable)
-
-        optimizer = torch.optim.AdamW(trainable, lr=req.learning_rate)
-
         # Pre-encode prompts using the pipeline's own encoder (handles Qwen3 correctly)
         prompt_embeds_cache: dict[str, torch.Tensor] = {}
         unique_captions = set(captions.values())
         logger.info("Training job %s: pre-encoding %d unique captions", job_id, len(unique_captions))
+        _move_component(getattr(text2img_pipe, "text_encoder", None), DEVICE)
         with torch.no_grad():
             for cap in unique_captions:
                 try:
@@ -2340,11 +2715,17 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
                 except Exception as e:
                     logger.warning("Caption encode failed for '%s': %s", cap[:40], str(e)[:200])
                     prompt_embeds_cache[cap] = None
+        _move_component(getattr(text2img_pipe, "text_encoder", None), "cpu")
+        _free_cuda()
 
         # Pre-encode latents once at a fixed small size (saves time and memory)
-        TRAIN_SIZE = int(os.getenv("LORA_TRAIN_SIZE", "384"))
+        TRAIN_SIZE = int(req.train_size or os.getenv("LORA_TRAIN_SIZE", "384"))
+        TRAIN_SIZE = max(64, min(TRAIN_SIZE, 1024))
         latent_cache: list[tuple[torch.Tensor, str]] = []
         logger.info("Training job %s: pre-encoding %d latents at %dx%d", job_id, len(image_paths), TRAIN_SIZE, TRAIN_SIZE)
+        _move_component(vae, DEVICE)
+        for p in vae.parameters():
+            p.requires_grad = False
         with torch.no_grad():
             for img_path in image_paths:
                 try:
@@ -2357,15 +2738,42 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
                 except Exception as e:
                     logger.warning("Latent encode failed for %s: %s", os.path.basename(img_path), str(e)[:200])
 
-        torch.cuda.empty_cache()
-        gc.collect()
+        _move_component(vae, "cpu")
+        _free_cuda()
 
         if not latent_cache:
             raise RuntimeError("no latents could be encoded from the dataset (VAE failures)")
 
+        _move_component(transformer, DEVICE)
+        for p in transformer.parameters():
+            p.requires_grad = False
+
+        lora_config = LoraConfig(
+            r=req.lora_r,
+            lora_alpha=req.lora_alpha,
+            target_modules=["to_q", "to_k", "to_v"],
+            lora_dropout=0.0,
+            bias="none",
+        )
+        transformer = get_peft_model(transformer, lora_config)
+        text2img_pipe.transformer = transformer
+        if hasattr(transformer, "gradient_checkpointing_enable"):
+            try:
+                transformer.gradient_checkpointing_enable()
+            except Exception as e:
+                logger.warning("Training job %s: gradient checkpointing unavailable: %s", job_id, str(e)[:120])
+        transformer.train()
+
+        trainable = [p for p in transformer.parameters() if p.requires_grad]
+        n_trainable = sum(p.numel() for p in trainable)
+        logger.info("Training job %s: %d trainable LoRA params", job_id, n_trainable)
+
+        optimizer = torch.optim.AdamW(trainable, lr=req.learning_rate)
+
         total_steps = min(req.num_steps, 5000)
         job["status"] = "training"
         job["progress"] = 0.15
+        _save_training_job(job_id)
 
         successful_steps = 0
         last_loss = None
@@ -2403,6 +2811,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
                 job["progress"] = 0.15 + 0.8 * (step / total_steps)
                 if step % 5 == 0 or step == total_steps - 1:
                     job["loss"] = last_loss
+                    _save_training_job(job_id)
                     logger.info("Z-Image train %s: step %d/%d loss=%.4f", job_id, step, total_steps, last_loss)
 
                 del loss, pred, out, x_t, noise, target, x_in, x_list
@@ -2435,6 +2844,12 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         job["successful_steps"] = successful_steps
         if last_loss is not None:
             job["loss"] = last_loss
+        try:
+            job.update(upload_training_artifacts(job_id, output_dir))
+        except Exception as upload_err:
+            logger.warning("Training job %s artifact upload failed: %s", job_id, upload_err)
+            job["artifact_upload_error"] = str(upload_err)
+        _save_training_job(job_id)
         logger.info("Training job %s completed: %d/%d steps succeeded -> %s",
                     job_id, successful_steps, total_steps, output_dir)
 
@@ -2442,6 +2857,7 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         logger.error("Training job %s failed: %s", job_id, e)
         job["status"] = "failed"
         job["error"] = str(e)
+        _save_training_job(job_id)
 
 
 @app.post("/train/upload_dataset")
@@ -2488,6 +2904,7 @@ class LoRATrainFromURLsRequest(BaseModel):
     learning_rate: float = 1e-4
     num_steps: int = 500
     batch_size: int = 1
+    train_size: Optional[int] = None
 
 
 @app.post("/train/from_urls")
@@ -2497,6 +2914,38 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         raise HTTPException(400, "model must be 'zimage' or 'chronos2'")
     if not req.image_urls:
         raise HTTPException(400, "image_urls must be non-empty")
+
+    if runpod_enabled():
+        if req.model != "zimage":
+            raise HTTPException(400, "RunPod remote training currently supports zimage only")
+        job_id = str(uuid.uuid4())
+        payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+        update_job(
+            training_jobs,
+            job_id,
+            job_id=job_id,
+            model=req.model,
+            dataset_name=req.dataset_name,
+            status="queued",
+            progress=0.0,
+            created_at=time.time(),
+            image_count=len(req.image_urls),
+            backend="runpod",
+        )
+        try:
+            job = start_runpod_training(training_jobs, job_id, payload)
+        except Exception as e:
+            update_job(training_jobs, job_id, status="failed", error=str(e), progress=1.0)
+            raise HTTPException(502, f"RunPod training backend unavailable: {e}")
+        return {
+            "job_id": job_id,
+            "model": req.model,
+            "dataset_name": req.dataset_name,
+            "image_count": len(req.image_urls),
+            "status": job.get("status", "starting"),
+            "backend": "runpod",
+            "runpod_cost_per_hr": job.get("runpod_cost_per_hr"),
+        }
 
     try:
         ds_dir = _dataset_dir(req.dataset_name)
@@ -2544,6 +2993,7 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         learning_rate=req.learning_rate,
         num_steps=req.num_steps,
         batch_size=req.batch_size,
+        train_size=req.train_size,
     )
 
     job_id = str(uuid.uuid4())
@@ -2556,6 +3006,7 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
         "created_at": time.time(),
         "image_count": downloaded,
     }
+    _save_training_job(job_id)
 
     if req.model == "chronos2":
         thread = threading.Thread(target=_run_chronos2_training, args=(job_id, train_req), daemon=True)
@@ -2602,6 +3053,7 @@ def start_training(req: LoRATrainRequest):
         "progress": 0.0,
         "created_at": time.time(),
     }
+    _save_training_job(job_id)
 
     if req.model == "chronos2":
         thread = threading.Thread(target=_run_chronos2_training, args=(job_id, req), daemon=True)
@@ -2624,6 +3076,12 @@ def get_training_status(job_id: str):
     job = training_jobs.get(job_id)
     if not job:
         raise HTTPException(404, "training job not found")
+    if job.get("backend") == "runpod" and job.get("status") not in {"completed", "failed"}:
+        try:
+            job = refresh_runpod_status(training_jobs, job_id) or job
+        except Exception as e:
+            job["status_refresh_error"] = str(e)
+            _save_training_job(job_id)
     return job
 
 
