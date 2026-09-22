@@ -589,7 +589,7 @@ Current service pricing in $CUTEDSL:
 
 | Service | Price (USD) | What you get |
 | zimage | $0.04 | One 1024x1024 CuteDSL-accelerated image |
-| chronos2 | $0.02 | One time series forecast |
+| chronos2 | $0.002 | One time series forecast |
 | flux_image | $0.04 | One Flux Schnell image (via fal.ai) |
 | tts | $0.005 | 100 characters of Kokoro TTS audio |
 | stt | $0.02 | 1 minute of speech-to-text |

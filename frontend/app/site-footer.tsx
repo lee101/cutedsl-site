@@ -8,6 +8,7 @@ const IMG_BASE = `${STATIC_BASE_URL}/images`;
 
 const exploreLinks = [
   { label: 'Home', href: '/' },
+  { label: 'Creator Tools', href: '/tools' },
   { label: 'AI Art Gallery', href: '/gallery' },
   { label: 'Art Playground', href: '/playground' },
   { label: 'Search Images', href: '/search' },
@@ -19,6 +20,7 @@ const exploreLinks = [
 ];
 
 const modelLinks = [
+  { label: 'Live Inference API', href: 'https://images.netwrck.com/docs' },
   { label: 'Z-Image Turbo', href: '/docs/zimage' },
   { label: 'Chronos2 Forecasting', href: '/docs/chronos2' },
   { label: 'Text to Speech', href: '/docs/tts' },
@@ -31,6 +33,11 @@ const modelLinks = [
 
 const ecosystemLinks = [
   { label: 'Applied AI NZ', href: 'https://app.nz' },
+  { label: 'app.nz Prompt Library', href: 'https://app.nz/prompts' },
+  { label: 'app.nz Alternatives', href: 'https://app.nz/alternatives' },
+  { label: 'app.nz Papers', href: 'https://app.nz/papers' },
+  { label: 'app.nz Art Gallery', href: 'https://app.nz/art' },
+  { label: 'OpenPaths', href: 'https://openpaths.io' },
   { label: 'Netwrck', href: 'https://netwrck.com' },
   { label: 'Helix', href: 'https://helix.app.nz' },
   { label: 'Dictatorflow', href: 'https://dictatorflow.com' },
@@ -47,7 +54,8 @@ const projectLinks = [
   { label: 'How.nz', href: 'https://how.nz' },
   { label: 'Ring.nz', href: 'https://ring.nz' },
   { label: 'SiteSim', href: 'https://sitesim.net' },
-  { label: 'DataTables', href: 'https://datatables.app.nz' },
+  { label: 'ReadingTime', href: 'https://readingtime.app.nz' },
+  { label: 'Homesy AI', href: 'https://homesyai.com' },
   { label: 'CuteDSL GitHub', href: 'https://github.com/lee101/cutedsl' },
 ];
 

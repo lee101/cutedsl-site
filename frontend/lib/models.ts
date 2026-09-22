@@ -1,12 +1,20 @@
 export interface ModelParam {
   name: string;
-  type: 'string' | 'int' | 'float' | 'string[]' | 'float[]' | 'float[][]' | 'object[]';
+  type: 'string' | 'int' | 'float' | 'boolean' | 'string[]' | 'float[]' | 'float[][]' | 'object[]';
   required: boolean;
-  default?: string | number;
+  default?: string | number | boolean;
   description: string;
   options?: string[];
   placeholder?: string;
+  /** Render a drag/drop + mic + presigned-upload widget instead of a plain URL box. */
+  upload?: 'audio' | 'image' | 'video' | 'file';
+  /** One-click sample values shown next to the upload widget. */
+  examples?: { label: string; url: string }[];
 }
+
+/** Public sample assets hosted on CuteDSL storage. */
+export const SAMPLE_AUDIO_URL = 'https://appstatic.app.nz/cutedsl/samples/stt-sample-en.mp3';
+export const SAMPLE_IMAGE_URL = 'https://cutedsl.cc/images/medium/b44f65a0e942f4d5_6b57661b.webp';
 
 export interface ModelConfig {
   slug: string;
@@ -62,7 +70,7 @@ export const MODELS: ModelConfig[] = [
     description: 'Time series forecasting with CuteChronos2 acceleration. Achieves 27x speedup over baseline with custom Triton kernels.',
     category: 'timeseries',
     responseType: 'json',
-    pricingNote: '$0.50 per forecast',
+    pricingNote: '$0.002 per forecast',
     pricingTier: 'first-party',
     params: [
       { name: 'values', type: 'float[]', required: true, description: 'Array of historical time series values', placeholder: '[1.2, 1.5, 1.3, 1.8, 2.1, 1.9, 2.4]' },
@@ -90,7 +98,7 @@ export const MODELS: ModelConfig[] = [
     description: 'High-quality text-to-speech powered by text-generator.io Supertonic and Kokoro voices. Natural-sounding speech synthesis with language, speed, and step controls.',
     category: 'audio',
     responseType: 'audio',
-    pricingNote: '$0.10 per 100 characters',
+    pricingNote: '$0.005 per 100 characters',
     pricingTier: 'first-party',
     params: [
       { name: 'text', type: 'string', required: true, description: 'Text to convert to speech', placeholder: 'Hello! Welcome to CuteDSL, the fastest AI inference platform.' },
@@ -120,20 +128,39 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'stt',
     name: 'Speech-to-Text',
-    description: 'Audio transcription powered by Gemma4. Accurately transcribes speech from audio URLs with support for multiple languages.',
+    description: 'Audio transcription powered by Gemma4. Record from your mic or drop a file — it uploads straight to CuteDSL storage and transcribes from the resulting URL. Supports multiple languages.',
     category: 'audio',
     responseType: 'json',
-    pricingNote: '$0.20 per minute',
+    pricingNote: '$0.02 per minute',
     pricingTier: 'first-party',
     params: [
-      { name: 'audio_url', type: 'string', required: true, description: 'URL of the audio file to transcribe', placeholder: 'https://example.com/audio.mp3' },
+      {
+        name: 'audio_url',
+        type: 'string',
+        required: true,
+        description: 'URL of the audio file to transcribe. Use the recorder/uploader below, or pass any public mp3, wav, m4a, ogg or webm URL.',
+        placeholder: 'https://appstatic.app.nz/cutedsl/samples/stt-sample-en.mp3',
+        upload: 'audio',
+        examples: [{ label: 'Sample speech (12s)', url: SAMPLE_AUDIO_URL }],
+      },
     ],
-    curlExample: `curl -X POST https://cutedsl.cc/api/service \\
+    curlExample: `# 1. Get a presigned upload URL (skip if your audio is already public)
+curl "https://cutedsl.cc/api/uploads/presign?filename=speech.wav&content_type=audio/wav&dataset=stt" \\
+  -H "Authorization: Bearer YOUR_API_KEY"
+# -> {"upload_url": "https://...r2.cloudflarestorage.com/...", "public_url": "https://appstatic.app.nz/cutedsl/uploads/..."}
+
+# 2. PUT the file straight to storage (no proxy, no size limit on our API)
+curl -X PUT "PRESIGNED_UPLOAD_URL" \\
+  -H "Content-Type: audio/wav" \\
+  --data-binary @speech.wav
+
+# 3. Transcribe the public URL
+curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -d '{
     "service": "stt",
-    "audio_url": "https://example.com/audio.mp3"
+    "audio_url": "https://appstatic.app.nz/cutedsl/samples/stt-sample-en.mp3"
   }'`,
     responseExample: {
       result: { text: 'Hello, this is a transcription example.', language: 'en', duration_seconds: 15.3 },
@@ -145,10 +172,10 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'gemma4',
     name: 'Gemma4 Chat',
-    description: 'Gemma4 26B multimodal LLM for chat and vision tasks. Supports OpenAI-compatible message format with text and image inputs.',
+    description: 'Google Gemma 4 multimodal LLM for chat and vision tasks — an efficient mixture-of-experts (~4B active params). Supports OpenAI-compatible message format with text and image inputs.',
     category: 'text',
     responseType: 'json',
-    pricingNote: '$0.05 per request',
+    pricingNote: '$0.01 per request',
     pricingTier: 'first-party',
     params: [
       { name: 'messages', type: 'object[]', required: true, description: 'Array of messages in OpenAI format', placeholder: '[{"role": "user", "content": "What is CuteDSL?"}]' },
@@ -177,10 +204,18 @@ export const MODELS: ModelConfig[] = [
     description: 'Automatic image captioning powered by GitBase. Generates descriptive captions for any image URL.',
     category: 'text',
     responseType: 'json',
-    pricingNote: '$0.05 per image',
+    pricingNote: '$0.01 per image',
     pricingTier: 'first-party',
     params: [
-      { name: 'image_url', type: 'string', required: true, description: 'URL of the image to caption', placeholder: 'https://example.com/photo.jpg' },
+      {
+        name: 'image_url',
+        type: 'string',
+        required: true,
+        description: 'URL of the image to caption. Drop a file below to upload it to CuteDSL storage first.',
+        placeholder: 'https://example.com/photo.jpg',
+        upload: 'image',
+        examples: [{ label: 'Sample image', url: SAMPLE_IMAGE_URL }],
+      },
     ],
     curlExample: `curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\
@@ -219,6 +254,92 @@ export const MODELS: ModelConfig[] = [
       credits_used: 300,
       credits_remain: 49700,
       usd_equivalent: 0.3,
+    },
+  },
+  {
+    slug: 'video_generate',
+    name: 'Image + Video Studio',
+    description: 'Generate video from a prompt or animate a still image through OpenPaths. Results are re-encoded to storage-efficient AV1 WebM and published to CuteDSL object storage.',
+    category: 'video',
+    responseType: 'video',
+    pricingNote: 'From $0.08 per video; model-dependent',
+    pricingTier: 'third-party',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'Describe the scene and the motion you want.', placeholder: 'slow camera push-in as flowers glow and sway in the breeze' },
+      { name: 'model', type: 'string', required: false, default: 'auto-video', description: 'OpenPaths video model or automatic routing.', options: ['auto-video', 'ltx-video', 'ltx-2', 'ltx-2.3-image-to-video'] },
+      {
+        name: 'image_url',
+        type: 'string',
+        required: false,
+        description: 'Public still-image URL to animate. Required for LTX 2.3 image-to-video. Upload below to get one.',
+        placeholder: 'https://example.com/still.webp',
+        upload: 'image',
+        examples: [{ label: 'Sample still', url: SAMPLE_IMAGE_URL }],
+      },
+      { name: 'aspect_ratio', type: 'string', required: false, default: '16:9', description: 'Output frame ratio.', options: ['16:9', '9:16', '1:1', '4:3'] },
+      { name: 'duration', type: 'int', required: false, default: 5, description: 'Requested clip duration in seconds (up to 10).' },
+      { name: 'output_format', type: 'string', required: false, default: 'webm', description: 'CuteDSL returns an AV1 WebM optimized on its own host.' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/service \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "service": "video_generate",
+    "model": "auto-video",
+    "prompt": "slow camera push-in as flowers glow and sway",
+    "image_url": "https://example.com/still.webp",
+    "aspect_ratio": "16:9",
+    "duration": 5
+  }'`,
+    responseExample: {
+      result: { video_url: 'https://appstatic.app.nz/cutedsl/uploads/user/videos/example.webm', original_video_url: 'https://provider.example/source.mp4', codec: 'av1', output_format: 'webm' },
+      credits_used: 15,
+      credits_remain: 4985,
+      usd_equivalent: 0.15,
+    },
+  },
+  {
+    slug: 'h3_video',
+    name: 'MiniMax H3 Video',
+    description: 'Text-to-video and image-to-video through the shared app.nz H3 Cog, with first/last-frame control, scheduler-level seamless loops, native stereo audio, and GPU AV1 delivery.',
+    category: 'video',
+    responseType: 'video',
+    pricingNote: '$2.688/GPU-hour, metered by completed app.nz execution time (app.nz price + 20%)',
+    pricingTier: 'third-party',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'Scene, action, camera, style, and optional audio direction.', placeholder: 'A locked-off living photograph of a waterfall; only water and nearby leaves move in a subtle seamless loop.' },
+      { name: 'first_frame', type: 'string', required: false, description: 'Public start-frame URL for image-to-video. Required for loop mode.', upload: 'image', examples: [{ label: 'Sample still', url: SAMPLE_IMAGE_URL }] },
+      { name: 'last_frame', type: 'string', required: false, description: 'Optional public target final-frame URL.', upload: 'image' },
+      { name: 'aspect_ratio', type: 'string', required: false, default: '16:9', description: 'Output frame ratio.', options: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] },
+      { name: 'size', type: 'string', required: false, default: 'balanced', description: 'Preview, balanced, or native 768px short-edge canvas.', options: ['preview', 'balanced', 'native'] },
+      { name: 'duration', type: 'int', required: false, default: 5, description: 'Clip length from 4 to 15 seconds.' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Sampling steps from 8 to 30.' },
+      { name: 'seed', type: 'int', required: false, description: 'Optional deterministic seed.' },
+      { name: 'structured_prompt', type: 'boolean', required: false, default: true, description: 'Expand concise input into H3 structured prompting.' },
+      { name: 'loop', type: 'boolean', required: false, default: false, description: 'Reuse first_frame as the scheduler final-frame condition.' },
+      { name: 'include_audio', type: 'boolean', required: false, default: true, description: 'Generate H3 native stereo audio.' },
+      { name: 'output_format', type: 'string', required: false, default: 'webm-av1', description: 'GPU delivery codec.', options: ['webm-av1', 'mp4-h264'] },
+      { name: 'encode_quality', type: 'int', required: false, default: 26, description: 'NVENC constant quality from 16 to 45; lower is higher quality.' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/service \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "service": "h3_video",
+    "prompt": "A subtle living photograph of a waterfall",
+    "first_frame": "https://example.com/start.webp",
+    "loop": true,
+    "include_audio": true,
+    "size": "balanced",
+    "duration": 5,
+    "num_steps": 20,
+    "output_format": "webm-av1"
+  }'`,
+    responseExample: {
+      result: { job_id: 'video_...', status: 'queued', status_url: '/api/video-jobs/video_...' },
+      credits_used: 0,
+      settlement: 'completed app.nz prediction cost plus 20%',
+      price_usd_per_gpu_hour: 2.688,
     },
   },
   {

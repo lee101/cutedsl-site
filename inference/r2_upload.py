@@ -11,10 +11,23 @@ from cachetools import cached
 
 logger = logging.getLogger("cutedsl-inference")
 
-R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL", "https://f76d25b8b86cfa5638f43016510d8f77.r2.cloudflarestorage.com")
-R2_BUCKET = os.getenv("R2_BUCKET", "appstatic")
-R2_BUCKET_PATH = os.getenv("R2_BUCKET_PATH", "cutedsl/uploads")
-R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL", "appstatic.app.nz")
+def _project_env(scoped_name: str, generic_name: str, default: str) -> str:
+    """Prefer CuteDSL-scoped storage config over host-wide generic variables."""
+    return os.getenv(scoped_name) or os.getenv(generic_name, default)
+
+
+R2_ENDPOINT_URL = _project_env(
+    "CUTEDSL_R2_ENDPOINT_URL",
+    "R2_ENDPOINT_URL",
+    "https://f76d25b8b86cfa5638f43016510d8f77.r2.cloudflarestorage.com",
+)
+R2_BUCKET = _project_env("CUTEDSL_R2_BUCKET", "R2_BUCKET", "appstatic")
+R2_BUCKET_PATH = _project_env(
+    "CUTEDSL_R2_BUCKET_PATH", "R2_BUCKET_PATH", "cutedsl/uploads"
+)
+R2_PUBLIC_BASE_URL = _project_env(
+    "CUTEDSL_R2_PUBLIC_BASE_URL", "R2_PUBLIC_BASE_URL", "appstatic.app.nz"
+)
 
 s3_client = None
 

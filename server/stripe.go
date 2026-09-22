@@ -82,6 +82,14 @@ type stripeSubscription struct {
 	Metadata map[string]string `json:"metadata"`
 }
 
+type stripeInvoice struct {
+	ID            string `json:"id"`
+	Customer      string `json:"customer"`
+	Subscription  string `json:"subscription"`
+	BillingReason string `json:"billing_reason"`
+	AmountPaid    int64  `json:"amount_paid"`
+}
+
 var (
 	stripeSvc           *stripeService
 	stripeWebhookSecret string
@@ -292,11 +300,11 @@ type stripeCheckoutRequest struct {
 }
 
 func stripeMonthlyPriceID() string {
-	return strings.TrimPrefix(strings.TrimSpace(getEnv("STRIPE_MONTHLY_PRICE_ID", "price_1TZQWbQda7Fr1LvlkbnwaYpg")), "/")
+	return strings.TrimPrefix(strings.TrimSpace(getEnv("STRIPE_MONTHLY_PRICE_ID", "price_1U0eggQda7Fr1LvlSAUWcs8r")), "/")
 }
 
 func stripeAnnualPriceID() string {
-	return strings.TrimPrefix(strings.TrimSpace(getEnv("STRIPE_ANNUAL_PRICE_ID", "price_1TZQXvQda7Fr1Lvl2iOtzUx2")), "/")
+	return strings.TrimPrefix(strings.TrimSpace(getEnv("STRIPE_ANNUAL_PRICE_ID", "price_1U0egmQda7Fr1Lvl3bAPYpoD")), "/")
 }
 
 func stripePlanPriceID(plan string) (string, string) {
@@ -470,14 +478,17 @@ func handleStripeWebhook(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 503, "stripe payments not configured")
 		return
 	}
+	if stripeWebhookSecret == "" {
+		log.Printf("stripe webhook rejected: webhook secret is not configured")
+		jsonError(ctx, 503, "stripe webhook not configured")
+		return
+	}
 	payload := ctx.PostBody()
-	if stripeWebhookSecret != "" {
-		sig := string(ctx.Request.Header.Peek("Stripe-Signature"))
-		if err := verifyStripeWebhookSignature(payload, sig, stripeWebhookSecret, 5*time.Minute); err != nil {
-			log.Printf("stripe webhook signature error: %v", err)
-			jsonError(ctx, 400, "invalid stripe signature")
-			return
-		}
+	sig := string(ctx.Request.Header.Peek("Stripe-Signature"))
+	if err := verifyStripeWebhookSignature(payload, sig, stripeWebhookSecret, 5*time.Minute); err != nil {
+		log.Printf("stripe webhook signature error: %v", err)
+		jsonError(ctx, 400, "invalid stripe signature")
+		return
 	}
 
 	var evt stripeWebhookEvent
@@ -489,6 +500,8 @@ func handleStripeWebhook(ctx *fasthttp.RequestCtx) {
 	switch evt.Type {
 	case "checkout.session.completed":
 		handleStripeCheckoutCompleted(evt.Data.Object)
+	case "invoice.paid":
+		handleStripeInvoicePaid(evt.Data.Object)
 	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted":
 		handleStripeSubscriptionUpdated(evt.Data.Object)
 	default:
@@ -505,10 +518,8 @@ func handleStripeCheckoutCompleted(raw json.RawMessage) {
 		return
 	}
 	if session.PaymentStatus != "paid" {
-		if session.Mode != "subscription" {
-			log.Printf("stripe session %s not paid: %s", session.ID, session.PaymentStatus)
-			return
-		}
+		log.Printf("stripe session %s not paid: %s", session.ID, session.PaymentStatus)
+		return
 	}
 
 	userID := session.Metadata["user_id"]
@@ -584,28 +595,51 @@ func handleStripeSubscriptionCheckoutCompleted(session stripeCheckoutSession, us
 }
 
 func grantSubscriptionAPICredits(session stripeCheckoutSession, userID, plan string) {
-	usdAmount := float64(session.AmountTotal) / 100
-	if usdAmount <= 0 {
-		if plan == "annual" {
-			usdAmount = 120
-		} else {
-			usdAmount = 12
-		}
+	usdAmount := subscriptionCreditGrantUSD(plan)
+	creditSubscriptionAllowance(userID, session.Customer, "subscription:"+session.ID, session.PaymentIntent, usdAmount)
+}
+
+func subscriptionCreditGrantUSD(plan string) float64 {
+	if plan == "annual" {
+		return 120
 	}
+	return 10
+}
+
+func creditSubscriptionAllowance(userID, customerID, grantID, paymentIntentID string, usdAmount float64) {
 	cutePrice := getCUTEPriceUSD()
 	if cutePrice <= 0 {
-		log.Printf("stripe subscription %s cannot grant API credits: CUTE price unavailable", session.ID)
+		log.Printf("stripe subscription grant %s cannot credit allowance: CUTE price unavailable", grantID)
 		return
 	}
 	cuteAmount := usdAmount / cutePrice
-	credited, balance, err := dbConn.CreditStripeCheckout(userID, session.Customer, "subscription:"+session.ID, session.PaymentIntent, usdAmount, cuteAmount)
+	credited, balance, err := dbConn.CreditStripeCheckout(userID, customerID, grantID, paymentIntentID, usdAmount, cuteAmount)
 	if err != nil {
-		log.Printf("stripe subscription %s credit grant error: %v", session.ID, err)
+		log.Printf("stripe subscription grant %s error: %v", grantID, err)
 		return
 	}
 	if credited {
-		log.Printf("stripe subscription credited user=%s session=%s usd=%.2f cute=%.2f balance=%.2f", userID, session.ID, usdAmount, cuteAmount, balance)
+		log.Printf("stripe subscription allowance user=%s grant=%s usd=%.2f cute=%.2f balance=%.2f", userID, grantID, usdAmount, cuteAmount, balance)
 	}
+}
+
+func handleStripeInvoicePaid(raw json.RawMessage) {
+	var invoice stripeInvoice
+	if err := json.Unmarshal(raw, &invoice); err != nil {
+		log.Printf("stripe webhook parse invoice: %v", err)
+		return
+	}
+	// Checkout completion grants the first allowance. Renewal invoices grant
+	// subsequent allowances, with the invoice ID providing idempotency.
+	if invoice.Subscription == "" || invoice.BillingReason == "subscription_create" {
+		return
+	}
+	user, err := dbConn.GetUserByStripeSubscription(invoice.Subscription, invoice.Customer)
+	if err != nil {
+		log.Printf("stripe invoice %s subscription user lookup failed: %v", invoice.ID, err)
+		return
+	}
+	creditSubscriptionAllowance(user.ID, invoice.Customer, "subscription-invoice:"+invoice.ID, "", subscriptionCreditGrantUSD(user.SubscriptionPlan))
 }
 
 func handleStripeSubscriptionUpdated(raw json.RawMessage) {

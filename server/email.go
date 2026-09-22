@@ -6,11 +6,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"net/smtp"
+	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 // DripEmail defines one step in the drip campaign
@@ -63,6 +67,41 @@ func initEmail() {
 	go creditsExpiredLoop()
 }
 
+func unsubscribeURL(email string) string {
+	return "https://cutedsl.com/unsubscribe?email=" + url.QueryEscape(email)
+}
+
+func handleUnsubscribe(ctx *fasthttp.RequestCtx) {
+	email := strings.TrimSpace(string(ctx.QueryArgs().Peek("email")))
+	if email == "" {
+		email = strings.TrimSpace(string(ctx.PostArgs().Peek("email")))
+	}
+	if email == "" {
+		ctx.SetStatusCode(400)
+		ctx.SetBodyString("missing email")
+		return
+	}
+	if err := dbConn.UnsubscribeEmail(email); err != nil {
+		log.Printf("Unsubscribe error for %s: %v", email, err)
+		ctx.SetStatusCode(500)
+		ctx.SetBodyString("unsubscribe failed")
+		return
+	}
+	log.Printf("Unsubscribed %s", email)
+	ctx.SetContentType("text/html; charset=utf-8")
+	ctx.SetBodyString(fmt.Sprintf(`<!doctype html>
+<html>
+<head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Unsubscribed - CuteDSL</title></head>
+<body style="margin:0;background:#0f172a;color:#e2e8f0;font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;">
+  <div style="text-align:center;padding:40px;max-width:420px;">
+    <h1 style="font-size:24px;margin-bottom:12px;">You're unsubscribed</h1>
+    <p style="color:#94a3b8;">%s will no longer receive emails from CuteDSL.</p>
+    <p><a href="https://cutedsl.com" style="color:#38bdf8;text-decoration:none;">Back to cutedsl.com</a></p>
+  </div>
+</body>
+</html>`, html.EscapeString(email)))
+}
+
 // sendEmail sends an HTML email via AWS SES SMTP
 func sendEmail(toEmail, subject, htmlBody string) error {
 	region := os.Getenv("AWS_REGION")
@@ -86,8 +125,8 @@ func sendEmail(toEmail, subject, htmlBody string) error {
 	plainText := "View this email in your browser at https://cutedsl.com"
 
 	boundary := "----=_Part_" + hex.EncodeToString(func() []byte { b := make([]byte, 8); rand.Read(b); return b }())
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"%s\"\r\nList-Unsubscribe: <https://cutedsl.com/unsubscribe?email=%s>\r\n\r\n--%s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n--%s\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n%s\r\n--%s--\r\n",
-		from, toEmail, subject, boundary, toEmail, boundary, plainText, boundary, htmlBody, boundary)
+	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"%s\"\r\nList-Unsubscribe: <%s>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n\r\n--%s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n--%s\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n%s\r\n--%s--\r\n",
+		from, toEmail, subject, boundary, unsubscribeURL(toEmail), boundary, plainText, boundary, htmlBody, boundary)
 
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
 
@@ -171,7 +210,7 @@ func personalizeTemplate(html string, user *User) string {
 		"{{.WalletShort}}", walletShort,
 		"{{.Email}}", user.Email,
 		"{{.APIKey}}", user.APIKey,
-		"{{.UnsubscribeURL}}", fmt.Sprintf("https://cutedsl.com/unsubscribe?email=%s", user.Email),
+		"{{.UnsubscribeURL}}", unsubscribeURL(user.Email),
 	)
 	return r.Replace(html)
 }

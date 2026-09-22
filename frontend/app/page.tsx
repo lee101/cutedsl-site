@@ -1,20 +1,33 @@
 'use client';
 
+import { browserStorage } from '@/lib/browser-storage';
+
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Sparkles, Wand2, Image as ImageIcon, LineChart, Coins, Heart, Star, Zap,
+  Sparkles, Wand2, Image as ImageIcon, LineChart, Coins, Heart, Zap,
   Mic, Volume2, BookOpen, Cloud, Code, Globe, Cpu, Database, Layout, Search, Gamepad2, Users,
-  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff, CreditCard
+  Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff, CreditCard, Menu,
+  Video, Upload, ShieldCheck, LockKeyhole, ChevronDown
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { CodeBlock } from '@/lib/code-block';
-import { parseJSONResponse as parseHTTPJSONResponse } from '@/lib/http';
+import { parseJSONResponse as parseHTTPJSONResponse, HTTPResponseError } from '@/lib/http';
+import { uploadToBucket } from '@/lib/uploads';
 import { STATIC_BASE_URL } from '@/lib/static-assets';
 import { SiteFooter } from './site-footer';
 
 const API_BASE = '/api';
 const IMG_BASE = `${STATIC_BASE_URL}/images`;
+const VIDEO_BASE = `${STATIC_BASE_URL}/videos`;
+
+const NAV_LINKS: { href: string; label: string; hover: string }[] = [
+  { href: '/tools', label: 'Creator Tools', hover: 'hover:text-purple-500' },
+  { href: '/gallery', label: 'Gallery', hover: 'hover:text-pink-500' },
+  { href: '#models', label: 'Models', hover: 'hover:text-pink-500' },
+  { href: '/docs', label: 'API', hover: 'hover:text-blue-500' },
+  { href: '#credits', label: 'Pricing', hover: 'hover:text-purple-500' },
+];
 
 interface StripeEmbeddedCheckout {
   mount: (target: string | HTMLElement) => void;
@@ -135,6 +148,17 @@ export default function Home() {
   const [demoPrompt, setDemoPrompt] = useState('a cute fairy in an enchanted forest, digital art, pastel colors');
   const [demoResult, setDemoResult] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState(false);
+  const [creatorMode, setCreatorMode] = useState<'image' | 'video'>('image');
+  const [creatorPrompt, setCreatorPrompt] = useState('A bioluminescent fox moving through a moonlit flower garden');
+  const [creatorAspect, setCreatorAspect] = useState('16:9');
+  const [creatorModel, setCreatorModel] = useState('auto-video');
+  const [creatorReference, setCreatorReference] = useState<File | null>(null);
+  const [creatorReferencePreview, setCreatorReferencePreview] = useState('');
+  const [creatorLoading, setCreatorLoading] = useState(false);
+  const [creatorStatus, setCreatorStatus] = useState<string | null>(null);
+  const [creatorResult, setCreatorResult] = useState<{type: 'image' | 'video'; url: string} | null>(null);
+  const [showConversionFlow, setShowConversionFlow] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [testMode, setTestMode] = useState(false);
   const [testResults, setTestResults] = useState<{route: string; status: string; ms: number}[]>([]);
   const [email, setEmail] = useState<string | null>(null);
@@ -162,22 +186,55 @@ export default function Home() {
   const [showApiKey, setShowApiKey] = useState(false);
   const [clientOrigin, setClientOrigin] = useState('');
   const embeddedCheckoutElementRef = useRef<HTMLDivElement | null>(null);
+  const conversionCheckoutElementRef = useRef<HTMLDivElement | null>(null);
   const embeddedCheckoutRef = useRef<StripeEmbeddedCheckout | null>(null);
+  const pendingAutotopupRef = useRef(false);
+  const persistAutotopupRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     setClientOrigin(window.location.origin);
   }, []);
+
+  useEffect(() => {
+    if (!creatorReference) {
+      setCreatorReferencePreview('');
+      return;
+    }
+    const preview = URL.createObjectURL(creatorReference);
+    setCreatorReferencePreview(preview);
+    return () => URL.revokeObjectURL(preview);
+  }, [creatorReference]);
 
   const storeAuth = useCallback((user: UserPayload, key: string) => {
     setWalletAddress(user.wallet_address);
     setApiKey(key);
     setEmail(user.email || null);
     if (user.email) setEmailInput(user.email);
-    localStorage.setItem('cutedsl_wallet', user.wallet_address);
-    localStorage.setItem('cutedsl_api_key', key);
-    if (user.email) localStorage.setItem('cutedsl_email', user.email);
-    else localStorage.removeItem('cutedsl_email');
+    browserStorage.setItem('cutedsl_wallet', user.wallet_address);
+    browserStorage.setItem('cutedsl_api_key', key);
+    if (user.email) browserStorage.setItem('cutedsl_email', user.email);
+    else browserStorage.removeItem('cutedsl_email');
   }, []);
+
+  const clearStoredAuth = useCallback(() => {
+    setApiKey(null);
+    setWalletAddress(null);
+    setEmail(null);
+    setBalance(null);
+    setBillingHistory([]);
+    browserStorage.removeItem('cutedsl_api_key');
+    browserStorage.removeItem('cutedsl_wallet');
+    browserStorage.removeItem('cutedsl_email');
+  }, []);
+
+  // A key that no longer resolves to an account (rotated, or created against a
+  // different environment) otherwise leaves the UI looking signed in while every
+  // request fails with "invalid API key".
+  const handleExpiredSession = useCallback((message?: string) => {
+    clearStoredAuth();
+    setAuthStatus(message || 'Your session expired. Sign in again to keep creating.');
+    setShowConversionFlow(true);
+  }, [clearStoredAuth]);
 
   // Fetch pricing on mount
   useEffect(() => {
@@ -213,7 +270,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (!embeddedCheckoutClientSecret || !stripePublishableKey || !embeddedCheckoutElementRef.current) return;
+    const checkoutTarget = showConversionFlow ? conversionCheckoutElementRef.current : embeddedCheckoutElementRef.current;
+    if (!embeddedCheckoutClientSecret || !stripePublishableKey || !checkoutTarget) return;
 
     let cancelled = false;
     const mountCheckout = async () => {
@@ -229,11 +287,15 @@ export default function Home() {
         const checkout = await stripe.initEmbeddedCheckout({
           clientSecret: embeddedCheckoutClientSecret,
           onComplete: () => {
-            setStripeStatus('Payment complete. Credits will appear after Stripe confirms the checkout.');
+            setStripeStatus('Payment complete. Your credits will appear shortly.');
             setEmbeddedCheckoutClientSecret('');
             if (walletAddress) {
               fetchBalance(walletAddress);
               fetchHistory(walletAddress);
+            }
+            if (pendingAutotopupRef.current) {
+              pendingAutotopupRef.current = false;
+              window.setTimeout(() => persistAutotopupRef.current?.(), 1500);
             }
           },
         });
@@ -242,7 +304,7 @@ export default function Home() {
           return;
         }
         embeddedCheckoutRef.current = checkout;
-        checkout.mount(embeddedCheckoutElementRef.current!);
+        checkout.mount(checkoutTarget);
         setStripeStatus(null);
       } catch (err: any) {
         setStripeStatus(err?.message || 'Failed to load embedded Stripe checkout');
@@ -257,7 +319,7 @@ export default function Home() {
       embeddedCheckoutRef.current?.destroy();
       embeddedCheckoutRef.current = null;
     };
-  }, [embeddedCheckoutClientSecret, stripePublishableKey, walletAddress, fetchBalance, fetchHistory]);
+  }, [embeddedCheckoutClientSecret, stripePublishableKey, walletAddress, fetchBalance, fetchHistory, showConversionFlow]);
 
   useEffect(() => {
     if (walletAddress) {
@@ -270,12 +332,27 @@ export default function Home() {
 
   // Restore wallet and API key from localStorage
   useEffect(() => {
-    const saved = localStorage.getItem('cutedsl_wallet');
+    const saved = browserStorage.getItem('cutedsl_wallet');
     if (saved) setWalletAddress(saved);
-    const savedKey = localStorage.getItem('cutedsl_api_key');
+    const savedKey = browserStorage.getItem('cutedsl_api_key');
     if (savedKey) setApiKey(savedKey);
-    const savedEmail = localStorage.getItem('cutedsl_email');
+    const savedEmail = browserStorage.getItem('cutedsl_email');
     if (savedEmail) setEmail(savedEmail);
+    // Confirm the stored key still belongs to an account. Only a 401 clears it —
+    // a network blip must not sign the user out.
+    if (savedKey) {
+      fetch(`${API_BASE}/auth/session`, { headers: { Authorization: `Bearer ${savedKey}` } })
+        .then(async (res) => {
+          if (res.status === 401) {
+            handleExpiredSession('Your saved API key no longer works. Sign in again to restore access.');
+            return;
+          }
+          if (!res.ok) return;
+          const data = await res.json() as AuthResponse;
+          if (data?.user) storeAuth(data.user, data.api_key || savedKey);
+        })
+        .catch(() => {});
+    }
     // ?test=true triggers e2e API test
     if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('test') === 'true') {
       setTestMode(true);
@@ -283,8 +360,8 @@ export default function Home() {
     }
     if (typeof window !== 'undefined') {
       const payment = new URLSearchParams(window.location.search).get('payment');
-      if (payment === 'success') setStripeStatus('Payment received. Credits will appear after Stripe confirms the checkout.');
-      if (payment === 'cancel') setStripeStatus('Stripe checkout was cancelled.');
+      if (payment === 'success') setStripeStatus('Payment received. Your credits will appear shortly.');
+      if (payment === 'cancel') setStripeStatus('Checkout was cancelled.');
     }
   }, []);
 
@@ -294,13 +371,14 @@ export default function Home() {
 
   const runE2ETests = async () => {
     const results: {route: string; status: string; ms: number}[] = [];
-    const test = async (route: string, opts?: RequestInit) => {
+    const test = async (route: string, opts?: RequestInit, expectAuthed = false) => {
       const t0 = Date.now();
       try {
         const res = await fetch(`${API_BASE}${route}`, opts);
         const ms = Date.now() - t0;
-        const ok = res.status < 500;
+        const ok = res.status < 500 && !(expectAuthed && res.status === 401);
         results.push({ route, status: ok ? `${res.status} OK` : `${res.status} FAIL`, ms });
+        if (expectAuthed && res.status === 401) handleExpiredSession('Your saved API key no longer works. Sign in again to restore access.');
       } catch (e) {
         results.push({ route, status: 'ERR', ms: Date.now() - t0 });
       }
@@ -313,6 +391,10 @@ export default function Home() {
     await test('/billing-history?wallet=test_e2e_wallet');
     await test('/auth/wallet', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({wallet_address: 'e2e_test_' + Date.now()}) });
     await test('/service', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({service:'zimage',wallet_address:'nonexistent'}) });
+    const storedKey = browserStorage.getItem('cutedsl_api_key');
+    if (storedKey) {
+      await test('/auth/session', { headers: { Authorization: `Bearer ${storedKey}` } }, true);
+    }
   };
 
   const loginWithEmailPassword = async () => {
@@ -361,6 +443,10 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 8 }),
       });
+      if (res.status === 401) {
+        handleExpiredSession();
+        return;
+      }
       const data = await parseJSONResponse<any>(res, 'Failed to generate image');
       if (data.result?.image_base64) {
         setDemoResult(`data:image/webp;base64,${data.result.image_base64}`);
@@ -371,6 +457,103 @@ export default function Home() {
       alert('Failed to generate image');
     } finally {
       setDemoLoading(false);
+    }
+  };
+
+  const uploadCreatorReference = async (file: File) => {
+    if (!apiKey) throw new Error('Create an account before uploading a reference image.');
+    try {
+      return await uploadToBucket(file, {
+        apiKey,
+        dataset: 'video-sources',
+        filename: file.name || 'reference.webp',
+        contentType: file.type || 'image/webp',
+        onProgress: pct => setCreatorStatus(`Uploading reference image… ${pct}%`),
+      });
+    } catch (err) {
+      if (err instanceof HTTPResponseError && err.status === 401) {
+        handleExpiredSession();
+        throw new Error('Your session expired. Sign in again to upload a reference image.');
+      }
+      throw err;
+    }
+  };
+
+  const createStudioAsset = async () => {
+    if (!creatorPrompt.trim()) {
+      setCreatorStatus('Describe what you want to create first.');
+      return;
+    }
+    if (!signedIn || !apiKey) {
+      setCreatorStatus(null);
+      setShowConversionFlow(true);
+      return;
+    }
+    if (creatorMode === 'video' && !creatorReference && creatorModel === 'ltx-2.3-image-to-video') {
+      setCreatorStatus('Add a still image for the LTX 2.3 image-to-video model.');
+      return;
+    }
+
+    setCreatorLoading(true);
+    setCreatorStatus(creatorMode === 'video' ? 'Preparing your AV1 video… this can take a few minutes.' : 'Creating your image…');
+    setCreatorResult(null);
+    try {
+      const dimensions: Record<string, [number, number]> = {
+        '1:1': [1024, 1024],
+        '16:9': [1024, 576],
+        '9:16': [576, 1024],
+        '4:3': [1024, 768],
+      };
+      const [width, height] = dimensions[creatorAspect] || dimensions['16:9'];
+      let imageURL = '';
+      if (creatorMode === 'video' && creatorReference) {
+        imageURL = await uploadCreatorReference(creatorReference);
+      }
+      const payload = creatorMode === 'image'
+        ? { service: 'zimage', prompt: creatorPrompt.trim(), width, height, num_steps: 8 }
+        : {
+            service: 'video_generate',
+            model: creatorModel,
+            prompt: creatorPrompt.trim(),
+            image_url: imageURL || undefined,
+            aspect_ratio: creatorAspect,
+            duration: 5,
+            output_format: 'webm',
+          };
+      const res = await fetch(`${API_BASE}/service`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(payload),
+      });
+      if (res.status === 401) {
+        handleExpiredSession();
+        return;
+      }
+      const data = await parseJSONResponse<any>(res, `Could not create ${creatorMode}`);
+      if (creatorMode === 'image') {
+        const imageURLResult = data.result?.image_url || data.saved_image?.url || (data.result?.image_base64 ? `data:image/webp;base64,${data.result.image_base64}` : '');
+        if (!imageURLResult) throw new Error('The image finished without a displayable result.');
+        setCreatorResult({ type: 'image', url: imageURLResult });
+      } else {
+        const videoURL = data.result?.video_url || data.result?.result?.video_url;
+        if (!videoURL) throw new Error('The video finished without a displayable result.');
+        setCreatorResult({ type: 'video', url: videoURL });
+      }
+      setCreatorStatus('Ready — your creation is saved at its original aspect ratio.');
+      if (walletAddress) fetchBalance(walletAddress);
+    } catch (err: any) {
+      const message = err?.message || `Could not create ${creatorMode}`;
+      setCreatorStatus(message);
+      if (/credit|payment|402/i.test(message)) setShowConversionFlow(true);
+    } finally {
+      setCreatorLoading(false);
+    }
+  };
+
+  const continueCreatorSignup = async () => {
+    const wallet = await loginWithEmailPassword();
+    if (wallet) {
+      setCreatorStatus('Account ready. Add credits, then create.');
     }
   };
 
@@ -427,9 +610,9 @@ export default function Home() {
     setPasswordInput('');
     setAuthStatus(null);
     setEmailSaved(false);
-    localStorage.removeItem('cutedsl_wallet');
-    localStorage.removeItem('cutedsl_api_key');
-    localStorage.removeItem('cutedsl_email');
+    browserStorage.removeItem('cutedsl_wallet');
+    browserStorage.removeItem('cutedsl_api_key');
+    browserStorage.removeItem('cutedsl_email');
     try {
       const solana = (window as any).solana;
       if (solana?.isPhantom) solana.disconnect();
@@ -457,7 +640,7 @@ export default function Home() {
       if (data.success) {
         setEmail(data.email);
         setEmailInput(data.email);
-        localStorage.setItem('cutedsl_email', data.email);
+        browserStorage.setItem('cutedsl_email', data.email);
         if (data.has_password) {
           setBalance((current) => current ? { ...current, has_password: true } : current);
         }
@@ -534,14 +717,14 @@ export default function Home() {
     return walletAddress;
   };
 
-  const createStripeCheckout = async () => {
-    if (!stripeAmount) return;
+  const createStripeCheckout = async (amountUsd?: number) => {
+    if (!stripeAmount && !amountUsd) return false;
     setStripeLoading(true);
     setStripeStatus(null);
     try {
       const billingWallet = await ensureStripeBillingAccount();
-      if (!billingWallet) return;
-      const amount = parseFloat(stripeAmount);
+      if (!billingWallet) return false;
+      const amount = amountUsd ?? parseFloat(stripeAmount);
       const res = await fetch(`${API_BASE}/stripe-checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -558,25 +741,55 @@ export default function Home() {
       if (data.client_secret && data.publishable_key) {
         setStripePublishableKey(data.publishable_key);
         setEmbeddedCheckoutClientSecret(data.client_secret);
-        setStripeStatus('Complete the secure Stripe checkout below.');
-        return;
+        setStripeStatus(null);
+        return true;
       }
       if (data.url) {
         window.location.href = data.url;
-        return;
+        return true;
       }
       throw new Error('Stripe checkout response did not include a client secret');
     } catch (err: any) {
       setStripeStatus(err?.message || 'Stripe checkout failed');
+      return false;
     } finally {
       setStripeLoading(false);
     }
   };
 
-  const saveAutotopupSettings = async () => {
+  const createSubscriptionCheckout = async (plan: 'monthly' | 'annual') => {
+    setStripeLoading(true);
+    setStripeStatus(null);
+    try {
+      const billingWallet = await ensureStripeBillingAccount();
+      if (!billingWallet) return false;
+      const res = await fetch(`${API_BASE}/stripe-checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet_address: billingWallet,
+          type: 'subscription',
+          plan,
+          return_url: `${window.location.origin}/?payment=success&session_id={CHECKOUT_SESSION_ID}#credits`,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start subscription checkout');
+      if (!data.client_secret || !data.publishable_key) throw new Error('Stripe checkout response did not include a client secret');
+      setStripePublishableKey(data.publishable_key);
+      setEmbeddedCheckoutClientSecret(data.client_secret);
+      return true;
+    } catch (err: any) {
+      setStripeStatus(err?.message || 'Subscription checkout failed');
+      return false;
+    } finally {
+      setStripeLoading(false);
+    }
+  };
+
+  const persistAutotopupSettings = async () => {
     if (!walletAddress) return;
     setAutotopupSaving(true);
-    setStripeStatus(null);
     try {
       const res = await fetch(`${API_BASE}/autotopup-settings`, {
         method: 'POST',
@@ -600,6 +813,22 @@ export default function Home() {
     } finally {
       setAutotopupSaving(false);
     }
+  };
+  persistAutotopupRef.current = persistAutotopupSettings;
+
+  const saveAutotopupSettings = async () => {
+    if (!walletAddress) return;
+    setStripeStatus(null);
+    if (autotopupEnabled && !balance?.has_payment_method) {
+      const amount = Math.min(500, Math.max(5, parseFloat(autotopupAmount || '25') || 25));
+      pendingAutotopupRef.current = true;
+      setStripeAmount(String(amount));
+      const opened = await createStripeCheckout(amount);
+      if (opened) setStripeStatus('Complete checkout to save a card; auto top-up turns on automatically.');
+      else pendingAutotopupRef.current = false;
+      return;
+    }
+    await persistAutotopupSettings();
   };
 
   const copyToClipboard = (text: string) => {
@@ -720,11 +949,24 @@ export default function Home() {
     return p ? p.price_cute : 0;
   };
 
+  // USD fallbacks mirror server/services.go servicePricesUSD so cards show a
+  // price before /pricing resolves (and if the backend is unreachable).
+  const SERVICE_USD_FALLBACK: Record<string, number> = {
+    zimage: 0.04, chronos2: 0.002, tts: 0.005, stt: 0.02,
+    gemma4: 0.01, caption: 0.01, ltx_video: 0.30, h3_video: 2.688, flux_image: 0.04,
+  };
+  const getServiceUsd = (service: string) => {
+    const p = pricing.find(p => p.service === service);
+    return p && p.price_usd > 0 ? p.price_usd : (SERVICE_USD_FALLBACK[service] ?? 0);
+  };
+
   const formatCute = (n: number) => {
     if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
     if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
     return n.toFixed(0);
   };
+
+  const formatUsd = (n: number) => (n >= 0.01 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`);
 
   return (
       <div className="min-h-screen overflow-hidden relative selection:bg-pink-300 selection:text-pink-900">
@@ -733,22 +975,15 @@ export default function Home() {
 
       {/* Navigation */}
       <header>
-      <nav aria-label="Main navigation" className="w-full p-6 flex justify-between items-center max-w-7xl mx-auto relative z-10">
-        <Link href="/" className="flex items-center gap-2">
+      <nav aria-label="Main navigation" className="w-full px-4 sm:px-8 py-5 flex justify-between items-center relative z-30">
+        <Link href="/" className="flex items-center gap-2 shrink-0">
           <Image src={`${IMG_BASE}/logo.webp`} alt="CuteDSL" width={40} height={40} className="rounded-lg" />
           <span className="font-fredoka text-3xl font-bold text-pink-600 tracking-wide">CuteDSL</span>
         </Link>
-        <div className="hidden md:flex gap-5 font-bold text-slate-700">
-          <Link href="#models" className="hover:text-pink-500 transition-colors">Models</Link>
-          <Link href="/gallery" className="hover:text-pink-500 transition-colors">Gallery</Link>
-          <Link href="/playground" className="hover:text-pink-500 transition-colors">Playground</Link>
-          <Link href="/search" className="hover:text-pink-500 transition-colors">Search</Link>
-          <Link href="#training" className="hover:text-purple-500 transition-colors">Training</Link>
-          <Link href="/docs" className="hover:text-blue-500 transition-colors">API Docs</Link>
-          <Link href="/account" className="hover:text-emerald-600 transition-colors">Account</Link>
-          <Link href="#token" className="hover:text-cyan-500 transition-colors">$CUTEDSL</Link>
-          <Link href="/evals" className="hover:text-cyan-500 transition-colors">Evals</Link>
-          <Link href="/blog" className="hover:text-orange-500 transition-colors">Blog</Link>
+        <div className="hidden lg:flex gap-5 font-bold text-slate-700">
+          {NAV_LINKS.map((l) => (
+            <Link key={l.href} href={l.href} className={`transition-colors ${l.hover}`}>{l.label}</Link>
+          ))}
         </div>
         <div className="flex items-center gap-3">
           {signedIn ? (
@@ -770,16 +1005,50 @@ export default function Home() {
               </Link>
             </div>
           ) : (
-            <Link
-              href="/account"
-              className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-2 rounded-full shadow-lg hover:shadow-pink-300/50 hover:scale-105 transition-all flex items-center gap-2"
+            <button
+              type="button"
+              aria-label="Start creating"
+              onClick={() => setShowConversionFlow(true)}
+              className="bg-slate-950 text-white font-bold px-4 sm:px-6 py-2.5 rounded-xl shadow-lg shadow-slate-900/10 hover:bg-slate-800 transition-colors flex items-center gap-2"
             >
-              <Wallet size={18} />
-              Login / Pay
-            </Link>
+              <Sparkles size={17} />
+              <span className="hidden sm:inline">Start creating</span>
+            </button>
           )}
+          {/* Burger menu (small screens) */}
+          <button
+            type="button"
+            aria-label="Toggle menu"
+            aria-expanded={mobileMenuOpen}
+            onClick={() => setMobileMenuOpen((o) => !o)}
+            className="lg:hidden flex items-center justify-center w-10 h-10 rounded-full bg-white/90 border border-pink-200 shadow-sm text-slate-700 hover:text-pink-500 transition-colors"
+          >
+            {mobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
+          </button>
         </div>
       </nav>
+
+      {/* Mobile menu drawer */}
+      {mobileMenuOpen && (
+        <div className="lg:hidden fixed inset-0 z-20" onClick={() => setMobileMenuOpen(false)}>
+          <div className="absolute inset-0 bg-black/30" />
+          <div
+            className="absolute top-0 right-0 h-full w-72 max-w-[80vw] bg-white shadow-2xl p-6 pt-24 flex flex-col gap-1 overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {NAV_LINKS.map((l) => (
+              <Link
+                key={l.href}
+                href={l.href}
+                onClick={() => setMobileMenuOpen(false)}
+                className={`font-bold text-slate-700 text-lg py-3 px-3 rounded-xl hover:bg-pink-50 transition-colors ${l.hover}`}
+              >
+                {l.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
       </header>
 
       {/* Account Panel */}
@@ -907,65 +1176,253 @@ export default function Home() {
           </div>
         )}
 
-      {/* Hero Section */}
-      <main className="max-w-7xl mx-auto px-6 pt-12 pb-24 relative z-10">
-        <div className="flex flex-col lg:flex-row items-center gap-16">
-          <div
-            className="flex-1 text-center lg:text-left relative"
-          >
-            <div className="absolute -top-12 -left-12 hidden lg:block opacity-80">
-              <Image src={`${IMG_BASE}/avatar.webp`} alt="" width={100} height={100} loading="lazy" className="rounded-full border-4 border-pink-200 shadow-lg" />
+      {showConversionFlow && (
+        <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-slate-950/55 p-4 backdrop-blur-sm sm:items-center" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) {
+            setShowConversionFlow(false);
+            setEmbeddedCheckoutClientSecret('');
+          }
+        }}>
+          <div className="relative my-2 w-full max-w-lg overflow-hidden rounded-[28px] border border-white/70 bg-white shadow-2xl sm:my-6">
+            <button type="button" aria-label="Close signup and payment" onClick={() => { setShowConversionFlow(false); setEmbeddedCheckoutClientSecret(''); }} className="absolute right-4 top-4 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-500 hover:text-slate-900"><X size={18} /></button>
+            <div className="border-b border-slate-100 bg-gradient-to-br from-pink-50 via-white to-violet-50 p-6 pr-14 sm:p-8">
+              <h2 className="font-fredoka text-3xl font-bold text-slate-950 sm:text-4xl">Create, pay, then make it.</h2>
+              <p className="mt-2 text-sm font-medium leading-relaxed text-slate-600">Sign up with your email and start creating.</p>
+              <div className="mt-5 grid grid-cols-3 gap-2 text-center text-[11px] font-extrabold text-slate-500">
+                <span className="rounded-xl bg-white px-2 py-2 ring-1 ring-slate-200">1 · Account</span>
+                <span className="rounded-xl bg-white px-2 py-2 ring-1 ring-slate-200">2 · Card credits</span>
+                <span className="rounded-xl bg-white px-2 py-2 ring-1 ring-slate-200">3 · Create</span>
+              </div>
             </div>
 
-            <h1 className="font-fredoka text-6xl lg:text-8xl font-bold mb-6 leading-tight text-slate-800">
-              Fast AI APIs, <span className="text-gradient-cute">Cute</span> Pricing
-            </h1>
-            <p className="text-xl text-slate-700 mb-10 max-w-2xl mx-auto lg:mx-0 font-medium bg-white/70 p-4 rounded-2xl border border-white/80">
-              CuteDSL is a developer API for image generation, forecasting, speech, chat, captioning, and custom LoRAs. Use card-funded credits or $CUTEDSL on Solana, with accelerated first-party models under the hood.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start flex-wrap">
-              <a href="#models" className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
-                <Wand2 size={20} />
-                Explore Models
-              </a>
-              <Link href="/gallery" prefetch={false} className="bg-white text-slate-700 font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 border-2 border-pink-100">
-                <Sparkles size={20} className="text-pink-500" />
-                Art Gallery
-              </Link>
-              <a href="#api" className="bg-white text-slate-700 font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 border-2 border-pink-100">
-                <Code size={20} className="text-blue-500" />
-                API Docs
-              </a>
-              <Link href="/account" className="bg-slate-900 text-white font-bold text-lg px-8 py-4 rounded-full shadow-lg hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2">
-                <CreditCard size={20} />
-                Account & Billing
-              </Link>
+            <div className="p-6 sm:p-8">
+              {!signedIn ? (
+                <div className="space-y-4">
+                  <label className="block text-sm font-extrabold text-slate-700">Email
+                    <input type="email" value={emailInput} onChange={(event) => setEmailInput(event.target.value)} data-testid="conversion-email" autoComplete="email" className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-3 font-medium outline-none focus:border-pink-400 focus:ring-4 focus:ring-pink-100" placeholder="you@example.com" />
+                  </label>
+                  <label className="block text-sm font-extrabold text-slate-700">Password
+                    <input type="password" value={passwordInput} onChange={(event) => setPasswordInput(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && continueCreatorSignup()} data-testid="conversion-password" autoComplete="current-password" className="mt-1.5 w-full rounded-xl border border-slate-200 px-4 py-3 font-medium outline-none focus:border-pink-400 focus:ring-4 focus:ring-pink-100" placeholder="8+ characters" />
+                  </label>
+                  <button type="button" onClick={continueCreatorSignup} disabled={authLoading || !isValidEmail(emailInput) || passwordInput.length < 8} data-testid="conversion-continue" className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-slate-950 px-5 py-3.5 font-extrabold text-white hover:bg-slate-800 disabled:opacity-50">
+                    {authLoading ? <RefreshCw className="animate-spin" size={18} /> : <ArrowRight size={18} />} Continue to secure payment
+                  </button>
+                  <p className="text-center text-xs font-bold text-slate-400">New here? This creates your account. Returning? It signs you in.</p>
+                </div>
+              ) : !cardCheckoutReady ? (
+                <div className="space-y-4">
+                  <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700"><Check className="mr-2 inline" size={16} /> Account ready. Finish your email login.</div>
+                  <input type="email" value={emailInput} onChange={(event) => setEmailInput(event.target.value)} className="w-full rounded-xl border border-slate-200 px-4 py-3" placeholder="you@example.com" />
+                  <input type="password" value={passwordInput} onChange={(event) => setPasswordInput(event.target.value)} className="w-full rounded-xl border border-slate-200 px-4 py-3" placeholder="8+ character password" />
+                  <button type="button" onClick={saveEmail} disabled={emailSaving || !isValidEmail(emailInput) || passwordInput.length < 8} className="w-full rounded-xl bg-slate-950 px-5 py-3.5 font-extrabold text-white disabled:opacity-50">Save and continue</button>
+                </div>
+              ) : embeddedCheckoutClientSecret ? (
+                <div>
+                  <div className="mb-3 flex items-center gap-2 text-sm font-extrabold text-slate-800"><LockKeyhole size={16} className="text-emerald-600" /> Checkout for {email}</div>
+                  <div ref={conversionCheckoutElementRef} data-testid="conversion-stripe-checkout" className="min-h-[420px] overflow-hidden rounded-xl border border-slate-200" />
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700"><Check className="mr-2 inline" size={16} /> Signed in as {email}</div>
+                  <div>
+                    <div className="mb-2 text-sm font-extrabold text-slate-800">Add pay-as-you-go credits</div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {['25', '50', '100'].map((amount) => <button key={amount} type="button" onClick={() => setStripeAmount(amount)} className={`rounded-xl border px-3 py-3 text-sm font-extrabold ${stripeAmount === amount ? 'border-pink-500 bg-pink-50 text-pink-700' : 'border-slate-200 text-slate-600 hover:border-pink-300'}`}>${amount}</button>)}
+                    </div>
+                  </div>
+                  <button type="button" onClick={() => createStripeCheckout()} disabled={stripeLoading} data-testid="conversion-pay" className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-violet-600 px-5 py-3.5 font-extrabold text-white shadow-lg shadow-pink-500/20 disabled:opacity-50">
+                    {stripeLoading ? <RefreshCw className="animate-spin" size={18} /> : <CreditCard size={18} />} Pay ${stripeAmount}
+                  </button>
+                  <div className="border-t border-slate-100 pt-5">
+                    <div className="mb-2 text-sm font-extrabold text-slate-800">Or subscribe for unlimited images</div>
+                    <p className="mb-3 text-xs font-medium text-slate-500">Includes $10/month in rollover credits for video and other metered models.</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button type="button" onClick={() => createSubscriptionCheckout('monthly')} disabled={stripeLoading} className="rounded-xl border border-pink-200 bg-pink-50 px-3 py-3 text-sm font-extrabold text-pink-700 disabled:opacity-50">$14 monthly</button>
+                      <button type="button" onClick={() => createSubscriptionCheckout('annual')} disabled={stripeLoading} className="rounded-xl bg-slate-950 px-3 py-3 text-sm font-extrabold text-white disabled:opacity-50">$140 yearly · save $28</button>
+                    </div>
+                  </div>
+                  {(balance?.credits_usd || 0) > 0 && <button type="button" onClick={() => { setShowConversionFlow(false); window.setTimeout(createStudioAsset, 0); }} className="w-full rounded-xl border border-slate-200 px-5 py-3 text-sm font-extrabold text-slate-700 hover:bg-slate-50">I already have credits — create now</button>}
+                </div>
+              )}
+              {(authStatus || stripeStatus) && <div className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600" role="status">{stripeStatus || authStatus}</div>}
             </div>
           </div>
-          
-          <div
-            className="flex-1 relative"
-          >
-            <div className="relative w-full max-w-lg mx-auto aspect-square">
-              <div className="absolute inset-0 bg-gradient-to-tr from-pink-200 to-cyan-200 rounded-full opacity-60"></div>
-              <Image
-                src={`${IMG_BASE}/hero.webp`}
-                alt="CuteDSL AI model acceleration platform"
-                fill
-                priority
-                sizes="(min-width: 1024px) 38vw, 90vw"
-                className="object-cover rounded-full border-8 border-white/50 shadow-2xl"
-              />
-              {/* Floating badges */}
-              <div className="absolute -top-6 -right-6 glass-card p-4 rounded-2xl flex items-center gap-3">
-                <div className="bg-pink-100 p-2 rounded-full text-pink-500"><ImageIcon size={24} /></div>
-                <div className="font-bold text-slate-700">zimage</div>
+        </div>
+      )}
+
+      {/* Hero Section */}
+      <main className="relative z-10 mx-auto max-w-[1480px] px-4 pb-16 pt-4 sm:px-8 sm:pt-8 lg:pt-12">
+        <div className="grid items-start gap-10 xl:grid-cols-[minmax(0,1.02fr)_minmax(460px,.98fr)] xl:gap-14">
+          <div>
+            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-pink-200 bg-white px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-[0.13em] text-pink-600 sm:mb-5 sm:text-xs sm:tracking-[0.14em]">
+              <Sparkles size={14} /> Image + video, one simple studio
+            </div>
+            <h1 className="max-w-4xl font-fredoka text-[clamp(2.6rem,6vw,6.2rem)] font-bold leading-[.92] tracking-[-0.045em] text-slate-950">
+              One prompt.<br />A whole world in <span className="bg-gradient-to-r from-pink-500 to-violet-600 bg-clip-text text-transparent">motion.</span>
+            </h1>
+            <p className="mt-4 max-w-2xl text-base font-medium leading-relaxed text-slate-600 sm:mt-6 sm:text-xl">
+              Images and video from a single prompt — and the same models behind one fast API.
+            </p>
+            <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm font-extrabold">
+              <Link href="/docs" className="inline-flex items-center gap-1.5 text-blue-600 hover:text-blue-700">API docs <ArrowRight size={15} /></Link>
+              <Link href="/gallery" className="inline-flex items-center gap-1.5 text-pink-600 hover:text-pink-700">Gallery <ArrowRight size={15} /></Link>
+              <Link href="/evals" className="inline-flex items-center gap-1.5 text-violet-600 hover:text-violet-700">Benchmarks <ArrowRight size={15} /></Link>
+              <Link href="/playground" className="inline-flex items-center gap-1.5 text-slate-600 hover:text-slate-900">Playground <ArrowRight size={15} /></Link>
+            </div>
+
+            <section id="create" className="mt-6 overflow-hidden rounded-[26px] border border-slate-200 bg-white shadow-[0_22px_70px_rgba(15,23,42,.08)] sm:mt-8">
+              <div className="flex border-b border-slate-200 p-2" role="tablist" aria-label="Creation mode">
+                {(['image', 'video'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="tab"
+                    aria-selected={creatorMode === mode}
+                    onClick={() => setCreatorMode(mode)}
+                    className={`inline-flex flex-1 items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-extrabold capitalize transition-colors ${creatorMode === mode ? 'bg-pink-50 text-pink-600 ring-1 ring-pink-200' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-800'}`}
+                  >
+                    {mode === 'image' ? <ImageIcon size={18} /> : <Video size={18} />}
+                    {mode}
+                  </button>
+                ))}
               </div>
-              <div className="absolute -bottom-10 left-10 glass-card p-4 rounded-2xl flex items-center gap-3">
-                <div className="bg-cyan-100 p-2 rounded-full text-cyan-500"><LineChart size={24} /></div>
-                <div className="font-bold text-slate-700">chronos2</div>
+
+              <div className="p-4 sm:p-5">
+                <div className={`grid gap-3 ${creatorMode === 'video' ? 'sm:grid-cols-[minmax(0,1fr)_170px]' : ''}`}>
+                  <label className="block">
+                    <span className="sr-only">Creation prompt</span>
+                    <textarea
+                      value={creatorPrompt}
+                      onChange={(event) => setCreatorPrompt(event.target.value)}
+                      rows={4}
+                      maxLength={1200}
+                      className="h-full min-h-24 w-full resize-none rounded-2xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-base font-medium leading-relaxed text-slate-900 outline-none transition focus:border-pink-400 focus:bg-white focus:ring-4 focus:ring-pink-100 sm:min-h-32"
+                      placeholder={creatorMode === 'image' ? 'Describe the image you want to create…' : 'Describe how the camera or subject should move…'}
+                    />
+                  </label>
+                  {creatorMode === 'video' && (
+                    <label className="relative flex min-h-32 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-3 text-center transition hover:border-pink-400 hover:bg-pink-50">
+                      {creatorReferencePreview ? (
+                        <img src={creatorReferencePreview} alt="Video reference preview" className="absolute inset-0 h-full w-full object-contain bg-slate-950" />
+                      ) : (
+                        <>
+                          <Upload className="mb-2 text-slate-400" size={22} />
+                          <span className="text-sm font-extrabold text-slate-700">Add still image</span>
+                          <span className="mt-1 text-xs text-slate-400">PNG, JPG or WebP</span>
+                        </>
+                      )}
+                      <input type="file" accept="image/png,image/jpeg,image/webp" className="sr-only" onChange={(event) => setCreatorReference(event.target.files?.[0] || null)} />
+                    </label>
+                  )}
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-[1fr_1fr_auto]">
+                  {creatorMode === 'video' ? (
+                    <label className="relative">
+                      <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Model</span>
+                      <select value={creatorModel} onChange={(event) => setCreatorModel(event.target.value)} className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-9 text-sm font-bold text-slate-800 outline-none focus:border-pink-400">
+                        <option value="auto-video">Auto · best match</option>
+                        <option value="ltx-video">LTX · fast</option>
+                        <option value="ltx-2">LTX 2 · balanced</option>
+                        <option value="ltx-2.3-image-to-video">LTX 2.3 · premium I2V</option>
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute bottom-3 right-3 text-slate-400" size={16} />
+                    </label>
+                  ) : (
+                    <div>
+                      <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Model</span>
+                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-slate-800">Z-Image Turbo</div>
+                    </div>
+                  )}
+                  <label>
+                    <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Aspect ratio</span>
+                    <select value={creatorAspect} onChange={(event) => setCreatorAspect(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-slate-800 outline-none focus:border-pink-400">
+                      <option value="16:9">16:9 · Widescreen</option>
+                      <option value="1:1">1:1 · Square</option>
+                      <option value="9:16">9:16 · Portrait</option>
+                      <option value="4:3">4:3 · Classic</option>
+                    </select>
+                  </label>
+                  <div className="col-span-2 flex items-end sm:col-span-1">
+                    <button type="button" onClick={createStudioAsset} disabled={creatorLoading} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-rose-500 px-6 py-3 text-sm font-extrabold text-white shadow-lg shadow-pink-500/20 transition hover:brightness-105 disabled:cursor-wait disabled:opacity-60 sm:w-auto">
+                      {creatorLoading ? <RefreshCw className="animate-spin" size={18} /> : <Sparkles size={18} />}
+                      Create now
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 text-xs font-bold text-slate-500 sm:flex-row sm:items-center sm:justify-between">
+                  <span>{creatorMode === 'image' ? '$0.04 / image' : creatorModel === 'ltx-video' ? '$0.08 / video' : creatorModel === 'ltx-2' ? '$0.12 / video' : creatorModel === 'ltx-2.3-image-to-video' ? '$1.85 / video' : '$0.15 / video'}</span>
+                  <span className="inline-flex items-center gap-1.5"><LockKeyhole size={14} className="text-emerald-600" /> Pay as you go · <Link href="/docs" className="text-blue-600 hover:text-blue-700">same models via API</Link></span>
+                </div>
+                {creatorStatus && <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600" role="status">{creatorStatus}</div>}
+                {creatorResult && (
+                  <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-slate-950">
+                    {creatorResult.type === 'video' ? (
+                      <video src={creatorResult.url} controls playsInline className="max-h-[520px] w-full object-contain" />
+                    ) : (
+                      <img src={creatorResult.url} alt="Your generated result" className="max-h-[520px] w-full object-contain" />
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+
+          <div className="relative mx-auto w-full max-w-2xl xl:pt-16">
+            <div className="ml-auto w-[82%] overflow-hidden rounded-[26px] border border-slate-200 bg-slate-950 shadow-[0_24px_80px_rgba(15,23,42,.16)]">
+              <div className="relative aspect-[4/3]">
+                <Image src={`${IMG_BASE}/hero.webp`} alt="AI-generated pink-haired character in a neon city" fill priority sizes="(min-width: 1280px) 38vw, 80vw" className="object-cover object-top" />
               </div>
             </div>
+            <div className="relative -mt-12 mr-auto w-[90%] overflow-hidden rounded-[26px] border-4 border-white bg-slate-950 shadow-[0_24px_80px_rgba(15,23,42,.22)] sm:-mt-20">
+              <div className="relative aspect-video overflow-hidden">
+                {/* Real LTX 2.3 image-to-video output, conditioned on the Z-Image still above. */}
+                <video
+                  className="h-full w-full object-cover"
+                  poster={`${VIDEO_BASE}/hero-reel-poster.webp`}
+                  autoPlay
+                  muted
+                  loop
+                  playsInline
+                  preload="metadata"
+                  aria-label="LTX 2.3 animation of the pink-haired character shown above"
+                >
+                  <source src={`${VIDEO_BASE}/hero-reel-av1.mp4`} type="video/mp4; codecs=av01.0.05M.08" />
+                  <source src={`${VIDEO_BASE}/hero-reel.mp4`} type="video/mp4" />
+                </video>
+                <div className="pointer-events-none absolute inset-x-4 bottom-4 flex items-center justify-end">
+                  <span className="rounded-full bg-slate-950/70 px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-widest text-white">AV1</span>
+                </div>
+              </div>
+            </div>
+            <div className="absolute right-2 top-1/2 hidden rounded-2xl border border-violet-200 bg-white p-3 shadow-xl sm:block">
+              <div className="flex items-center gap-2 text-sm font-extrabold text-slate-800"><Video size={17} className="text-violet-600" /> Made on CuteDSL</div>
+              <div className="mt-1 text-xs font-bold text-slate-400">Z-Image → LTX 2.3 · AV1</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-12 grid overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm sm:grid-cols-2 lg:grid-cols-6">
+          {[
+            ['1', 'Describe it', 'Prompt or drop a still'],
+            ['2', 'Sign up', 'Takes seconds'],
+            ['3', 'Create', 'Pay only for what you make'],
+          ].map(([number, title, copy]) => (
+            <div key={number} className="flex items-center gap-3 border-b border-slate-100 p-4 sm:border-r lg:col-span-1 lg:border-b-0">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-pink-500 text-sm font-black text-white">{number}</span>
+              <div><div className="text-sm font-extrabold text-slate-900">{title}</div><div className="text-xs font-bold text-slate-400">{copy}</div></div>
+            </div>
+          ))}
+          <div className="grid grid-cols-3 divide-x divide-slate-100 lg:col-span-3">
+            {([[Sparkles, '8+ models', '#models'], [Code, 'API included', '/docs'], [ShieldCheck, 'Commercial use', '/docs']] as const).map(([Icon, label, href]) => {
+              const ProofIcon = Icon as typeof Sparkles;
+              return (
+                <Link key={label} href={href} className="flex flex-col items-center justify-center gap-1 p-4 text-center text-xs font-extrabold text-slate-700 transition-colors hover:bg-slate-50 hover:text-violet-700">
+                  <ProofIcon size={20} className="text-violet-600" />{label}
+                </Link>
+              );
+            })}
           </div>
         </div>
       </main>
@@ -997,7 +1454,10 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16 relative">
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Our Models</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Custom fused Triton kernels and kernel-level optimizations for maximum throughput.</p>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Fast, beautiful models &mdash; each one live in the <Link href="/docs" className="text-blue-600 font-bold hover:text-blue-700">API docs</Link>.</p>
+            <Link href="/tools" className="mt-5 inline-flex items-center gap-2 rounded-full border border-purple-200 bg-white/80 px-5 py-2.5 text-sm font-extrabold text-purple-700 shadow-sm transition hover:bg-purple-50">
+              Explore music, H3 video &amp; animation tools <ArrowRight size={16} />
+            </Link>
           </div>
 
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -1008,10 +1468,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-pink-600 transition-colors">zimage</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                CuteDSL-accelerated Z-Image Turbo with fused QK-norm+RoPE kernel and custom Triton kernels. 2x faster transformer blocks via kernel fusion and NVFP4 quantization on RTX 5090.
+                Gorgeous 1024px images in about a second. Our fastest text-to-image model.
               </p>
-              <div className="flex items-center gap-2 text-pink-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('zimage') > 0 ? `${formatCute(getServicePrice('zimage'))} $CUTEDSL` : '1000 $CUTEDSL'} / gen
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-pink-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('zimage'))} <span className="text-slate-400 font-medium">/ gen</span>
+                </div>
+                {getServicePrice('zimage') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('zimage'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1023,10 +1488,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-cyan-600 transition-colors">chronos2</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                SOTA time series forecasting. CuteDSL-accelerated Chronos-2 with 27x faster inference via 8 custom Triton kernels, fused preprocessing, and torch.compile. Quantile predictions for uncertainty estimation.
+                Forecast any time series in milliseconds, with confidence bands built in.
               </p>
-              <div className="flex items-center gap-2 text-cyan-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('chronos2') > 0 ? `${formatCute(getServicePrice('chronos2'))} $CUTEDSL` : '500 $CUTEDSL'} / forecast
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-cyan-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('chronos2'))} <span className="text-slate-400 font-medium">/ forecast</span>
+                </div>
+                {getServicePrice('chronos2') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('chronos2'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1038,10 +1508,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-purple-600 transition-colors">Kokoro TTS</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Text-to-Speech with 20+ cute voices and languages. Beautiful, natural voices for your applications.
+                Natural speech in 20+ voices and languages.
               </p>
-              <div className="flex items-center gap-2 text-purple-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('tts') > 0 ? `${formatCute(getServicePrice('tts'))} $CUTEDSL` : '100 $CUTEDSL'} / 100 chars
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-purple-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('tts'))} <span className="text-slate-400 font-medium">/ 100 chars</span>
+                </div>
+                {getServicePrice('tts') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('tts'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1053,10 +1528,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition-colors">Speech-to-Text</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Gemma4-powered audio transcription. High-accuracy speech recognition for your applications.
+                Accurate transcription for any audio you throw at it.
               </p>
-              <div className="flex items-center gap-2 text-blue-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('stt') > 0 ? `${formatCute(getServicePrice('stt'))} $CUTEDSL` : '200 $CUTEDSL'} / minute
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-blue-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('stt'))} <span className="text-slate-400 font-medium">/ minute</span>
+                </div>
+                {getServicePrice('stt') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('stt'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1068,10 +1548,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-emerald-600 transition-colors">Gemma4 Chat</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Google Gemma4 26B multimodal LLM. Text and vision understanding with OpenAI-compatible API. Powered by text-generator.io.
+                Chat and vision in one model, on an OpenAI-compatible API.
               </p>
-              <div className="flex items-center gap-2 text-emerald-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('gemma4') > 0 ? `${formatCute(getServicePrice('gemma4'))} $CUTEDSL` : '50 $CUTEDSL'} / request
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-emerald-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('gemma4'))} <span className="text-slate-400 font-medium">/ request</span>
+                </div>
+                {getServicePrice('gemma4') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('gemma4'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1083,10 +1568,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-orange-600 transition-colors">Image Caption</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                GitBase-powered image captioning. Generate accurate descriptions of any image for accessibility, search, or AI pipelines.
+                Describe any image &mdash; for search, accessibility, or your own pipelines.
               </p>
-              <div className="flex items-center gap-2 text-orange-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('caption') > 0 ? `${formatCute(getServicePrice('caption'))} $CUTEDSL` : '50 $CUTEDSL'} / image
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-orange-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('caption'))} <span className="text-slate-400 font-medium">/ image</span>
+                </div>
+                {getServicePrice('caption') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('caption'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1098,10 +1588,35 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-red-600 transition-colors">LTX 2.3 Video</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Text-to-video generation via LTX 2.3. Generate 6-second 1080p videos from text prompts. Powered by fal.ai.
+                Six seconds of 1080p video from a single prompt.
               </p>
-              <div className="flex items-center gap-2 text-red-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('ltx_video') > 0 ? `${formatCute(getServicePrice('ltx_video'))} $CUTEDSL` : '300 $CUTEDSL'} / video
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-red-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('ltx_video'))} <span className="text-slate-400 font-medium">/ video</span>
+                </div>
+                {getServicePrice('ltx_video') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('ltx_video'))} $CUTEDSL</div>
+                )}
+              </div>
+            </div>
+            </Link>
+
+            <Link href="/docs/h3_video">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+              <div className="bg-teal-100 w-14 h-14 rounded-2xl flex items-center justify-center text-teal-600 mb-4 shadow-inner">
+                <Video size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-teal-700 transition-colors">MiniMax H3 Video</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                Text or first-frame video with native audio, seamless loops, and GPU AV1 through app.nz.
+              </p>
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-teal-600 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('h3_video'))} <span className="text-slate-400 font-medium">/ GPU-hour</span>
+                </div>
+                {getServicePrice('h3_video') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('h3_video'))} $CUTEDSL / GPU-hour · metered per execution</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1113,10 +1628,15 @@ export default function Home() {
               </div>
               <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Image</h3>
               <p className="text-slate-600 mb-4 text-sm">
-                Fast image generation via Flux Schnell. 4-step inference for quick 1024x1024 images. Also available through eBank.nz.
+                Quick 1024px drafts when you want ideas fast.
               </p>
-              <div className="flex items-center gap-2 text-indigo-500 font-bold text-sm mt-auto">
-                <Zap size={16} /> {getServicePrice('flux_image') > 0 ? `${formatCute(getServicePrice('flux_image'))} $CUTEDSL` : '40 $CUTEDSL'} / image
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-indigo-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('flux_image'))} <span className="text-slate-400 font-medium">/ image</span>
+                </div>
+                {getServicePrice('flux_image') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('flux_image'))} $CUTEDSL</div>
+                )}
               </div>
             </div>
             </Link>
@@ -1130,7 +1650,7 @@ export default function Home() {
           <div className="max-w-4xl mx-auto px-6">
             <div className="bg-white/90 rounded-3xl p-8 border border-pink-200 shadow-lg">
               <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>
-              <p className="text-slate-500 mb-6 text-sm">Generate an image with your API key. This calls <code className="bg-slate-100 px-1 rounded">POST /api/service</code> with your credits.</p>
+              <p className="text-slate-500 mb-6 text-sm">Generate an image with your key &mdash; the same call your app would make. <Link href="/docs/zimage" className="text-blue-600 font-bold hover:text-blue-700">See the docs</Link>.</p>
               <div className="flex gap-3 mb-4">
                 <input
                   type="text"
@@ -1170,27 +1690,18 @@ export default function Home() {
               <div className="bg-purple-200 w-16 h-16 rounded-2xl flex items-center justify-center text-purple-600 mb-6 shadow-inner">
                 <Wand2 size={32} />
               </div>
-              <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">Training API</h2>
-              <p className="text-lg text-slate-700 mb-6 font-medium">
-                Fine-tune your own custom LoRAs for both <strong className="text-pink-600">zimage</strong> and <strong className="text-cyan-600">chronos2</strong> via our training API.
+              <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-6">Train your own style</h2>
+              <p className="text-lg text-slate-700 mb-8 font-medium">
+                Upload a handful of images and get a custom model that draws like you &mdash; ready to call from the API.
               </p>
-              <p className="text-md text-slate-600 mb-8">
-                Upload your dataset and we&apos;ll train a personalized model for you, ready to query via our inference API.
-              </p>
-              <ul className="space-y-4 mb-8">
-                <li className="flex items-center gap-3 text-slate-700 font-medium">
-                  <Star className="text-yellow-500" size={20} /> Fast training on high-end GPUs
-                </li>
-                <li className="flex items-center gap-3 text-slate-700 font-medium">
-                  <Star className="text-yellow-500" size={20} /> LoRA support for Image Gen (zimage)
-                </li>
-                <li className="flex items-center gap-3 text-slate-700 font-medium">
-                  <Star className="text-yellow-500" size={20} /> LoRA support for Time Series (chronos2)
-                </li>
-              </ul>
-              <button className="bg-purple-500 text-white font-bold px-8 py-4 rounded-full shadow-lg hover:bg-purple-600 transition-colors">
-                Start Training (5000 $CUTEDSL)
-              </button>
+              <div className="flex flex-wrap items-center gap-4">
+                <Link href="/lora-trainer" className="bg-purple-500 text-white font-bold px-8 py-4 rounded-full shadow-lg hover:bg-purple-600 transition-colors">
+                  Start training
+                </Link>
+                <Link href="/docs/lora_training" className="font-bold text-purple-700 hover:text-purple-800 inline-flex items-center gap-2">
+                  Training API docs <ArrowRight size={16} />
+                </Link>
+              </div>
             </div>
             <div className="flex-1 relative w-full aspect-video rounded-2xl overflow-hidden shadow-2xl border-4 border-white/50">
               <Image
@@ -1211,7 +1722,7 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">Developer API</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Integrate our models into your applications.</p>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">Ship the same models straight into your product.</p>
           </div>
 
           <div className="grid md:grid-cols-2 gap-8">
@@ -1221,11 +1732,13 @@ export default function Home() {
                 <h3 className="font-fredoka text-3xl font-bold text-slate-800">API Usage Docs</h3>
               </div>
               <p className="text-slate-600 mb-8 text-lg">
-                Comprehensive documentation on how to authenticate, call our models (zimage, chronos2, Kokoro TTS, STT, Gemma4, Image Caption), and manage your custom LoRAs.
+                Every model on this page, behind one endpoint and one key.
               </p>
-              <Link href="#api-docs" className="inline-flex items-center gap-2 text-blue-600 font-bold hover:text-blue-700">
-                Read the Docs &rarr;
-              </Link>
+              <div className="flex flex-wrap gap-x-6 gap-y-2 font-bold">
+                <Link href="/docs" className="inline-flex items-center gap-2 text-blue-600 hover:text-blue-700">API docs <ArrowRight size={16} /></Link>
+                <Link href="/playground" className="inline-flex items-center gap-2 text-violet-600 hover:text-violet-700">Playground <ArrowRight size={16} /></Link>
+                <Link href="/evals" className="inline-flex items-center gap-2 text-pink-600 hover:text-pink-700">Benchmarks <ArrowRight size={16} /></Link>
+              </div>
             </div>
 
             <div className="glass-card p-10 rounded-3xl bg-white/80" id="credits">
@@ -1251,7 +1764,7 @@ export default function Home() {
                   {(!email || !balance?.has_password) ? (
                     <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-5 rounded-2xl border border-indigo-200">
                       <div className="text-sm font-bold text-slate-700 mb-1">Set up card checkout</div>
-                      <div className="text-xs text-slate-500 mb-3">We create your Stripe customer from this email before opening Stripe.</div>
+                      <div className="text-xs text-slate-500 mb-3">Credits are tied to this email.</div>
                       <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
                         <input
                           type="email"
@@ -1317,8 +1830,8 @@ export default function Home() {
                       <div className="space-y-4">
                         {!cardCheckoutReady ? (
                           <div className="rounded-2xl border border-dashed border-pink-200 bg-pink-50/60 p-5">
-                            <div className="mb-1 text-sm font-bold text-slate-700">Email required before Stripe checkout</div>
-                            <div className="text-xs text-slate-500">Save your email and password above first, then Stripe will open with a customer tied to that email.</div>
+                            <div className="mb-1 text-sm font-bold text-slate-700">Email required before checkout</div>
+                            <div className="text-xs text-slate-500">Save your email and password above first.</div>
                           </div>
                         ) : (
                           <>
@@ -1327,7 +1840,7 @@ export default function Home() {
                                 <div className="mb-3 flex items-center justify-between gap-3 px-1">
                                   <div>
                                     <div className="text-sm font-bold text-slate-700">Secure card checkout</div>
-                                    <div className="text-xs text-slate-400">Powered by Stripe for {email}</div>
+                                    <div className="text-xs text-slate-400">Checkout for {email}</div>
                                   </div>
                                   <button
                                     type="button"
@@ -1356,7 +1869,7 @@ export default function Home() {
                                     />
                                   </div>
                                   <button
-                                    onClick={createStripeCheckout}
+                                    onClick={() => createStripeCheckout()}
                                     disabled={stripeLoading || !stripeAmount}
                                     data-testid="stripe-checkout-btn"
                                     className="bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-6 py-3 rounded-xl hover:scale-105 transition-transform disabled:opacity-50 inline-flex items-center gap-2"
@@ -1414,14 +1927,14 @@ export default function Home() {
                               </div>
                               <button
                                 onClick={saveAutotopupSettings}
-                                disabled={autotopupSaving}
+                                disabled={autotopupSaving || stripeLoading}
                                 className="w-full bg-slate-800 text-white font-bold px-4 py-2.5 rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50"
                               >
                                 {autotopupSaving ? 'Saving...' : 'Save auto top-up'}
                               </button>
                               {balance && !balance.has_payment_method && (
                                 <div className="text-xs text-amber-600 bg-amber-50 px-3 py-2 rounded-lg">
-                                  Buy credits with Stripe once before enabling auto top-up.
+                                  No card saved yet. Saving with auto top-up on opens a Stripe checkout that saves your card.
                                 </div>
                               )}
                             </div>
@@ -1591,7 +2104,7 @@ export default function Home() {
                       <CreditCard size={18} className="text-pink-500" />
                       <div>
                         <div className="text-sm font-bold text-slate-800">Pay by card</div>
-                        <div className="text-xs text-slate-500">Create or login with email first. Stripe opens after your customer is ready.</div>
+                        <div className="text-xs text-slate-500">Create an account or log in first.</div>
                       </div>
                     </div>
                     <div className="grid gap-3">
@@ -1653,22 +2166,34 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6">
           <div className="text-center mb-16">
             <h2 className="font-fredoka text-4xl lg:text-5xl font-bold text-slate-800 mb-4">API Reference</h2>
-            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">One unified endpoint for all services. Authenticate with your API key and start building.</p>
+            <p className="text-lg text-slate-700 max-w-2xl mx-auto font-medium">One endpoint, one key, every model.</p>
           </div>
 
           {/* API Key display */}
           {apiKey && (
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-indigo-200 mb-8">
-              <div className="flex items-center justify-between">
-                <div>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
                   <div className="text-sm font-bold text-slate-600 mb-1">Your API Key</div>
-                  <code className="text-sm bg-slate-100 px-3 py-2 rounded-lg font-mono">{apiKey}</code>
+                  <code className="block truncate text-sm bg-slate-100 px-3 py-2 rounded-lg font-mono">
+                    {showApiKey ? apiKey : `${apiKey.slice(0, 8)}${'•'.repeat(20)}`}
+                  </code>
                 </div>
-                <button onClick={() => { navigator.clipboard.writeText(apiKey); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className="p-2 hover:bg-slate-100 rounded-lg">
-                  {copied ? <Check size={18} className="text-green-500" /> : <Copy size={18} className="text-slate-400" />}
-                </button>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="p-2 hover:bg-slate-100 rounded-lg text-slate-400"
+                    aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                  >
+                    {showApiKey ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                  <button onClick={() => { navigator.clipboard.writeText(apiKey); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className="p-2 hover:bg-slate-100 rounded-lg">
+                    {copied ? <Check size={18} className="text-green-500" /> : <Copy size={18} className="text-slate-400" />}
+                  </button>
+                </div>
               </div>
-              <p className="text-xs text-slate-400 mt-2">Use as: <code className="bg-slate-100 px-1 rounded">Authorization: Bearer {apiKey}</code></p>
+              <p className="text-xs text-slate-400 mt-2">Use as: <code className="bg-slate-100 px-1 rounded">Authorization: Bearer {'<key>'}</code></p>
             </div>
           )}
 
@@ -1701,7 +2226,7 @@ export default function Home() {
             <Link href="/docs" className="inline-flex items-center gap-2 bg-gradient-to-r from-pink-400 to-purple-400 text-white font-bold px-8 py-3 rounded-full shadow-lg hover:shadow-pink-300/50 hover:scale-105 transition-all">
               View Full API Docs <ArrowRight size={18} />
             </Link>
-            <p className="text-sm text-slate-500 mt-3">9 services with interactive playgrounds, full parameter docs, and code examples</p>
+            <p className="text-sm text-slate-500 mt-3">Every service, with live playgrounds and copy-paste examples</p>
           </div>
         </div>
       </section>

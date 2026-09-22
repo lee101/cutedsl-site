@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
+
+var ErrAPIKeyMismatch = errors.New("api key no longer matches")
 
 // DB wraps the PostgreSQL connection
 type DB struct {
@@ -49,8 +54,12 @@ func NewDB(dsn string) (*DB, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	conn.SetMaxOpenConns(20)
-	conn.SetMaxIdleConns(5)
+	conn.SetMaxOpenConns(10)
+	// Keep CuteDSL's bounded pool warm. This database host is shared; closing
+	// most idle connections allows unrelated connection storms to consume every
+	// server slot, after which gallery requests fail while this pool tries to
+	// reopen connections it already had.
+	conn.SetMaxIdleConns(10)
 	conn.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := conn.Ping(); err != nil {
@@ -61,8 +70,28 @@ func NewDB(dsn string) (*DB, error) {
 	if err := db.migrate(); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// Open the bounded pool before background indexers begin long-running reads.
+	// Without this, a shared-database connection storm can leave the process with
+	// only its initial Ping connection, which the indexer then monopolizes.
+	warmDBPool(conn, 10)
 
 	return db, nil
+}
+
+func warmDBPool(db *sql.DB, target int) {
+	connections := make([]*sql.Conn, 0, target)
+	for len(connections) < target {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		connection, err := db.Conn(ctx)
+		cancel()
+		if err != nil {
+			break
+		}
+		connections = append(connections, connection)
+	}
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
 }
 
 func (db *DB) migrate() error {
@@ -102,6 +131,29 @@ func (db *DB) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_billing_user ON billing_events(user_id);
 	CREATE INDEX IF NOT EXISTS idx_billing_type ON billing_events(event_type);
+
+	CREATE TABLE IF NOT EXISTS video_jobs (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id),
+		provider_job_id TEXT NOT NULL,
+		service TEXT NOT NULL DEFAULT 'video_generate',
+		status TEXT NOT NULL DEFAULT 'queued',
+		result_json JSONB,
+		error TEXT DEFAULT '',
+		provider_cost_usd DOUBLE PRECISION DEFAULT 0,
+		charged_usd DOUBLE PRECISION DEFAULT 0,
+		credits_used DOUBLE PRECISION DEFAULT 0,
+		settled BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMPTZ DEFAULT NOW(),
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	);
+	ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS service TEXT NOT NULL DEFAULT 'video_generate';
+	ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS provider_cost_usd DOUBLE PRECISION DEFAULT 0;
+	ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS charged_usd DOUBLE PRECISION DEFAULT 0;
+	ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS credits_used DOUBLE PRECISION DEFAULT 0;
+	ALTER TABLE video_jobs ADD COLUMN IF NOT EXISTS settled BOOLEAN DEFAULT FALSE;
+	CREATE INDEX IF NOT EXISTS idx_video_jobs_user ON video_jobs(user_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_video_jobs_status ON video_jobs(status) WHERE status IN ('queued', 'processing');
 
 	CREATE TABLE IF NOT EXISTS crypto_checkout_intents (
 		id TEXT PRIMARY KEY,
@@ -161,9 +213,18 @@ func (db *DB) migrate() error {
 	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS latent_path TEXT DEFAULT '';
 	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS created_by_user_id TEXT DEFAULT '';
 	CREATE INDEX IF NOT EXISTS idx_images_created_by ON generated_images(created_by_user_id, created_at DESC) WHERE created_by_user_id != '';
+	-- Diversified browse ordering. Images are generated sequentially from the
+	-- prompt dataset, so created_at order clusters near-identical prompts together.
+	-- random_sort gives every row a stable random position; an index over it lets
+	-- the gallery do fast, well-mixed keyset pagination (see BrowseImagesVaried).
+	ALTER TABLE generated_images ADD COLUMN IF NOT EXISTS random_sort DOUBLE PRECISION;
+	UPDATE generated_images SET random_sort = random() WHERE random_sort IS NULL;
+	ALTER TABLE generated_images ALTER COLUMN random_sort SET DEFAULT random();
+	CREATE INDEX IF NOT EXISTS idx_images_rand ON generated_images(random_sort);
 
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS unlimited_api BOOLEAN DEFAULT FALSE;
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS unsubscribed BOOLEAN NOT NULL DEFAULT FALSE;
 
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT DEFAULT '';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_payment_method_id TEXT DEFAULT '';
@@ -409,6 +470,164 @@ func (db *DB) GetUserByAPIKey(apiKey string) (*User, error) {
 	return &user, nil
 }
 
+// RotateAPIKey generates a new API key if oldKey is still authoritative.
+// Matching both user ID and the presented key makes concurrent rotations a
+// compare-and-swap: only one request can invalidate a given key.
+func (db *DB) RotateAPIKey(userID, oldKey string) (*User, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	newKey := "cutedsl_" + newUUID()[:24]
+	result, err := db.conn.Exec(
+		"UPDATE users SET api_key = $1, updated_at = NOW() WHERE id = $2 AND api_key = $3",
+		newKey, userID, oldKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rotate api key: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("rotate api key rows affected: %w", err)
+	}
+	if updated != 1 {
+		return nil, ErrAPIKeyMismatch
+	}
+
+	var user User
+	if err := scanUser(db.conn.QueryRow("SELECT "+userSelectColumns+" FROM users WHERE id = $1", userID), &user); err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func scanVideoJob(row interface{ Scan(...interface{}) error }, job *VideoJob) error {
+	var result []byte
+	if err := row.Scan(&job.ID, &job.UserID, &job.ProviderJobID, &job.Service, &job.Status, &result,
+		&job.Error, &job.ProviderCost, &job.ChargedUSD, &job.CreditsUsed, &job.Settled, &job.CreatedAt, &job.UpdatedAt); err != nil {
+		return err
+	}
+	if len(result) > 0 && string(result) != "null" {
+		job.Result = json.RawMessage(result)
+	}
+	return nil
+}
+
+const videoJobSelectColumns = `id, user_id, provider_job_id, COALESCE(service, 'video_generate'), status, result_json, COALESCE(error, ''), COALESCE(provider_cost_usd, 0), COALESCE(charged_usd, 0), COALESCE(credits_used, 0), COALESCE(settled, FALSE), created_at, updated_at`
+
+// CreateVideoJob persists the provider handle before it is returned to a paid caller.
+func (db *DB) CreateVideoJob(userID, providerJobID string) (*VideoJob, error) {
+	return db.CreateVideoJobForService(userID, providerJobID, "video_generate")
+}
+
+func (db *DB) CreateVideoJobForService(userID, providerJobID, service string) (*VideoJob, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	jobID := "video_" + newUUID()
+	var job VideoJob
+	err := scanVideoJob(db.conn.QueryRow(
+		`INSERT INTO video_jobs (id, user_id, provider_job_id, service, status)
+		 VALUES ($1, $2, $3, $4, 'queued') RETURNING `+videoJobSelectColumns,
+		jobID, userID, providerJobID, service,
+	), &job)
+	if err != nil {
+		return nil, fmt.Errorf("create video job: %w", err)
+	}
+	return &job, nil
+}
+
+var ErrVideoPaymentRequired = errors.New("insufficient credits for completed video")
+
+func (db *DB) SettleH3VideoJob(jobID string, result []byte, providerCostUSD, chargedUSD, cutePrice float64) (float64, float64, error) {
+	if chargedUSD <= 0 || cutePrice <= 0 {
+		return 0, 0, fmt.Errorf("invalid H3 settlement price")
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	var userID, status string
+	var settled bool
+	if err := tx.QueryRow(`SELECT user_id, status, COALESCE(settled, FALSE) FROM video_jobs WHERE id = $1 FOR UPDATE`, jobID).Scan(&userID, &status, &settled); err != nil {
+		return 0, 0, err
+	}
+	if settled || status == "completed" {
+		var balance, creditsUsed float64
+		if err := tx.QueryRow(`SELECT credits FROM users WHERE id = $1`, userID).Scan(&balance); err != nil {
+			return 0, 0, err
+		}
+		if err := tx.QueryRow(`SELECT COALESCE(credits_used, 0) FROM video_jobs WHERE id = $1`, jobID).Scan(&creditsUsed); err != nil {
+			return 0, 0, err
+		}
+		return balance, creditsUsed, nil
+	}
+	creditsUsed := chargedUSD / cutePrice
+	var balance float64
+	if err := tx.QueryRow(`UPDATE users SET credits = credits - $1, updated_at = NOW() WHERE id = $2 AND credits >= $1 RETURNING credits`, creditsUsed, userID).Scan(&balance); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, creditsUsed, ErrVideoPaymentRequired
+		}
+		return 0, creditsUsed, err
+	}
+	if _, err := tx.Exec(`INSERT INTO billing_events (id, user_id, event_type, amount, cute_amount, usd_amount, description, credits_after, created_at)
+		VALUES ($1, $2, 'h3_video', $3, $4, $5, $6, $7, NOW()) ON CONFLICT (id) DO NOTHING`,
+		"h3_"+jobID, userID, -creditsUsed, creditsUsed, chargedUSD,
+		fmt.Sprintf("H3 video via app.nz: $%.6f provider + 20%%", providerCostUSD), balance); err != nil {
+		return 0, creditsUsed, err
+	}
+	if _, err := tx.Exec(`UPDATE video_jobs SET status = 'completed', result_json = $2::jsonb, error = '', provider_cost_usd = $3, charged_usd = $4, credits_used = $5, settled = TRUE, updated_at = NOW() WHERE id = $1`,
+		jobID, string(result), providerCostUSD, chargedUSD, creditsUsed); err != nil {
+		return 0, creditsUsed, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, creditsUsed, err
+	}
+	return balance, creditsUsed, nil
+}
+
+func (db *DB) GetVideoJob(jobID, userID string) (*VideoJob, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var job VideoJob
+	err := scanVideoJob(db.conn.QueryRow(
+		`SELECT `+videoJobSelectColumns+` FROM video_jobs WHERE id = $1 AND user_id = $2`,
+		jobID, userID,
+	), &job)
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (db *DB) GetVideoJobInternal(jobID string) (*VideoJob, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	var job VideoJob
+	err := scanVideoJob(db.conn.QueryRow(
+		`SELECT `+videoJobSelectColumns+` FROM video_jobs WHERE id = $1`, jobID,
+	), &job)
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (db *DB) UpdateVideoJob(jobID, status string, result []byte, jobErr string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	var resultJSON interface{}
+	if len(result) > 0 {
+		resultJSON = string(result)
+	}
+	_, err := db.conn.Exec(
+		`UPDATE video_jobs SET status = $2, result_json = COALESCE($3::jsonb, result_json), error = $4, updated_at = NOW() WHERE id = $1`,
+		jobID, status, resultJSON, jobErr,
+	)
+	return err
+}
+
 // GetUserByID returns a user by ID.
 func (db *DB) GetUserByID(userID string) (*User, error) {
 	db.mu.RLock()
@@ -465,6 +684,19 @@ func (db *DB) SetStripePaymentMethodID(userID, paymentMethodID string) error {
 		paymentMethodID, userID,
 	)
 	return err
+}
+
+// GetUserByStripeSubscription resolves renewal invoices to their local user.
+func (db *DB) GetUserByStripeSubscription(subscriptionID, customerID string) (*User, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var user User
+	err := scanUser(db.conn.QueryRow(
+		"SELECT "+userSelectColumns+" FROM users WHERE stripe_subscription_id = $1 OR (stripe_customer_id = $2 AND $2 != '') ORDER BY (stripe_subscription_id = $1) DESC LIMIT 1",
+		subscriptionID, customerID,
+	), &user)
+	return &user, err
 }
 
 // UpdateStripeSubscription stores subscription state and mirrors active access
@@ -1048,7 +1280,7 @@ func (db *DB) ListDripEligibleUsers() ([]User, error) {
 
 	rows, err := db.conn.Query(
 		`SELECT ` + userSelectColumns + `
-		 FROM users WHERE email != '' AND drip_step < 20 AND drip_started_at > '1970-01-01'`,
+		 FROM users WHERE email != '' AND NOT unsubscribed AND drip_step < 20 AND drip_started_at > '1970-01-01'`,
 	)
 	if err != nil {
 		return nil, err
@@ -1066,6 +1298,18 @@ func (db *DB) ListDripEligibleUsers() ([]User, error) {
 	return users, nil
 }
 
+// UnsubscribeEmail marks all users with the given email as unsubscribed
+func (db *DB) UnsubscribeEmail(email string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	_, err := db.conn.Exec(
+		"UPDATE users SET unsubscribed = TRUE, updated_at = NOW() WHERE LOWER(email) = LOWER($1)",
+		email,
+	)
+	return err
+}
+
 // ListLowCreditUsers returns users with email whose credits are zero or near-zero
 func (db *DB) ListLowCreditUsers() ([]User, error) {
 	db.mu.RLock()
@@ -1073,7 +1317,7 @@ func (db *DB) ListLowCreditUsers() ([]User, error) {
 
 	rows, err := db.conn.Query(
 		`SELECT ` + userSelectColumns + `
-		 FROM users WHERE email != '' AND credits <= 0 AND total_deposited > 0`,
+		 FROM users WHERE email != '' AND NOT unsubscribed AND credits <= 0 AND total_deposited > 0`,
 	)
 	if err != nil {
 		return nil, err
@@ -1094,7 +1338,6 @@ func (db *DB) ListLowCreditUsers() ([]User, error) {
 // InsertGeneratedImage stores a generated image record
 func (db *DB) InsertGeneratedImage(img *GeneratedImage) error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	if img.ID == "" {
 		img.ID = newUUID()
@@ -1110,9 +1353,15 @@ func (db *DB) InsertGeneratedImage(img *GeneratedImage) error {
 		img.ID, img.Prompt, img.Width, img.Height, img.FilePath, img.ThumbPath, img.MedPath,
 		img.FileSize, img.Model, img.Seed, img.Steps, img.CreatedByUserID, img.CreatedAt,
 	)
+	db.mu.Unlock()
+
 	if err == nil && promptSearch != nil && img.Prompt != "" {
-		// Best-effort incremental update to the semantic index
-		promptSearch.IndexIncremental(img.ID, img.Prompt)
+		// Semantic indexing is best-effort and must not delay the durable insert
+		// or the /api/service response. A busy search can retain the engine's
+		// read lock for minutes, so only index when the write lock is immediately
+		// available; the next startup/admin rebuild picks up anything skipped.
+		search := promptSearch
+		go search.TryIndexIncremental(img.ID, img.Prompt)
 	}
 	return err
 }
@@ -1206,6 +1455,108 @@ func (db *DB) ListImages(page, perPage int, allowNSFW bool) ([]GeneratedImage, e
 		return nil, err
 	}
 	return images, nil
+}
+
+// BrowseImagesVaried returns a well-mixed page of images using keyset pagination
+// over the indexed random_sort column. This breaks up the prompt clustering that
+// created_at ordering produces (images are generated sequentially from the prompt
+// dataset, so neighbours share prompts).
+//
+//   - seed in [0,1) picks the starting point, so each visitor / new tab gets a
+//     different slice of the catalog.
+//   - after is the cursor (last random_sort returned); pass nil for the first page.
+//   - wrapped records whether pagination has crossed from 1 back to 0.
+//
+// It returns the page plus the next cursor (nil when the catalog is exhausted),
+// wrapping back to the start so infinite scroll keeps flowing on smaller catalogs.
+func (db *DB) BrowseImagesVaried(seed float64, after *float64, wrapped bool, perPage int, allowNSFW bool) ([]GeneratedImage, *float64, bool, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	cursor := seed
+	if after != nil {
+		cursor = *after
+	}
+
+	nsfwFilter := ""
+	if !allowNSFW {
+		nsfwFilter = " AND (is_nsfw = FALSE OR is_nsfw IS NULL)"
+	}
+
+	const cols = `id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, is_nsfw, latent_path, created_at, random_sort`
+
+	scan := func(rows *sql.Rows, out []GeneratedImage) ([]GeneratedImage, float64, error) {
+		var last float64
+		for rows.Next() {
+			var img GeneratedImage
+			var rs float64
+			if err := rows.Scan(&img.ID, &img.Prompt, &img.Width, &img.Height, &img.FilePath,
+				&img.ThumbPath, &img.MedPath, &img.FileSize, &img.Model, &img.Seed, &img.Steps,
+				&img.IsNSFW, &img.LatentPath, &img.CreatedAt, &rs); err != nil {
+				return nil, 0, err
+			}
+			last = rs
+			out = append(out, img)
+		}
+		return out, last, rows.Err()
+	}
+
+	images := make([]GeneratedImage, 0, perPage)
+
+	upperBound := ""
+	args := []interface{}{cursor}
+	if wrapped {
+		upperBound = " AND random_sort <= $2"
+		args = append(args, seed)
+	}
+	args = append(args, perPage)
+	limitArg := len(args)
+	rows, err := db.conn.Query(
+		fmt.Sprintf(`SELECT %s FROM generated_images WHERE random_sort > $1%s%s ORDER BY random_sort ASC LIMIT $%d`,
+			cols, upperBound, nsfwFilter, limitArg),
+		args...,
+	)
+	if err != nil {
+		return nil, nil, wrapped, err
+	}
+	images, last, err := scan(rows, images)
+	rows.Close()
+	if err != nil {
+		return nil, nil, wrapped, err
+	}
+
+	// Wrap once, bounded by the original seed. Carrying the wrapped bit in the
+	// response prevents the next request from jumping back into the high range.
+	if !wrapped && len(images) < perPage && seed > 0 {
+		remaining := perPage - len(images)
+		rows2, err := db.conn.Query(
+			`SELECT `+cols+` FROM generated_images WHERE random_sort <= $1`+nsfwFilter+
+				` ORDER BY random_sort ASC LIMIT $2`,
+			seed, remaining,
+		)
+		if err != nil {
+			return nil, nil, wrapped, err
+		}
+		var last2 float64
+		images, last2, err = scan(rows2, images)
+		rows2.Close()
+		if err != nil {
+			return nil, nil, wrapped, err
+		}
+		if last2 != 0 {
+			last = last2
+		}
+		wrapped = true
+	}
+
+	if len(images) == 0 {
+		return images, nil, wrapped, nil
+	}
+	// A short page after wrapping has reached the seed and exhausted the cycle.
+	if wrapped && len(images) < perPage {
+		return images, nil, wrapped, nil
+	}
+	return images, &last, wrapped, nil
 }
 
 // StreamAllImagePrompts scans every row in generated_images and feeds (id, prompt)
@@ -1390,13 +1741,38 @@ func (db *DB) ListUnclassifiedImages(limit int) ([]GeneratedImage, error) {
 }
 
 // GetImageCount returns total number of generated images
-func (db *DB) GetImageCount() (int, error) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+var (
+	imageCountMu     sync.Mutex
+	imageCountCache  int
+	imageCountAt     time.Time
+	imageCountMaxAge = 60 * time.Second
+)
 
+// GetImageCount returns the total number of generated images. COUNT(*) over a
+// 100k+ row table is hit on every gallery load, so the result is cached for a
+// short window — the exact count never needs to be live for a "Showing X of Y".
+func (db *DB) GetImageCount() (int, error) {
+	imageCountMu.Lock()
+	if imageCountCache > 0 && time.Since(imageCountAt) < imageCountMaxAge {
+		c := imageCountCache
+		imageCountMu.Unlock()
+		return c, nil
+	}
+	imageCountMu.Unlock()
+
+	db.mu.RLock()
 	var count int
 	err := db.conn.QueryRow("SELECT COUNT(*) FROM generated_images").Scan(&count)
-	return count, err
+	db.mu.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+
+	imageCountMu.Lock()
+	imageCountCache = count
+	imageCountAt = time.Now()
+	imageCountMu.Unlock()
+	return count, nil
 }
 
 func newUUID() string {

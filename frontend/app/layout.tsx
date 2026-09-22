@@ -25,11 +25,11 @@ const staticOrigin = STATIC_BASE_URL.startsWith('http') ? new URL(STATIC_BASE_UR
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: 'CuteDSL — AI Model Acceleration on Solana',
+    default: 'CuteDSL — AI Image & Video Studio',
     template: '%s | CuteDSL',
   },
   description:
-    'Accelerate AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, TTS, and more. Powered by $CUTEDSL on Solana.',
+    'Create AI images, animate stills into video, and use the same fast models through one developer API. Pay as you go securely by card with Stripe.',
   keywords: [
     'AI inference',
     'model acceleration',
@@ -38,6 +38,8 @@ export const metadata: Metadata = {
     'Solana',
     'CUTEDSL',
     'image generation',
+    'image to video',
+    'AI video generation',
     'time series forecasting',
     'text to speech',
     'torch.compile',
@@ -59,9 +61,9 @@ export const metadata: Metadata = {
     locale: 'en_US',
     url: siteUrl,
     siteName: 'CuteDSL',
-    title: 'CuteDSL — AI Model Acceleration on Solana',
+    title: 'CuteDSL — AI Image & Video Studio',
     description:
-      'Accelerate AI models with custom Triton kernels and fused pipelines. SOTA image generation, time series forecasting, and more. Powered by $CUTEDSL.',
+      'Create beautiful AI images, animate any still into video, and ship both through one fast developer API.',
     images: [
       {
         url: staticAssetPath('/images/og-image.webp'),
@@ -73,9 +75,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'CuteDSL — AI Model Acceleration on Solana',
+    title: 'CuteDSL — AI Image & Video Studio',
     description:
-      'Accelerate AI models with custom Triton kernels and fused pipelines. Powered by $CUTEDSL on Solana.',
+      'Create AI images, turn stills into video, and pay as you go securely by card.',
     images: [staticAssetPath('/images/og-image.webp')],
   },
   alternates: {
@@ -100,7 +102,7 @@ const jsonLd = {
   name: 'CuteDSL',
   applicationCategory: 'DeveloperApplication',
   description:
-    'AI model acceleration and inference platform using custom Triton kernels and fused pipelines. Powered by $CUTEDSL on Solana.',
+    'AI image and video creation studio with an API, accelerated inference, and pay-as-you-go card billing.',
   url: siteUrl,
   codeRepository: 'https://github.com/lee101/cutedsl',
   creator: {
@@ -111,7 +113,7 @@ const jsonLd = {
   offers: {
     '@type': 'Offer',
     priceCurrency: 'USD',
-    description: 'Pay-per-use AI inference with $CUTEDSL tokens',
+    description: 'Pay-as-you-go AI creation with secure Stripe card payments',
   },
   sameAs: ['https://github.com/lee101/cutedsl'],
 };

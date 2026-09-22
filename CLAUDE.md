@@ -1,4 +1,6 @@
 ## Overview
+Shared GPU inference defaults to MODEL_IDLE_TIMEOUT=20 seconds, with lazy reload on demand. Both forecast paths pin Chronos during execution. Install inference/systemd/cutedsl-chronos-idle.conf as a cutedsl-chronos.service drop-in to disable preloading and retain the timeout across deployment. Search embeddings already run on CPU. Unloading models does not destroy the process CUDA context.
+
 CuteDSL Site - AI model acceleration and inference platform powered exclusively by $CUTEDSL token on Solana. Users connect their Solana wallet, deposit $CUTEDSL tokens, and use AI services with credits deducted based on current $CUTEDSL valuation.
 
 ## Architecture
@@ -31,6 +33,7 @@ CuteDSL Site - AI model acceleration and inference platform powered exclusively 
 - **Image Caption** - GitBase captioning proxied to text-generator.io
 - NVFP4 quantization support for RTX 5090 (via torchao)
 - torch.compile with reduce-overhead mode for max throughput
+- Cooperative single-GPU handoff: image/Chronos cold loads synchronously sleep the managed text backend; `/admin/hold`, `/admin/unload`, and `/admin/release` keep diffusion from reloading during a Gemma boot/wake.
 
 ### Key Files
 - `server/main.go` - Entry point, routes, static file serving
@@ -74,17 +77,20 @@ make build
 - `GET /api/pricing` - All service pricing in USD and $CUTEDSL
 - `POST /api/service` - Use an AI service (deducts credits)
 - `GET /api/billing-history?wallet=...` - Transaction history
+- `GET /api/uploads/presign?filename=&content_type=&dataset=` - Presigned R2 PUT URL (Bearer API key) for direct browser/CLI uploads; returns `upload_url` + `public_url`. Frontend helper: `frontend/lib/uploads.ts`, UI widget: `frontend/lib/media-upload-field.tsx` (drag/drop, mic recording, examples)
 
 ### Services Available
 | Service | Price | Backend | Description |
 |---------|-------|---------|-------------|
 | zimage | $1.00/gen | CuteDSL inference | Z-Image Turbo text-to-image |
-| chronos2 | $0.50/forecast | CuteDSL inference | Chronos-2 time series forecasting |
+| chronos2 | $0.002/forecast | CuteDSL inference | Chronos-2 time series forecasting |
 | tts | $0.10/100chars | text-generator.io proxy | Kokoro TTS (20+ voices) |
 | stt | $0.20/min | text-generator.io proxy | Gemma4 audio transcription |
 | gemma4 | $0.05/req | text-generator.io proxy | Gemma4 26B chat/vision |
 | caption | $0.05/image | text-generator.io proxy | GitBase image captioning |
 | ltx_video | $0.30/video | fal.ai proxy | LTX 2.3 text-to-video |
+| video_generate | from $0.08/video | OpenPaths + local AV1 | Text/image-to-video with AV1 R2 publishing |
+| h3_video | $2.688/GPU-hour | app.nz Cog | MiniMax H3 T2V/I2V, loop conditioning, audio, AV1; metered per execution |
 | flux_image | $0.04/image | fal.ai proxy | Flux Schnell fast image gen |
 
 ### Pricing Model
@@ -98,9 +104,21 @@ See `.env` for all configuration. Key vars:
 - `HELIUS_API_KEY` - Solana RPC (high rate limit)
 - `BAGS_API_KEY` - $CUTEDSL price feed
 - `FAL_KEY` - fal.ai API key for LTX video and Flux image
+- `OPENPATHS_API_KEY`, `OPENPATHS_BASE_URL` - OpenPaths video model routing
+- `APPNZ_API_KEY`, `APPNZ_BASE_URL` - app.nz API credentials for the shared MiniMax H3 Cog
+- `H3_VIDEO_PRICE_USD_PER_GPU_HOUR` - downstream H3 reference rate (default $2.688, app.nz rate plus 20%); completed jobs settle from app.nz's actual `costMicros`
+- `R2_PUBLIC_HOST` - public host for optimized AV1 results (keep `appstatic.app.nz` until `cutedslstatic.cutedsl.cc` DNS/custom-domain setup is live)
+- `VIDEO_GENERATE_PRICE_USD` - fallback price for OpenPaths video models; known models use the per-model table in `server/services.go`
 - `CUTE_TOKEN_MINT` - $CUTEDSL SPL token address
 - `INFERENCE_BACKEND_URL` - CuteDSL inference server URL
-- `TG_BACKEND_URL` - text-generator.io backend for TTS/STT/Gemma4/Caption
+- `TG_BACKEND_URL` - omniserve-native gateway for TTS/STT/Gemma4/Caption (`http://127.0.0.1:8791`; it fans out to the text-generator compat worker on :9083 and the ASR router on :9096). The old direct :9080 worker no longer runs. Auth is the `secret` header from `TG_API_KEY`, which must match `NETWRCK_PARTNER_SECRET` in `/etc/netwrck-image-caption.env`
+- `ZIMAGE_TEXT_ENCODER_DEVICE` / `ZIMAGE_TEXT_ENCODER_QUANT` - keep the Qwen3 text encoder GPU-resident with weight-only quant (`int8wo` ~4 GB and fastest, `nvfp4` ~2.2 GB and the current prod setting). This host's CPU is AVX2-only, so a CPU-pinned encoder costs ~5 s per uncached prompt vs ~0.1-0.6 s on GPU. Placement is reported at `/health` → `models.text_encoder`
+- `LATENT_TELEPORT_APPROX_DEFAULT` - allow `/generate_image` to resume from a *similar* prompt's cached latent (per-request override: `teleport_approx`, `teleport_approx_min_sim`). Off by default: ~2x faster but it is a quality trade, not a transparent cache hit
+- `COEXISTING_TEXT_SLEEP_URL` - managed text adapter sleep endpoint (default `http://127.0.0.1:8300/backend/sleep`)
+- `PRELOAD_DELAY_SECONDS` - cancellable delay before background model preload (default `1`), allowing socket bind failures to abort before touching GPU state
+- `INFERENCE_WAIT_FOR_EXISTING_SERVER` - keep a systemd-managed standby quiet when another local instance already owns the inference port (default `1`)
+- `INFERENCE_EXISTING_SERVER_POLL_SECONDS` - standby port polling interval (default `5` seconds)
+- `COEXISTING_TEXT_SLEEP_TIMEOUT` - maximum seconds to wait for the text backend to release GPU residency (default 120)
 - `ENABLE_NVFP4` - Enable NVFP4 quantization for RTX 5090
 - `*_PRICE_USD` - Service pricing in USD
 

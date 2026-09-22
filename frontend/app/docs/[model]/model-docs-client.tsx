@@ -3,17 +3,44 @@
 import { useState, useRef } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { ArrowLeft, Copy, Check, Play, Loader2, Download, ChevronRight, Lock } from 'lucide-react';
+import { ArrowLeft, Copy, Check, Play, Loader2, Download, ChevronRight, Lock, Eye, EyeOff } from 'lucide-react';
 import { useAuth, replaceApiKey } from '@/hooks/use-auth';
 import { MODEL_MAP, CATEGORY_LABELS, CATEGORY_COLORS, type ModelConfig, type ModelParam } from '@/lib/models';
 import { CodeBlock } from '@/lib/code-block';
 import { parseJSONResponse } from '@/lib/http';
 import { staticAssetPath } from '@/lib/static-assets';
+import { MediaUploadField } from '@/lib/media-upload-field';
 
 const API_BASE = '/api';
 const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
-function ParamInput({ param, value, onChange }: { param: ModelParam; value: string; onChange: (v: string) => void }) {
+function ParamInput({
+  param,
+  value,
+  onChange,
+  apiKey,
+  slug,
+}: {
+  param: ModelParam;
+  value: string;
+  onChange: (v: string) => void;
+  apiKey: string | null;
+  slug: string;
+}) {
+  if (param.upload) {
+    return (
+      <MediaUploadField
+        kind={param.upload}
+        value={value}
+        onChange={onChange}
+        apiKey={apiKey}
+        dataset={slug}
+        examples={param.examples}
+        placeholder={param.placeholder}
+      />
+    );
+  }
+
   if (param.options) {
     return (
       <select
@@ -23,6 +50,20 @@ function ParamInput({ param, value, onChange }: { param: ModelParam; value: stri
       >
         <option value="">Select...</option>
         {param.options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
+
+  if (param.type === 'boolean') {
+    return (
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full bg-white border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-pink-300"
+      >
+        <option value="">Default ({String(param.default ?? false)})</option>
+        <option value="true">true</option>
+        <option value="false">false</option>
       </select>
     );
   }
@@ -145,6 +186,7 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
   const config = MODEL_MAP[slug];
   const { apiKey, isLoggedIn } = useAuth();
   const [copiedCurl, setCopiedCurl] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<Record<string, unknown> | null>(null);
@@ -163,7 +205,7 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
   }
 
   const copyCurl = () => {
-    navigator.clipboard.writeText(replaceApiKey(config.curlExample, apiKey));
+    navigator.clipboard.writeText(replaceApiKey(config.curlExample, apiKey, showApiKey));
     setCopiedCurl(true);
     setTimeout(() => setCopiedCurl(false), 2000);
   };
@@ -184,6 +226,8 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
         payload[param.name] = parseInt(raw, 10);
       } else if (param.type === 'float') {
         payload[param.name] = parseFloat(raw);
+      } else if (param.type === 'boolean') {
+        payload[param.name] = raw === 'true';
       } else if (['float[]', 'float[][]', 'object[]', 'string[]'].includes(param.type)) {
         payload[param.name] = JSON.parse(raw);
       } else {
@@ -302,18 +346,26 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
 
         {/* Code Example */}
         <section className="mb-12">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-4 gap-3">
             <h2 className="text-xl font-bold text-slate-800">Example Request</h2>
-            <button onClick={copyCurl} className="flex items-center gap-1 text-sm text-slate-400 hover:text-pink-500 transition-colors">
-              {copiedCurl ? <><Check size={14} className="text-green-500" /> Copied</> : <><Copy size={14} /> Copy</>}
-            </button>
+            <div className="flex items-center gap-2">
+              {isLoggedIn && (
+                <button
+                  type="button"
+                  onClick={() => setShowApiKey(!showApiKey)}
+                  className="flex items-center gap-1 text-sm text-slate-400 hover:text-pink-500 transition-colors"
+                  aria-label={showApiKey ? 'Hide API key in example' : 'Show API key in example'}
+                >
+                  {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  {showApiKey ? 'Hide key' : 'Show key'}
+                </button>
+              )}
+              <button onClick={copyCurl} className="flex items-center gap-1 text-sm text-slate-400 hover:text-pink-500 transition-colors">
+                {copiedCurl ? <><Check size={14} className="text-green-500" /> Copied</> : <><Copy size={14} /> Copy</>}
+              </button>
+            </div>
           </div>
-          <CodeBlock language="bash" code={replaceApiKey(config.curlExample, apiKey)} className="rounded-2xl p-6" />
-          {isLoggedIn && (
-            <p className="text-xs text-green-600 mt-2 flex items-center gap-1">
-              <Check size={12} /> Using your real API key
-            </p>
-          )}
+          <CodeBlock language="bash" code={replaceApiKey(config.curlExample, apiKey, showApiKey)} className="rounded-2xl p-6" />
         </section>
 
         {/* Example Response */}
@@ -352,7 +404,12 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
                       param={param}
                       value={formValues[param.name] || ''}
                       onChange={v => setField(param.name, v)}
+                      apiKey={apiKey}
+                      slug={config.slug}
                     />
+                    {param.description && (
+                      <p className="mt-1 text-xs text-slate-400">{param.description}</p>
+                    )}
                   </div>
                 ))}
               </div>

@@ -32,6 +32,11 @@ skip_if_no_server = pytest.mark.skipif(
 )
 
 
+def image_backend_available(health: dict) -> bool:
+    models = health.get("models") or {}
+    return bool(models.get("zimage") or models.get("zimage_native_fallback_active"))
+
+
 # ---- Health ----
 
 @skip_if_no_server
@@ -94,10 +99,10 @@ def test_generate_image_model_not_loaded():
 
 @skip_if_no_server
 def test_generate_image_success():
-    """Full image generation test (only if model is loaded)."""
+    """Full image generation test through either configured Z-Image backend."""
     health = client.get("/health").json()
-    if not health["models"]["zimage"]:
-        pytest.skip("zimage model not loaded")
+    if not image_backend_available(health):
+        pytest.skip("zimage backend unavailable")
 
     r = client.post("/generate_image", json={
         "prompt": "a cute fairy in a magical forest, digital art",
@@ -149,8 +154,8 @@ def test_openai_images_missing_prompt():
 @skip_if_no_server
 def test_openai_images_generation():
     health = client.get("/health").json()
-    if not health["models"]["zimage"]:
-        pytest.skip("zimage model not loaded")
+    if not image_backend_available(health):
+        pytest.skip("zimage backend unavailable")
     r = client.post("/v1/images/generations", json={
         "prompt": "a lighthouse at dusk, oil painting",
         "size": "512x512",
@@ -170,8 +175,8 @@ def test_openai_images_generation():
 def test_generate_image_dimension_alignment():
     """Dimensions should be aligned to 64px."""
     health = client.get("/health").json()
-    if not health["models"]["zimage"]:
-        pytest.skip("zimage model not loaded")
+    if not image_backend_available(health):
+        pytest.skip("zimage backend unavailable")
 
     r = client.post("/generate_image", json={
         "prompt": "test alignment",
@@ -190,8 +195,8 @@ def test_generate_image_dimension_alignment():
 def test_create_and_upload_image_compat():
     """Test the GET compatibility endpoint."""
     health = client.get("/health").json()
-    if not health["models"]["zimage"]:
-        pytest.skip("zimage model not loaded")
+    if not image_backend_available(health):
+        pytest.skip("zimage backend unavailable")
 
     r = client.get("/create_and_upload_image", params={
         "prompt": "test compat endpoint",
@@ -239,8 +244,8 @@ def _upload_image(prompt: str, name: str, *, auto_lora: bool, teleport: bool, wi
 ])
 def test_create_and_upload_prompt_lengths(label, prompt):
     health = client.get("/health").json()
-    if not health["models"]["zimage"]:
-        pytest.skip("zimage model not loaded")
+    if not image_backend_available(health):
+        pytest.skip("zimage backend unavailable")
 
     data = _upload_image(prompt, f"prompt_len_{label}", auto_lora=True, teleport=False)
     assert data["perf"]["width"] == 512
@@ -251,8 +256,8 @@ def test_create_and_upload_prompt_lengths(label, prompt):
 @slow_zimage
 def test_create_and_upload_teleport_replay_quality_and_latency():
     health = client.get("/health").json()
-    if not health["models"]["zimage"]:
-        pytest.skip("zimage model not loaded")
+    if not image_backend_available(health):
+        pytest.skip("zimage backend unavailable")
 
     prompt = "pixel art stone block inventory icon, centered, simple game UI asset"
     baseline = _upload_image(prompt, "teleport_baseline", auto_lora=False, teleport=False)
@@ -467,7 +472,7 @@ def test_train_invalid_model():
     r = client.post("/train", json={
         "model": "invalid",
         "dataset_name": "test",
-    })
+    }, params={"secret": SECRET})
     assert r.status_code == 400
 
 
@@ -478,7 +483,10 @@ def test_train_start_and_status():
         "dataset_name": "test-data",
         "values": [[float(i) for i in range(100)]],
         "num_steps": 10,
-    })
+    }, params={"secret": SECRET})
+    if r.status_code == 409:
+        assert "inference-only worker" in r.json()["detail"]
+        return
     assert r.status_code == 200
     data = r.json()
     assert "job_id" in data
@@ -487,7 +495,7 @@ def test_train_start_and_status():
 
     # Check status
     job_id = data["job_id"]
-    r2 = client.get(f"/train/{job_id}")
+    r2 = client.get(f"/train/{job_id}", params={"secret": SECRET})
     assert r2.status_code == 200
     status_data = r2.json()
     assert status_data["job_id"] == job_id
@@ -496,13 +504,13 @@ def test_train_start_and_status():
 
 @skip_if_no_server
 def test_train_status_not_found():
-    r = client.get("/train/nonexistent-id")
+    r = client.get("/train/nonexistent-id", params={"secret": SECRET})
     assert r.status_code == 404
 
 
 @skip_if_no_server
 def test_train_list():
-    r = client.get("/train")
+    r = client.get("/train", params={"secret": SECRET})
     assert r.status_code == 200
     data = r.json()
     assert "jobs" in data

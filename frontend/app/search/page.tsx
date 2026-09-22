@@ -19,7 +19,7 @@ function slugify(s: string): string {
 }
 
 function imageSlug(id: string, prompt: string): string {
-  const shortID = id.split('-')[0] ?? id.slice(0, 8);
+  const shortID = id.replace(/-/g, '').toLowerCase().slice(0, 16);
   const slug = slugify(prompt);
   return slug ? `${slug}-${shortID}` : shortID;
 }
@@ -54,6 +54,7 @@ export default function SearchPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [initialLoad, setInitialLoad] = useState(true);
   const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
   const [imageCount, setImageCount] = useState(0);
@@ -65,14 +66,15 @@ export default function SearchPage() {
   // Fetch total image count on mount
   useEffect(() => {
     fetch(`${API_BASE}/images/count`)
-      .then(r => r.json())
-      .then(data => setImageCount(data.count || 0))
+      .then(r => { if (!r.ok) throw new Error('Count unavailable'); return r.json(); })
+      .then(data => setImageCount(typeof data?.count === 'number' && Number.isFinite(data.count) && data.count >= 0 ? data.count : 0))
       .catch(() => {});
   }, []);
 
   // Fetch images. Semantic (gobed) for queries, trigram browse for no-query.
   const fetchImages = useCallback(async (q: string, p: number, append: boolean = false) => {
     setLoading(true);
+    setLoadError(false);
     try {
       let newImages: GeneratedImage[] = [];
       let newTotal = 0;
@@ -83,7 +85,9 @@ export default function SearchPage() {
         const params = new URLSearchParams({ q, top_k: '240' });
         if (allowNSFW) params.set('allow_nsfw', 'true');
         const res = await fetch(`${API_BASE}/images/semantic?${params}`);
+        if (!res.ok) throw new Error(`Image search failed with HTTP ${res.status}`);
         const data = await res.json();
+        if (!data || (data.images !== null && !Array.isArray(data.images))) throw new Error('Invalid search response');
         const all: GeneratedImage[] = data.images || [];
         newTotal = all.length;
         newImages = all.slice((p - 1) * PER_PAGE, p * PER_PAGE);
@@ -92,9 +96,14 @@ export default function SearchPage() {
         const params = new URLSearchParams({ page: String(p), per_page: String(PER_PAGE) });
         if (allowNSFW) params.set('allow_nsfw', 'true');
         const res = await fetch(`${API_BASE}/images?${params}`);
+        if (!res.ok) throw new Error(`Image browse failed with HTTP ${res.status}`);
         const data: SearchResult = await res.json();
-        newImages = data.images || [];
-        newTotal = data.total;
+        if (!data || (data.images !== null && !Array.isArray(data.images)) ||
+            typeof data.total !== 'number' || !Number.isFinite(data.total) || data.total < 0) {
+          throw new Error('Invalid images response');
+        }
+        newImages = Array.isArray(data.images) ? data.images : [];
+        newTotal = Number.isFinite(data.total) ? data.total : 0;
       }
 
       setResults(prev => append ? [...prev, ...newImages] : newImages);
@@ -102,6 +111,7 @@ export default function SearchPage() {
       setPage(p);
       setInitialLoad(false);
     } catch {
+      setLoadError(true);
       setInitialLoad(false);
     } finally {
       setLoading(false);
@@ -128,7 +138,7 @@ export default function SearchPage() {
     if (!loaderRef.current) return;
     const observer = new IntersectionObserver(
       entries => {
-        if (entries[0].isIntersecting && !loading && results.length < total) {
+        if (entries[0].isIntersecting && !loading && !loadError && results.length < total) {
           fetchImages(query, page + 1, true);
         }
       },
@@ -136,7 +146,7 @@ export default function SearchPage() {
     );
     observer.observe(loaderRef.current);
     return () => observer.disconnect();
-  }, [loading, results.length, total, query, page, fetchImages]);
+  }, [loading, loadError, results.length, total, query, page, fetchImages]);
 
   // Fetch semantic suggestions as user types (shown below autocomplete)
   useEffect(() => {
@@ -272,7 +282,7 @@ export default function SearchPage() {
         </form>
 
         {/* Results info + NSFW toggle */}
-        {!initialLoad && (
+        {!initialLoad && !loadError && (
           <div className="flex justify-between items-center mb-6">
             <p className="text-slate-500 text-sm">
               {query ? (
@@ -294,11 +304,21 @@ export default function SearchPage() {
         )}
 
         {/* Image grid */}
+        {loadError && (
+          <div role="alert" className="text-center py-8 text-slate-600">
+            <p>Images are temporarily unavailable. Please try again.</p>
+            <button type="button" disabled={loading}
+              onClick={() => fetchImages(query, results.length > 0 ? page + 1 : 1, results.length > 0)}
+              className="mt-3 px-4 py-2 rounded-xl bg-pink-500 text-white font-bold disabled:opacity-50">
+              Try again
+            </button>
+          </div>
+        )}
         {initialLoad ? (
           <div className="flex items-center justify-center py-32">
             <Loader2 className="animate-spin text-pink-400" size={48} />
           </div>
-        ) : results.length === 0 ? (
+        ) : results.length === 0 ? (loadError ? null : (
           <div className="text-center py-32">
             <ImageIcon className="mx-auto mb-4 text-slate-300" size={64} />
             <p className="text-xl text-slate-500 font-medium">
@@ -308,7 +328,7 @@ export default function SearchPage() {
               Try a different search term or browse all images
             </p>
           </div>
-        ) : (
+        )) : (
           <>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
               {results.map(img => (

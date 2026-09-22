@@ -1,5 +1,7 @@
 'use client';
 
+import { browserStorage } from '@/lib/browser-storage';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
@@ -8,6 +10,8 @@ import {
   Check,
   Copy,
   CreditCard,
+  Eye,
+  EyeOff,
   Key,
   LogOut,
   Mail,
@@ -205,6 +209,9 @@ export default function AccountPage() {
   const [embeddedSecret, setEmbeddedSecret] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [walletCopied, setWalletCopied] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [rotatingKey, setRotatingKey] = useState(false);
   const [autotopupEnabled, setAutotopupEnabled] = useState(false);
   const [autotopupThreshold, setAutotopupThreshold] = useState('5');
   const [autotopupAmount, setAutotopupAmount] = useState('25');
@@ -214,6 +221,8 @@ export default function AccountPage() {
   const checkoutElementRef = useRef<HTMLDivElement | null>(null);
   const embeddedCheckoutRef = useRef<StripeEmbeddedCheckout | null>(null);
   const selfTestStartedRef = useRef(false);
+  const pendingAutotopupRef = useRef(false);
+  const persistAutotopupRef = useRef<(() => Promise<void>) | null>(null);
 
   const signedIn = !!walletAddress && !!apiKey;
   const canSubmitEmailLogin = isValidEmail(emailInput) && password.length >= 8;
@@ -222,13 +231,13 @@ export default function AccountPage() {
     setWalletAddress(user.wallet_address);
     setApiKey(key);
     setEmail(user.email || null);
-    localStorage.setItem('cutedsl_wallet', user.wallet_address);
-    localStorage.setItem('cutedsl_api_key', key);
+    browserStorage.setItem('cutedsl_wallet', user.wallet_address);
+    browserStorage.setItem('cutedsl_api_key', key);
     if (user.email) {
       setEmailInput(user.email);
-      localStorage.setItem('cutedsl_email', user.email);
+      browserStorage.setItem('cutedsl_email', user.email);
     } else {
-      localStorage.removeItem('cutedsl_email');
+      browserStorage.removeItem('cutedsl_email');
     }
   }, []);
 
@@ -247,9 +256,9 @@ export default function AccountPage() {
   }, []);
 
   useEffect(() => {
-    const savedWallet = localStorage.getItem('cutedsl_wallet');
-    const savedKey = localStorage.getItem('cutedsl_api_key');
-    const savedEmail = localStorage.getItem('cutedsl_email');
+    const savedWallet = browserStorage.getItem('cutedsl_wallet');
+    const savedKey = browserStorage.getItem('cutedsl_api_key');
+    const savedEmail = browserStorage.getItem('cutedsl_email');
     const params = new URLSearchParams(window.location.search);
     if (savedWallet) setWalletAddress(savedWallet);
     if (savedKey) setApiKey(savedKey);
@@ -295,6 +304,10 @@ export default function AccountPage() {
             setStatus('Checkout complete. Refreshing account state.');
             setEmbeddedSecret('');
             if (walletAddress) refreshAccount(walletAddress).catch(() => {});
+            if (pendingAutotopupRef.current) {
+              pendingAutotopupRef.current = false;
+              window.setTimeout(() => persistAutotopupRef.current?.(), 1500);
+            }
           },
         });
         if (cancelled) {
@@ -421,9 +434,9 @@ export default function AccountPage() {
     setBalance(null);
     setEvents([]);
     setEmbeddedSecret('');
-    localStorage.removeItem('cutedsl_wallet');
-    localStorage.removeItem('cutedsl_api_key');
-    localStorage.removeItem('cutedsl_email');
+    browserStorage.removeItem('cutedsl_wallet');
+    browserStorage.removeItem('cutedsl_api_key');
+    browserStorage.removeItem('cutedsl_email');
     try {
       if (window.solana?.isPhantom) window.solana.disconnect?.();
     } catch {}
@@ -481,7 +494,7 @@ export default function AccountPage() {
 
       setTestStep('embedded checkout', 'running');
       const checkout = await postJSON<CheckoutResponse>('/stripe-checkout', {
-        wallet_address: localStorage.getItem('cutedsl_wallet') || login.user.wallet_address,
+        wallet_address: browserStorage.getItem('cutedsl_wallet') || login.user.wallet_address,
         type: 'subscription',
         plan: 'monthly',
         return_url: `${window.location.origin}/account?payment=success&session_id={CHECKOUT_SESSION_ID}`,
@@ -507,11 +520,11 @@ export default function AccountPage() {
     runAccountSelfTest();
   }, [testMode, runAccountSelfTest]);
 
-  const startCheckout = async (kind: CheckoutKind) => {
-    if (!walletAddress) return;
+  const startCheckout = async (kind: CheckoutKind, amountUsd?: number) => {
+    if (!walletAddress) return false;
     if (!email) {
       setStatus('Add an email to this wallet before starting checkout.');
-      return;
+      return false;
     }
     setCheckoutKind(kind);
     setCheckoutLoading(true);
@@ -525,7 +538,7 @@ export default function AccountPage() {
       };
       if (kind === 'credits') {
         body.type = 'credits';
-        body.amount_usd = parseFloat(creditsAmount || '0');
+        body.amount_usd = amountUsd ?? parseFloat(creditsAmount || '0');
       } else {
         body.type = 'subscription';
         body.plan = kind;
@@ -535,18 +548,19 @@ export default function AccountPage() {
       if (!data.client_secret || !data.publishable_key) throw new Error('Stripe checkout did not return an embedded client secret');
       setStripePublishableKey(data.publishable_key);
       setEmbeddedSecret(data.client_secret);
-      setStatus('Complete the secure Stripe checkout below.');
+      setStatus(null);
+      return true;
     } catch (err: unknown) {
       setStatus(errorMessage(err, 'Checkout failed'));
+      return false;
     } finally {
       setCheckoutLoading(false);
     }
   };
 
-  const saveAutotopup = async () => {
+  const persistAutotopup = async () => {
     if (!walletAddress) return;
     setAutotopupSaving(true);
-    setStatus(null);
     try {
       const data = await postJSON<AutotopupResponse>('/autotopup-settings', {
         wallet_address: walletAddress,
@@ -563,12 +577,55 @@ export default function AccountPage() {
       setAutotopupSaving(false);
     }
   };
+  persistAutotopupRef.current = persistAutotopup;
+
+  const saveAutotopup = async () => {
+    if (!walletAddress) return;
+    setStatus(null);
+    if (autotopupEnabled && !balance?.has_payment_method) {
+      const amount = Math.min(500, Math.max(5, parseFloat(autotopupAmount || '25') || 25));
+      pendingAutotopupRef.current = true;
+      setCreditsAmount(String(amount));
+      const opened = await startCheckout('credits', amount);
+      if (opened) setStatus('Complete the Stripe checkout to save a card; auto top-up will be enabled automatically.');
+      else pendingAutotopupRef.current = false;
+      return;
+    }
+    await persistAutotopup();
+  };
 
   const copyApiKey = async () => {
     if (!apiKey) return;
     await navigator.clipboard.writeText(apiKey);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  const copyWallet = async () => {
+    if (!walletAddress) return;
+    await navigator.clipboard.writeText(walletAddress);
+    setWalletCopied(true);
+    window.setTimeout(() => setWalletCopied(false), 2000);
+  };
+
+  const rotateApiKey = async () => {
+    if (!walletAddress || !apiKey) return;
+    if (!window.confirm('Rotate your API key? The current key will stop working immediately.')) return;
+    setRotatingKey(true);
+    setStatus(null);
+    try {
+      const data = await postJSON<AuthResponse>('/auth/rotate-api-key', {
+        wallet_address: walletAddress,
+        api_key: apiKey,
+      }, 'Failed to rotate API key');
+      storeAuth(data.user, data.api_key);
+      setShowApiKey(true);
+      setStatus('API key rotated. Update any apps using the old key.');
+    } catch (err: unknown) {
+      setStatus(errorMessage(err, 'Failed to rotate API key'));
+    } finally {
+      setRotatingKey(false);
+    }
   };
 
   const activePlan = balance?.subscription_plan || '';
@@ -713,7 +770,28 @@ export default function AccountPage() {
                 <div className="rounded-lg border border-pink-100 bg-pink-50/50 p-4">
                   <div className="text-xs font-bold uppercase tracking-wide text-slate-500">Signed in</div>
                   <div className="mt-1 truncate text-sm font-bold text-slate-900">{email || walletAddress}</div>
-                  <div className="mt-1 truncate font-mono text-xs text-slate-500">{walletAddress}</div>
+                  {walletAddress && (
+                    <div className="mt-3 border-t border-pink-100 pt-3">
+                      <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-500">
+                        <Wallet size={12} />
+                        Wallet address
+                        <span className="font-normal normal-case tracking-normal text-slate-400">· public, safe to share</span>
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <code className="min-w-0 flex-1 truncate rounded-md bg-white px-2 py-1.5 font-mono text-xs text-slate-700">
+                          {walletAddress}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={copyWallet}
+                          className="shrink-0 rounded-md p-1.5 text-slate-500 hover:bg-slate-100"
+                          aria-label="Copy wallet address"
+                        >
+                          {walletCopied ? <Check size={14} className="text-emerald-600" /> : <Copy size={14} />}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {!email && (
@@ -775,14 +853,35 @@ export default function AccountPage() {
                       <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
                         <Key size={16} />
                         API key
+                        <span className="text-xs font-normal text-slate-400">· secret, keep private</span>
                       </div>
-                      <button onClick={copyApiKey} className="rounded-md p-2 text-slate-500 hover:bg-slate-100" aria-label="Copy API key">
-                        {copied ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setShowApiKey(!showApiKey)}
+                          className="rounded-md p-2 text-slate-500 hover:bg-slate-100"
+                          aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                        >
+                          {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                        <button onClick={copyApiKey} className="rounded-md p-2 text-slate-500 hover:bg-slate-100" aria-label="Copy API key">
+                          {copied ? <Check size={16} className="text-emerald-600" /> : <Copy size={16} />}
+                        </button>
+                      </div>
                     </div>
                     <div className="overflow-hidden rounded-md bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100">
-                      {apiKey}
+                      {showApiKey ? apiKey : `${apiKey.slice(0, 8)}${'•'.repeat(20)}`}
                     </div>
+                    <button
+                      type="button"
+                      onClick={rotateApiKey}
+                      disabled={rotatingKey}
+                      className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md border border-pink-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:border-pink-400 hover:bg-pink-50 disabled:opacity-50"
+                    >
+                      <RefreshCw size={14} className={rotatingKey ? 'animate-spin' : ''} />
+                      {rotatingKey ? 'Rotating…' : 'Rotate API key'}
+                    </button>
+                    <p className="mt-2 text-xs text-slate-400">Rotating immediately invalidates the old key.</p>
                   </div>
                 )}
               </div>
@@ -822,12 +921,16 @@ export default function AccountPage() {
                     <input value={autotopupAmount} onChange={(e) => setAutotopupAmount(e.target.value)} type="number" min="5" max="500" className="mt-1 w-full rounded-lg border border-pink-100 px-3 py-2 text-sm font-normal outline-none focus:border-pink-400" />
                   </label>
                 </div>
-                <button onClick={saveAutotopup} disabled={autotopupSaving} className="w-full rounded-lg bg-slate-950 px-4 py-3 text-sm font-bold text-white disabled:opacity-50">
+                <button
+                  onClick={saveAutotopup}
+                  disabled={autotopupSaving || checkoutLoading}
+                  className="w-full rounded-lg bg-slate-950 px-4 py-3 text-sm font-bold text-white disabled:opacity-50"
+                >
                   {autotopupSaving ? 'Saving...' : 'Save auto top-up'}
                 </button>
                 {balance && !balance.has_payment_method && (
                   <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
-                    Buy credits with Stripe once before enabling auto top-up.
+                    No card saved yet. Saving with auto top-up on opens a Stripe checkout that saves your card.
                   </div>
                 )}
               </div>
@@ -840,7 +943,7 @@ export default function AccountPage() {
             <div className="mb-5 flex items-start justify-between gap-4">
               <div>
                 <h2 className="font-fredoka text-3xl font-bold">Checkout</h2>
-                <p className="mt-1 text-sm text-slate-600">Subscribe for API access or buy metered credits.</p>
+                <p className="mt-1 text-sm text-slate-600">Subscribe for unlimited images or buy metered credits.</p>
               </div>
               <CreditCard className="text-pink-500" size={24} />
             </div>
@@ -869,8 +972,9 @@ export default function AccountPage() {
                     <h3 className="text-lg font-bold">Monthly</h3>
                     {activePlan === 'monthly' && <Check size={18} className="text-emerald-600" />}
                   </div>
-                  <div className="mb-1 text-3xl font-bold">$12</div>
+                  <div className="mb-1 text-3xl font-bold">$14</div>
                   <div className="mb-5 text-sm text-slate-500">per month</div>
+                  <p className="mb-5 text-xs text-slate-600">Unlimited image generation plus $10 in monthly rollover credits for video and other models.</p>
                   <button onClick={() => startCheckout('monthly')} disabled={checkoutLoading} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-slate-950 px-4 py-3 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-50">
                     Choose <ArrowRight size={16} />
                   </button>
@@ -881,8 +985,10 @@ export default function AccountPage() {
                     <h3 className="text-lg font-bold">Annual</h3>
                     <Sparkles size={18} className="text-pink-500" />
                   </div>
-                  <div className="mb-1 text-3xl font-bold">$120</div>
-                  <div className="mb-5 text-sm text-slate-500">per year</div>
+                  <div className="mb-1 text-3xl font-bold">$140</div>
+                  <div className="text-sm text-slate-500">per year</div>
+                  <div className="mb-5 text-xs font-bold text-emerald-600">Save $28 vs monthly</div>
+                  <p className="mb-5 text-xs text-slate-600">Unlimited image generation plus $120 in rollover credits for the year.</p>
                   <button onClick={() => startCheckout('annual')} disabled={checkoutLoading} className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-pink-600 px-4 py-3 text-sm font-bold text-white disabled:opacity-50">
                     Choose <ArrowRight size={16} />
                   </button>
@@ -890,6 +996,11 @@ export default function AccountPage() {
 
                 <div className="rounded-lg border border-pink-100 bg-white p-5">
                   <h3 className="mb-3 text-lg font-bold">Credits</h3>
+                  <div className="mb-3 grid grid-cols-3 gap-2">
+                    {['25', '50', '100'].map((amount) => (
+                      <button key={amount} type="button" onClick={() => setCreditsAmount(amount)} className={`rounded-lg border px-2 py-2 text-sm font-bold ${creditsAmount === amount ? 'border-pink-500 bg-pink-50 text-pink-700' : 'border-pink-100 text-slate-600'}`}>${amount}</button>
+                    ))}
+                  </div>
                   <label className="mb-3 block text-xs font-bold text-slate-600">
                     Amount USD
                     <div className="relative mt-1">

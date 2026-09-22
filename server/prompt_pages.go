@@ -80,21 +80,132 @@ func slugify(s string) string {
 	return result
 }
 
-// imageSlug returns the SEO slug for an image: {prompt-slug}-{shortID}
-// shortID is the first 8 chars of the UUID (before the first dash).
+const imageSlugIDLength = 16
+
+func compactImageID(id string, length int) string {
+	compact := strings.ToLower(strings.ReplaceAll(id, "-", ""))
+	if len(compact) > length {
+		compact = compact[:length]
+	}
+	return compact
+}
+
+// compactHexToUUIDPrefix formats a compact hex UUID prefix with dashes at the
+// standard 8-4-4-4-12 boundaries (for however many digits are present).
+func compactHexToUUIDPrefix(token string) string {
+	var b strings.Builder
+	b.Grow(len(token) + 4)
+	for i := 0; i < len(token); i++ {
+		switch i {
+		case 8, 12, 16, 20:
+			b.WriteByte('-')
+		}
+		b.WriteByte(token[i])
+	}
+	return b.String()
+}
+
+// compactHexPrefixRange returns a half-open [lo, hi) key range on dashed UUID
+// text ids so lookups use generated_images_pkey instead of a full-table scan.
+func compactHexPrefixRange(token string) (lo, hi string, ok bool) {
+	lo = compactHexToUUIDPrefix(token)
+	hiBytes := []byte(lo)
+	for i := len(hiBytes) - 1; i >= 0; i-- {
+		c := hiBytes[i]
+		if c == '-' {
+			continue
+		}
+		switch {
+		case c >= '0' && c < '9':
+			hiBytes[i] = c + 1
+			return lo, string(hiBytes), true
+		case c == '9':
+			hiBytes[i] = 'a'
+			return lo, string(hiBytes), true
+		case c >= 'a' && c < 'f':
+			hiBytes[i] = c + 1
+			return lo, string(hiBytes), true
+		case c == 'f':
+			hiBytes[i] = '0'
+			continue
+		default:
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
+// imageSlug returns the SEO slug for an image using 64 bits of UUID data.
+// Eight hex characters only provide 32 bits and collide at catalog scale.
 func imageSlug(id, prompt string) string {
-	shortID := id
-	if dashIdx := strings.Index(id, "-"); dashIdx > 0 {
-		shortID = id[:dashIdx]
-	}
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
+	shortID := compactImageID(id, imageSlugIDLength)
 	slug := slugify(prompt)
 	if slug == "" {
 		return shortID
 	}
 	return slug + "-" + shortID
+}
+
+func legacyImageSlug(id, prompt string) string {
+	shortID := compactImageID(id, 8)
+	slug := slugify(prompt)
+	if slug == "" {
+		return shortID
+	}
+	return slug + "-" + shortID
+}
+
+// resolveImageReference resolves a new 16-hex slug and remains compatible with
+// old 8-hex links. Ambiguous old prefixes are accepted only when the prompt slug
+// identifies exactly one candidate, never with an unordered LIMIT 1.
+func resolveImageReference(ref string) (string, error) {
+	token := ref
+	if idx := strings.LastIndex(ref, "-"); idx >= 0 {
+		token = ref[idx+1:]
+	}
+	token = strings.ToLower(strings.TrimSpace(token))
+	if len(token) < 8 || len(token) > 32 {
+		return "", fmt.Errorf("invalid image reference")
+	}
+	for _, r := range token {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", fmt.Errorf("invalid image reference")
+		}
+	}
+
+	lo, hi, ok := compactHexPrefixRange(token)
+	if !ok {
+		return "", fmt.Errorf("invalid image reference")
+	}
+	rows, err := dbConn.conn.Query(
+		`SELECT id, prompt FROM generated_images WHERE id >= $1 AND id < $2 ORDER BY id LIMIT 16`,
+		lo, hi,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	type candidate struct{ id, prompt string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.prompt); err != nil {
+			return "", err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(candidates) == 1 {
+		return candidates[0].id, nil
+	}
+	for _, c := range candidates {
+		if ref == imageSlug(c.id, c.prompt) || ref == legacyImageSlug(c.id, c.prompt) {
+			return c.id, nil
+		}
+	}
+	return "", fmt.Errorf("image reference not found or ambiguous")
 }
 
 // imagePageURL returns the canonical SEO URL for an image.
@@ -169,6 +280,11 @@ func handlePromptAPI(ctx *fasthttp.RequestCtx, imageID string) {
 		return
 	}
 	images, err := dbConn.GetImagesByIDs([]string{imageID}, true)
+	if err != nil || len(images) == 0 {
+		if full, resolveErr := resolveImageReference(imageID); resolveErr == nil {
+			images, err = dbConn.GetImagesByIDs([]string{full}, true)
+		}
+	}
 	if err != nil || len(images) == 0 {
 		jsonError(ctx, 404, "image not found")
 		return
@@ -629,9 +745,9 @@ func handleSitemapIndex(ctx *fasthttp.RequestCtx) {
 func handleSitemapPages(ctx *fasthttp.RequestCtx) {
 	host := "https://cutedsl.cc"
 	pages := []string{
-		"/", "/search", "/gallery", "/playground", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
+		"/", "/search", "/gallery", "/playground", "/tools", "/tags", "/docs", "/blog", "/evals", "/lora-trainer", "/api-docs",
 		"/docs/zimage", "/docs/chronos2", "/docs/tts", "/docs/stt",
-		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/lora_training",
+		"/docs/gemma4", "/docs/caption", "/docs/flux_image", "/docs/ltx_video", "/docs/video_generate", "/docs/lora_training",
 	}
 	var sb strings.Builder
 	sb.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
@@ -751,8 +867,7 @@ func truncateRunes(s string, maxRunes int) string {
 	return string(runes[:maxRunes-3]) + "..."
 }
 
-// handleImageBySlug serves /image/<slug> where slug ends in -{shortID}.
-// shortID is the first 8 chars of the UUID. We look up by id LIKE shortID||'-%'.
+// handleImageBySlug serves /image/<slug> using the shared collision-safe resolver.
 func handleImageBySlug(ctx *fasthttp.RequestCtx, slug string) {
 	slug = strings.TrimSpace(slug)
 	if slug == "" {
@@ -761,25 +876,8 @@ func handleImageBySlug(ctx *fasthttp.RequestCtx, slug string) {
 		return
 	}
 
-	// Extract shortID: last token after the final '-'
-	shortID := slug
-	if idx := strings.LastIndex(slug, "-"); idx >= 0 {
-		shortID = slug[idx+1:]
-	}
-	if len(shortID) == 0 {
-		ctx.SetStatusCode(404)
-		ctx.SetBodyString("not found")
-		return
-	}
-
-	// Look up the image by the shortID prefix. UUID format: xxxxxxxx-xxxx-...
-	// so shortID matches the first segment of the UUID.
-	row := dbConn.conn.QueryRow(
-		`SELECT id FROM generated_images WHERE id LIKE $1 || '-%' OR id = $1 LIMIT 1`,
-		shortID,
-	)
-	var imageID string
-	if err := row.Scan(&imageID); err != nil {
+	imageID, err := resolveImageReference(slug)
+	if err != nil {
 		ctx.SetStatusCode(404)
 		ctx.Response.Header.Set("Content-Type", "text/html; charset=utf-8")
 		ctx.SetBodyString(`<!DOCTYPE html><html><body style="font-family:system-ui;text-align:center;padding:4rem"><h1>Image not found</h1><a href="/gallery">Browse gallery</a></body></html>`)

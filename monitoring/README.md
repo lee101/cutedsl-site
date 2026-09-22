@@ -1,4 +1,97 @@
-# CuteDSL Autofix Monitors
+# CuteDSL Production Monitor and Autofix
+
+The primary monitor is a single systemd-timer-driven pipeline covering the
+hydrated frontend, browser telemetry, the Go backend, inference readiness and
+errors, and a real image generation/indexing canary.
+
+## What it checks
+
+- `check_frontend.mjs` opens the homepage at desktop and mobile sizes plus the
+  gallery, docs, playground, search, account and trainer routes. It records
+  `pageerror`, `console.error`, first-party request failures, 5xx responses,
+  missing assets, empty hydration titles and the Next.js client-exception page.
+- The existing `/api/frontend-error` JSONL stream is consumed incrementally.
+- Public and local Go health plus GPU inference `/healthz` are checked.
+- New `cutedsl.service` journal errors and structured inference 5xx JSONL rows
+  are consumed and fingerprinted.
+- Every six hours, an unlimited private canary identity makes one real Z-Image
+  request through `https://cutedsl.cc/api/service`. The monitor requires the
+  response to include a saved gallery row, downloads its image through the
+  public origin, and queries `/api/images` until that exact ID is indexed.
+
+Artifacts are written under ignored `monitoring/logs/`; offsets, cooldowns,
+failure counters, handled fingerprints and the daily agent budget live under
+ignored `monitoring/state/`.
+
+## Repair behavior
+
+Only one `cutedsl_monitor.py` process can run at once. The systemd service is a
+oneshot, so a timer tick cannot overlap a long repair; an additional `flock`
+also covers manual runs.
+
+Noncritical signatures need two observations by default. Confirmed hard-down,
+panic and real-canary failures can dispatch immediately. A single global repair
+lock covers frontend, backend and inference incidents. Defaults:
+
+- Agent: `gpt-5.6-sol`, medium reasoning
+- Global cooldown: 1 hour
+- Per-category cooldown: 3 hours
+- Daily repair-agent cap: 4
+- Agent timeout: 3 hours
+- Monitor interval: 5 minutes
+- Real image canary: 6 hours; failed-canary retry: 15 minutes
+- Health transport checks: 3 attempts, 1 second apart
+
+The production host also installs `deploy/cutedsl-resolv.conf` as
+`/etc/resolv.conf`, providing multiple independent resolvers instead of relying
+on the intermittently failing DHCP-provided resolver alone.
+
+The repair prompt requires reproduction, a root-cause fix, a regression test,
+focused and broad validation, deployment, and public post-deploy browser/API
+verification. The parent monitor then independently repeats the relevant checks
+before marking the fingerprint handled.
+
+## Install and schedule
+
+Provisioning creates or reuses a private `cutedsl-production-monitor` database
+identity, marks only image generation unlimited, and stores its API key in the
+gitignored `monitoring/.env` with mode `0600`.
+
+```bash
+./monitoring/install_systemd.sh --provision-canary
+```
+
+The installer places `cutedsl-monitor.service` and `cutedsl-monitor.timer` in
+`/etc/systemd/system`, enables the timer and starts an initial check.
+
+```bash
+./monitoring/install_systemd.sh --status
+systemctl list-timers cutedsl-monitor.timer
+```
+
+Manual checks:
+
+```bash
+# Full verification without launching an agent
+python3 monitoring/cutedsl_monitor.py --verify-only --json
+
+# Force a real generation, persistence, image and gallery-index check
+python3 monitoring/cutedsl_monitor.py --verify-only --force-synthetic --json
+
+# Exercise incident gating without launching Codex
+python3 monitoring/cutedsl_monitor.py --dry-run-agent --skip-synthetic --json
+```
+
+Optional overrides can be placed in `/etc/cutedsl-monitor.env` or
+`monitoring/.env`; see `.env.example`.
+
+## Legacy monitors
+
+The older supervisor/cron inference and frontend autofix entrypoints below are
+kept for reference, but should not be enabled alongside the unified systemd
+monitor because they use separate locks and cooldown state.
+
+# Legacy CuteDSL Autofix Monitors
 
 ## Inference Errors
 

@@ -6,6 +6,8 @@ const staticBaseUrl = process.env.NEXT_PUBLIC_STATIC_BASE_URL?.replace(/\/$/, ''
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // Keep exception source and stack details when scripts come from our CDN.
+  crossOrigin: 'anonymous',
   ...(isExport && staticBaseUrl ? { assetPrefix: staticBaseUrl } : {}),
   eslint: {
     ignoreDuringBuilds: true,
@@ -34,6 +36,12 @@ const nextConfig: NextConfig = {
   ...(isExport ? {} : {
     async rewrites() {
       return [
+        // Deep links to a gallery image modal (/gallery/<slug>) render the gallery page;
+        // the client then opens the matching lightbox. Production's Go server does the same.
+        {
+          source: '/gallery/:slug',
+          destination: '/gallery',
+        },
         {
           source: '/api/:path*',
           destination: 'http://localhost:8095/api/:path*',

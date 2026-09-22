@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // CryptoPaymentMethod is the payment method type
 type CryptoPaymentMethod string
@@ -60,6 +63,23 @@ type BillingEvent struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// VideoJob is a durable handle for an asynchronously generated video.
+type VideoJob struct {
+	ID            string          `json:"job_id"`
+	UserID        string          `json:"-"`
+	ProviderJobID string          `json:"-"`
+	Service       string          `json:"service"`
+	Status        string          `json:"status"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	ProviderCost  float64         `json:"provider_cost_usd,omitempty"`
+	ChargedUSD    float64         `json:"charged_usd,omitempty"`
+	CreditsUsed   float64         `json:"credits_used,omitempty"`
+	Settled       bool            `json:"settled"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+}
+
 // CryptoCheckoutIntent represents a pending deposit of $CUTE
 type CryptoCheckoutIntent struct {
 	ID              string               `json:"id"`
@@ -114,12 +134,25 @@ type ServiceUsageRequest struct {
 	Text     string `json:"text,omitempty"`
 	Input    string `json:"input,omitempty"`
 	AudioURL string `json:"audio_url,omitempty"`
+	// video generation fields
+	Duration      int    `json:"duration,omitempty"`
+	AspectRatio   string `json:"aspect_ratio,omitempty"`
+	OutputFormat  string `json:"output_format,omitempty"`
+	FirstFrame    string `json:"first_frame,omitempty"`
+	LastFrame     string `json:"last_frame,omitempty"`
+	Size          string `json:"size,omitempty"`
+	Loop          bool   `json:"loop,omitempty"`
+	IncludeAudio  *bool  `json:"include_audio,omitempty"`
+	Structured    *bool  `json:"structured_prompt,omitempty"`
+	EncodeQuality int    `json:"encode_quality,omitempty"`
 	// zimage fields
 	Width    int     `json:"width,omitempty"`
 	Height   int     `json:"height,omitempty"`
 	NumSteps int     `json:"num_steps,omitempty"`
 	Guidance float64 `json:"guidance,omitempty"`
 	Seed     int     `json:"seed,omitempty"`
+	LoRAID   string  `json:"lora_id,omitempty"`
+	AutoLoRA *bool   `json:"auto_lora,omitempty"`
 	// chronos2 fields
 	Values           []float64 `json:"values,omitempty"`
 	PredictionLength int       `json:"prediction_length,omitempty"`
@@ -174,11 +207,13 @@ type GeneratedImage struct {
 
 // ImageSearchResult is returned from the search API
 type ImageSearchResult struct {
-	Images  []GeneratedImage `json:"images"`
-	Total   int              `json:"total"`
-	Page    int              `json:"page"`
-	PerPage int              `json:"per_page"`
-	Query   string           `json:"query,omitempty"`
+	Images        []GeneratedImage `json:"images"`
+	Total         int              `json:"total"`
+	Page          int              `json:"page"`
+	PerPage       int              `json:"per_page"`
+	Query         string           `json:"query,omitempty"`
+	NextCursor    *float64         `json:"next_cursor,omitempty"` // keyset cursor for varied browse
+	CursorWrapped bool             `json:"cursor_wrapped,omitempty"`
 }
 
 // WalletBalanceResponse is returned when checking balance

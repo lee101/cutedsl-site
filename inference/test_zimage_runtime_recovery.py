@@ -1,9 +1,13 @@
 import contextlib
+import asyncio
+import base64
+import io
 import sys
 import types
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from starlette.requests import Request
 
 
@@ -35,6 +39,18 @@ def _fake_request(path: str = "/generate_image", query_string: bytes = b"") -> R
             "scheme": "http",
         }
     )
+
+
+def _native_image_document(width=512, height=512, **row_overrides):
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), (36, 72, 108)).save(output, format="WEBP")
+    row = {
+        "b64_json": base64.b64encode(output.getvalue()).decode(),
+        "format": "webp",
+        "inference_time_ms": 123,
+    }
+    row.update(row_overrides)
+    return {"model": "z_image_turbo-Q4_K", "data": [row]}
 
 
 def test_model_manager_hold_rejects_new_gpu_admission(monkeypatch):
@@ -120,6 +136,39 @@ def test_queued_prompt_reservation_blocks_peer_hold(monkeypatch, prompt_len):
 
     assert result == {"prompt_len": prompt_len}
     assert manager._admitted == {}
+
+
+def test_active_peer_hold_routes_cold_generate_request_to_native_fallback(monkeypatch):
+    manager = server.ModelManager()
+    manager.hold(3600)
+    native_calls = []
+
+    class FakeBatcher:
+        async def submit(self, req):
+            return server._generate_image_batch_with_model_sync([req])[0]
+
+    monkeypatch.setattr(server, "model_manager", manager)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "zimage_dynamic_batcher", FakeBatcher())
+    monkeypatch.setattr(
+        server,
+        "_generate_image_native_sync",
+        lambda req: native_calls.append(req.prompt) or {"backend": "omniserve-native"},
+    )
+    monkeypatch.setattr(
+        server,
+        "_with_zimage_model_retry",
+        lambda *_args: pytest.fail("an active peer hold must not enter the local BF16 loader"),
+    )
+
+    result = server.asyncio.run(
+        server._submit_zimage_request(server.ZImageRequest(prompt="held fallback request"))
+    )
+
+    assert result == {"backend": "omniserve-native"}
+    assert native_calls == ["held fallback request"]
+    assert manager._admitted == {}
+    assert manager.hold_remaining() > 0
 
 
 def test_model_cold_load_sleeps_text_backend_before_taking_manager_lock(monkeypatch):
@@ -441,6 +490,27 @@ def test_zimage_request_rejects_blank_prompts(prompt):
     assert "empty" in str(exc_info.value) or "at least 1 character" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "gallery prompt with an embedded NUL\x00and trailing bytes",
+        "gallery prompt with a binary control\x01byte",
+        "gallery prompt with DEL\x7fbyte",
+    ],
+)
+def test_zimage_request_rejects_controls_that_are_unsafe_for_native_c_strings(prompt):
+    with pytest.raises(Exception) as exc_info:
+        server.ZImageRequest(prompt=prompt)
+
+    assert "unsupported control characters" in str(exc_info.value)
+
+
+def test_zimage_request_allows_multiline_prompt_whitespace():
+    prompt = "first line\nsecond line\twith detail\r\n"
+
+    assert server.ZImageRequest(prompt=prompt).prompt == prompt
+
+
 def test_benchmark_mode_disables_quality_retry(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -504,6 +574,21 @@ def test_remote_image_url_rejects_private_addresses(monkeypatch):
     assert exc_info.value.detail == "image_url must resolve to a public address"
 
 
+@pytest.mark.parametrize("host", ["0177.0.0.1", "127.000.000.001"])
+def test_remote_image_url_rejects_noncanonical_ipv4_before_dns(monkeypatch, host):
+    monkeypatch.setattr(
+        server.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: pytest.fail("invalid numeric host must not reach DNS"),
+    )
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._validate_remote_image_url(f"http://{host}/image.png")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "image_url has an invalid IPv4 address"
+
+
 def test_load_remote_image_decodes_valid_image(monkeypatch):
     image = server.Image.new("RGB", (3, 2), (10, 20, 30))
     buf = server.io.BytesIO()
@@ -537,6 +622,156 @@ def test_load_remote_image_decodes_valid_image(monkeypatch):
     assert loaded.size == (3, 2)
 
 
+def test_load_remote_image_rejects_non_image_payload(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        server.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(server.socket.AF_INET, server.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+    monkeypatch.setattr(server.requests, "get", lambda *_args, **_kwargs: FakeResponse())
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._load_remote_image("https://example.com/not-an-image")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "image_url did not return an image"
+
+
+def test_load_remote_image_revalidates_redirect_target(monkeypatch):
+    class FakeRedirect:
+        status_code = 302
+        headers = {"location": "http://127.0.0.1/private.png"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        server.socket,
+        "getaddrinfo",
+        lambda host, *_args, **_kwargs: [
+            (server.socket.AF_INET, server.socket.SOCK_STREAM, 6, "", (
+                "93.184.216.34" if host == "example.com" else "127.0.0.1", 0
+            ))
+        ],
+    )
+    monkeypatch.setattr(server.requests, "get", lambda *_args, **_kwargs: FakeRedirect())
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._load_remote_image("https://example.com/image.png")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "image_url must resolve to a public address"
+
+
+def test_nsfw_route_turns_malformed_numeric_url_into_client_error(monkeypatch):
+    monkeypatch.setattr(
+        server.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: pytest.fail("invalid numeric host must not reach DNS"),
+    )
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        asyncio.run(server.nsfw_detect(server.NSFWRequest(image_url="http://0177.0.0.1/x")))
+
+    assert exc_info.value.status_code == 400
+
+
+def test_nsfw_classifier_uses_dedicated_cpu_device_under_cuda_pressure(monkeypatch):
+    calls = []
+
+    class FakeClassifier:
+        model = object()
+
+    monkeypatch.setattr(server, "nsfw_classifier", None)
+    monkeypatch.setattr(server, "nsfw_lock", None)
+    monkeypatch.setattr(server, "NSFW_DEVICE", "cpu")
+    monkeypatch.setattr(server.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(server.torch, "compile", lambda model, **_kwargs: model)
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(
+            pipeline=lambda task, **kwargs: (
+                calls.append((task, kwargs)) or FakeClassifier()
+            )
+        ),
+    )
+
+    classifier = server._load_nsfw_classifier()
+
+    assert isinstance(classifier, FakeClassifier)
+    assert calls == [("image-classification", {
+        "model": "Falconsai/nsfw_image_detection",
+        "device": "cpu",
+    })]
+    server._unload_nsfw_classifier()
+
+
+def test_caption_route_rejects_malformed_numeric_url_before_backend(monkeypatch):
+    monkeypatch.setattr(
+        server.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: pytest.fail("invalid numeric host must not reach DNS"),
+    )
+
+    class FailIfCalledClient:
+        async def post(self, *_args, **_kwargs):
+            pytest.fail("invalid image_url must not reach the caption backend")
+
+    monkeypatch.setattr(server, "tg_client", FailIfCalledClient())
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        asyncio.run(
+            server.caption_image(
+                server.CaptionRequest(image_url="http://127.000.000.001/x")
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "image_url has an invalid IPv4 address"
+
+
+@pytest.mark.parametrize("route, request_type", [
+    (server.nsfw_detect, server.NSFWRequest),
+    (server.aesthetic_score, server.AestheticRequest),
+])
+def test_image_analysis_routes_require_configured_secret(monkeypatch, route, request_type):
+    monkeypatch.setattr(server, "IMAGE_API_SECRETS", {"expected"})
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        asyncio.run(route(request_type(image_base64="unused"), secret="wrong"))
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "invalid secret"
+
+
+@pytest.mark.parametrize("route, request_type", [
+    (server.nsfw_detect, server.NSFWRequest),
+    (server.aesthetic_score, server.AestheticRequest),
+])
+def test_image_analysis_routes_reject_invalid_base64_images(route, request_type):
+    invalid_image = base64.b64encode(b"not an image").decode()
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        asyncio.run(route(request_type(image_base64=invalid_image)))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "image_base64 did not contain a valid image"
+
+
 def test_request_prompt_info_prefers_remembered_body_prompt_over_query():
     request = _fake_request(query_string=b"prompt=")
     server._remember_request_prompt(request, "body prompt with words")
@@ -561,6 +796,50 @@ def test_sanitize_query_redacts_prompt_and_secret_but_keeps_inference_params():
     assert "teleport=true" in sanitized
     assert "auto_lora=false" in sanitized
     assert "perf=true" in sanitized
+
+
+@pytest.mark.parametrize("save_path", [
+    "../static/_next/chunk.js",
+    "../../static/_next/chunk.js",
+    "x/../..//_next/chunk.js",
+    "folder\\..\\chunk.js",
+    "folder/\x00chunk.webp",
+])
+def test_save_path_rejects_traversal_and_control_input(save_path):
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._validated_save_path(save_path)
+
+    assert exc_info.value.status_code == 400
+
+
+def test_save_path_preserves_normal_relative_object_path():
+    assert server._validated_save_path("reliability/a friendly image.webp") == (
+        "reliability/a+friendly+image.webp"
+    )
+
+
+@pytest.mark.parametrize("prompt_len", [9, 4096])
+def test_create_and_upload_rejects_traversal_before_generation(prompt_len, monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "check_if_blob_exists",
+        lambda _path: pytest.fail("invalid save_path must fail before storage access"),
+    )
+    monkeypatch.setattr(
+        server.model_manager,
+        "reserve",
+        lambda _model: pytest.fail("invalid save_path must fail before GPU admission"),
+    )
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        asyncio.run(server.create_and_upload_image(
+            request=_fake_request(path="/create_and_upload_image"),
+            prompt="x" * prompt_len,
+            save_path="../static/_next/chunk.js",
+        ))
+
+    assert exc_info.value.status_code == 400
+    assert "without traversal" in exc_info.value.detail
 
 
 def test_error_event_includes_reproducible_inference_params(monkeypatch):
@@ -830,6 +1109,785 @@ def test_zimage_retry_rejects_cold_load_when_cuda_headroom_is_low(monkeypatch, p
     assert manager.unloads == ["zimage"]
 
 
+@pytest.mark.parametrize("prompt_len", [17, 44, 159, 165, 1024, 4096])
+def test_cold_image_batch_uses_native_fallback_under_memory_pressure(monkeypatch, prompt_len):
+    class FakeModelManager:
+        def is_loaded(self, _model_name):
+            return False
+
+    requests = [server.ZImageRequest(prompt="x" * prompt_len, quality_retry=False)]
+    calls = []
+    monkeypatch.setattr(server, "model_manager", FakeModelManager())
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_LOAD_MIN_FREE_MB", 9216)
+    monkeypatch.setattr(server, "_cuda_free_mb", lambda: 512)
+    monkeypatch.setattr(
+        server,
+        "_generate_image_native_sync",
+        lambda req: calls.append(req.prompt) or {"backend": "omniserve-native"},
+    )
+    monkeypatch.setattr(
+        server,
+        "_with_zimage_model_retry",
+        lambda *_args: pytest.fail("low-headroom cold load must not enter the BF16 loader"),
+    )
+
+    assert server._generate_image_batch_with_model_sync(requests) == [
+        {"backend": "omniserve-native"}
+    ]
+    assert [len(prompt) for prompt in calls] == [prompt_len]
+
+
+def test_warm_image_batch_keeps_local_pipeline_despite_low_global_memory(monkeypatch):
+    class FakeModelManager:
+        def is_loaded(self, _model_name):
+            return True
+
+    req = server.ZImageRequest(prompt="warm model", quality_retry=False)
+    monkeypatch.setattr(server, "model_manager", FakeModelManager())
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "_cuda_free_mb", lambda: 128)
+    monkeypatch.setattr(
+        server,
+        "_generate_image_native_sync",
+        lambda _req: pytest.fail("a warm local pipeline must not be rerouted"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_with_zimage_model_retry",
+        lambda operation, fn: {"operation": operation},
+    )
+
+    assert server._generate_image_batch_with_model_sync([req]) == {
+        "operation": "generate_image_batch"
+    }
+
+
+def test_native_failure_uses_local_cold_loader_only_with_explicit_opt_in(monkeypatch):
+    class FakeModelManager:
+        def is_loaded(self, _model_name):
+            return False
+
+    req = server.ZImageRequest(prompt="native unavailable", quality_retry=False)
+    monkeypatch.setattr(server, "model_manager", FakeModelManager())
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(server, "_cuda_free_mb", lambda: 12288)
+    monkeypatch.setattr(
+        server,
+        "_generate_image_native_sync",
+        lambda _req: (_ for _ in ()).throw(server.HTTPException(503, "native down")),
+    )
+    monkeypatch.setattr(
+        server,
+        "_with_zimage_model_retry",
+        lambda operation, _fn: [{"operation": operation, "backend": "local"}],
+    )
+
+    assert server._generate_image_batch_with_model_sync([req]) == [
+        {"operation": "generate_image_batch", "backend": "local"}
+    ]
+
+
+def test_native_admission_timeout_does_not_start_local_cold_loader(monkeypatch):
+    class FakeModelManager:
+        def is_loaded(self, _model_name):
+            return False
+
+    req = server.ZImageRequest(prompt="native capacity timeout", quality_retry=False)
+    native_error = server.HTTPException(503, "native fallback returned HTTP 503: admission timeout; retry")
+    monkeypatch.setattr(server, "model_manager", FakeModelManager())
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED", False)
+    monkeypatch.setattr(
+        server,
+        "_generate_image_native_sync",
+        lambda _req: (_ for _ in ()).throw(native_error),
+    )
+    monkeypatch.setattr(
+        server,
+        "_with_zimage_model_retry",
+        lambda *_args: pytest.fail("native capacity failure must not start the BF16 loader"),
+    )
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._generate_image_batch_with_model_sync([req])
+
+    assert exc_info.value is native_error
+
+
+def test_native_fallback_retries_transient_lazy_init_and_validates_image(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code, document):
+            self.status_code = status_code
+            self._document = document
+
+        def json(self):
+            return self._document
+
+    responses = iter([
+        FakeResponse(500, {"error": {"message": "image generation failed"}}),
+        FakeResponse(200, _native_image_document()),
+    ])
+    calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 1)
+    monkeypatch.setattr(server, "IMAGE_API_SECRET", "test-secret")
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    cleanup_calls = []
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: cleanup_calls.append(True))
+    monkeypatch.setattr(server, "_cuda_free_mb", lambda: 2048 + 1024 * len(cleanup_calls))
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(server.requests, "post", post)
+    payload = {
+        "prompt": "test",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "seed": 7,
+    }
+
+    result = server._call_native_zimage(payload)
+
+    assert result["width"] == 512
+    assert result["height"] == 512
+    assert result["format"] == "webp"
+    assert result["inference_time_ms"] == 123
+    assert len(calls) == 2
+    assert calls[0][0] == "http://native/v1/images/generations"
+    assert calls[0][1]["json"] == payload
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer test-secret"
+    assert calls[0][1]["headers"]["X-Omniserve-Tier"] == "paid"
+    assert cleanup_calls == [True]
+
+
+def test_native_fallback_preserves_bounded_backend_error_detail(monkeypatch):
+    class FakeResponse:
+        status_code = 500
+
+        @staticmethod
+        def json():
+            return {"error": {"message": "  VAE   decode failed " + "x" * 400}}
+
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server.requests, "post", lambda *_args, **_kwargs: FakeResponse())
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage({"width": 1024, "height": 1024})
+
+    detail = exc_info.value.detail
+    assert detail.startswith("native fallback returned HTTP 500: VAE decode failed ")
+    assert len(detail) <= len("native fallback returned HTTP 500: ") + 240
+
+
+@pytest.mark.parametrize("prompt_len", [13, 80, 1024, 4096])
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("tier", ["paid", "background"])
+def test_native_capacity_reclaims_cold_cache_before_waiting(monkeypatch, prompt_len, warm, tier):
+    events = []
+    calls = []
+    payload = {
+        "prompt": "x" * prompt_len, "width": 1152, "height": 832,
+        "steps": 9, "seed": 42, "teleport": True,
+        "lora_id": "pixel_art", "lora_scale": 0.75, "_omniserve_tier": tier,
+    }
+    document = _native_image_document(width=1152, height=832)
+
+    def post(_url, **kwargs):
+        events.append("request")
+        calls.append(kwargs["json"].copy())
+        if len(calls) <= 2:
+            return types.SimpleNamespace(status_code=503, json=lambda: {"error": {"message":
+                "image generation needs at least 4096 MB free GPU memory; managed GPU capacity is busy"}})
+        return types.SimpleNamespace(status_code=200, json=lambda: document)
+
+    monkeypatch.setattr(server.requests, "post", post)
+    monkeypatch.setattr(server.model_manager, "is_loaded", lambda _name: warm)
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: events.append("cleanup"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: events.append("sleep"))
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_HEADROOM_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_BACKGROUND_HEADROOM_GRACE_SECONDS", 5.0)
+
+    result = server._call_native_zimage(payload)
+
+    expected_events = ["request"] + ([] if warm else ["cleanup"])
+    assert events == expected_events + ["sleep", "request", "sleep", "request"]
+    assert calls == [{k: v for k, v in payload.items() if k != "_omniserve_tier"}] * 3
+    assert result["image_bytes"] == base64.b64decode(document["data"][0]["b64_json"])
+
+
+def test_native_fallback_waits_for_managed_gpu_headroom(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code, document):
+            self.status_code = status_code
+            self._document = document
+
+        def json(self):
+            return self._document
+
+    responses = iter([
+        FakeResponse(503, {"error": {"message": (
+            "image generation needs at least 4096 MB free GPU memory; "
+            "only 1209 MB is free"
+        )}}),
+        FakeResponse(503, {"error": {"message": (
+            "image generation needs at least 4096 MB free GPU memory; "
+            "only 2061 MB is free"
+        )}}),
+        FakeResponse(200, _native_image_document(width=1024, height=1024)),
+    ])
+    clock = iter([10.0, 12.0])
+    sleeps = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_HEADROOM_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_HEADROOM_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        server.requests,
+        "post",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    result = server._call_native_zimage({
+        "prompt": "capacity recovery probe",
+        "width": 1024,
+        "height": 1024,
+    })
+
+    assert result["backend"] == "omniserve-native"
+    assert sleeps == [2.0, 2.0]
+
+
+@pytest.mark.parametrize("prompt_len", [11, 186, 194, 4096])
+def test_background_native_capacity_is_retryable_backpressure(monkeypatch, prompt_len):
+    class FakeResponse:
+        status_code = 503
+
+        @staticmethod
+        def json():
+            return {"error": {"message": (
+                "image generation needs at least 4096 MB free GPU memory; "
+                "only 717 MB is free"
+            )}}
+
+    calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_BACKGROUND_HEADROOM_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        server.requests,
+        "post",
+        lambda url, **kwargs: calls.append((url, kwargs)) or FakeResponse(),
+    )
+    payload = {
+        "prompt": "x" * prompt_len,
+        "width": 1024,
+        "height": 1024,
+        "_omniserve_tier": "background",
+    }
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage(payload)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers == {"Retry-After": "15"}
+    assert calls[0][1]["headers"]["X-Omniserve-Tier"] == "background"
+    assert calls[0][1]["json"]["prompt"] == "x" * prompt_len
+    assert "_omniserve_tier" not in calls[0][1]["json"]
+
+
+@pytest.mark.parametrize("prompt_len", [12, 74, 166, 4096])
+def test_background_native_admission_timeout_is_retryable_backpressure(
+    monkeypatch, prompt_len
+):
+    class FakeResponse:
+        status_code = 503
+
+        @staticmethod
+        def json():
+            return {"error": {"message": "admission timeout; retry"}}
+
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 1)
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        server.requests,
+        "post",
+        lambda url, **kwargs: calls.append((url, kwargs)) or FakeResponse(),
+    )
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage({
+            "prompt": "x" * prompt_len,
+            "width": 1024,
+            "height": 1024,
+            "steps": 8,
+            "teleport": False,
+            "_omniserve_tier": "background",
+        })
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers == {"Retry-After": "15"}
+    assert len(calls) == 1
+    assert sleeps == []
+    assert calls[0][1]["headers"]["X-Omniserve-Tier"] == "background"
+    assert calls[0][1]["json"]["prompt"] == "x" * prompt_len
+    assert "_omniserve_tier" not in calls[0][1]["json"]
+
+
+def test_native_fallback_waits_through_repeated_opaque_generation_failures(monkeypatch):
+    class FakeResponse:
+        def __init__(self, status_code, document):
+            self.status_code = status_code
+            self._document = document
+
+        def json(self):
+            return self._document
+
+    responses = iter([
+        FakeResponse(500, {"error": {"message": "image generation failed"}}),
+        FakeResponse(500, {"error": {"message": "image generation failed"}}),
+        FakeResponse(200, _native_image_document(width=1024, height=1024)),
+    ])
+    clock = iter([10.0, 12.0])
+    sleeps = []
+    cleanup_calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_GENERATION_FAILURE_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_GENERATION_FAILURE_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: cleanup_calls.append(True))
+    monkeypatch.setattr(
+        server.requests,
+        "post",
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    result = server._call_native_zimage({
+        "prompt": "shared GPU recovery probe",
+        "width": 1024,
+        "height": 1024,
+    })
+
+    assert result["backend"] == "omniserve-native"
+    assert sleeps == [2.0, 2.0]
+    assert cleanup_calls == [True, True]
+
+
+@pytest.mark.parametrize("prompt_len", [5, 161, 1024, 4096])
+def test_fal_fallback_preserves_prompt_dimensions_steps_and_seed(monkeypatch, prompt_len):
+    seen = []
+    document = _native_image_document(width=1024, height=1024)
+    image_url = "data:image/webp;base64," + document["data"][0]["b64_json"]
+
+    def subscribe(endpoint, *, arguments, **kwargs):
+        seen.append((endpoint, arguments, kwargs))
+        return {"images": [{"url": image_url}], "seed": arguments["seed"]}
+
+    monkeypatch.setitem(sys.modules, "fal_client", types.SimpleNamespace(subscribe=subscribe))
+    prompt = "x" * prompt_len
+    result = server._call_fal_zimage({
+        "prompt": prompt,
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "seed": 12345,
+        "teleport": True,
+    })
+
+    endpoint, arguments, kwargs = seen[0]
+    assert endpoint == "fal-ai/z-image/turbo"
+    assert arguments["prompt"] == prompt
+    assert arguments["image_size"] == {"width": 1024, "height": 1024}
+    assert arguments["num_inference_steps"] == 8
+    assert arguments["seed"] == 12345
+    assert arguments["sync_mode"] is True
+    assert arguments["enable_prompt_expansion"] is False
+    assert kwargs["client_timeout"] == server.ZIMAGE_FAL_FALLBACK_TIMEOUT_SECONDS
+    assert result["backend"] == "fal"
+    assert result["teleport"]["method"] == "remote_full_generation"
+    assert result["teleport"]["cache_hit"] is False
+
+
+def test_fal_fallback_preserves_lora_url_and_effective_scale(monkeypatch):
+    seen = []
+    document = _native_image_document()
+    image_url = "data:image/webp;base64," + document["data"][0]["b64_json"]
+    monkeypatch.setitem(
+        sys.modules,
+        "fal_client",
+        types.SimpleNamespace(
+            subscribe=lambda endpoint, *, arguments, **_kwargs: (
+                seen.append((endpoint, arguments)) or {"images": [{"url": image_url}]}
+            )
+        ),
+    )
+    lora = types.SimpleNamespace(
+        id="pixel_art",
+        url="https://assets.example/pixel-art.safetensors",
+        scale=0.75,
+    )
+
+    result = server._call_fal_zimage({
+        "prompt": "pixel art castle",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "seed": 7,
+        "lora_scale": 0.6,
+    }, lora)
+
+    assert seen == [("fal-ai/z-image/turbo/lora", {
+        "prompt": "pixel art castle",
+        "image_size": {"width": 512, "height": 512},
+        "num_inference_steps": 8,
+        "seed": 7,
+        "sync_mode": True,
+        "num_images": 1,
+        "enable_safety_checker": False,
+        "output_format": "webp",
+        "enable_prompt_expansion": False,
+        "loras": [{
+            "path": "https://assets.example/pixel-art.safetensors",
+            "scale": 0.6,
+        }],
+    })]
+    assert result["model"] == "fal-ai/z-image/turbo/lora"
+
+
+def test_native_failure_opens_circuit_and_avoids_repeated_cuda_failures(monkeypatch):
+    native_calls = []
+    remote_calls = []
+    monkeypatch.setattr(server, "ZIMAGE_FAL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FAILURE_COOLDOWN_SECONDS", 60.0)
+    monkeypatch.setattr(
+        server,
+        "_call_native_zimage",
+        lambda payload: native_calls.append(payload) or (_ for _ in ()).throw(
+            server.HTTPException(503, "native CUDA exhausted")
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_call_fal_zimage",
+        lambda payload, lora=None: remote_calls.append((payload, lora)) or {"backend": "fal"},
+    )
+    monkeypatch.setattr(server, "_native_fallback_disabled_until", 0.0)
+    payload = {"prompt": "test", "width": 512, "height": 512, "steps": 8}
+
+    assert server._call_resilient_zimage(payload) == {"backend": "fal"}
+    assert server._call_resilient_zimage(payload) == {"backend": "fal"}
+
+    assert native_calls == [payload]
+    assert remote_calls == [(payload, None), (payload, None)]
+
+
+def test_native_connection_refusal_retries_then_uses_remote_fallback(monkeypatch):
+    native_calls = []
+    remote_calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://127.0.0.1:8791")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 1)
+    monkeypatch.setattr(server, "ZIMAGE_FAL_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FAILURE_COOLDOWN_SECONDS", 30.0)
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        server.requests,
+        "post",
+        lambda url, **_kwargs: native_calls.append(url) or (_ for _ in ()).throw(
+            server.requests.ConnectionError("[Errno 111] Connection refused")
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "_call_fal_zimage",
+        lambda payload, lora=None: remote_calls.append((payload, lora)) or {"backend": "fal"},
+    )
+    monkeypatch.setattr(server, "_native_fallback_disabled_until", 0.0)
+    payload = {"prompt": "test", "width": 512, "height": 512, "steps": 8}
+
+    assert server._call_resilient_zimage(payload) == {"backend": "fal"}
+    assert native_calls == [
+        "http://127.0.0.1:8791/v1/images/generations",
+        "http://127.0.0.1:8791/v1/images/generations",
+    ]
+    assert remote_calls == [(payload, None)]
+    assert server._native_fallback_disabled_until > 0.0
+
+
+def test_native_connection_refusal_waits_through_managed_restart(monkeypatch):
+    calls = []
+    sleeps = []
+    clock = iter([10.0, 11.0])
+    document = _native_image_document()
+
+    def post(*_args, **_kwargs):
+        calls.append(True)
+        if len(calls) < 3:
+            raise server.requests.ConnectionError("service restarting")
+        return types.SimpleNamespace(
+            status_code=200,
+            json=lambda: document,
+        )
+
+    monkeypatch.setattr(server.requests, "post", post)
+    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_GRACE_SECONDS", 150.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://127.0.0.1:8791")
+
+    result = server._call_native_zimage({"width": 512, "height": 512})
+
+    assert result["backend"] == "omniserve-native"
+    assert len(calls) == 3
+    assert sleeps == [2.0, 2.0]
+
+
+@pytest.mark.parametrize("prompt_len", [11, 114, 1024, 4096])
+def test_background_native_connection_refusal_is_immediate_backpressure(
+    monkeypatch, prompt_len
+):
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://127.0.0.1:8791")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 1)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_GRACE_SECONDS", 150.0)
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        server.requests,
+        "post",
+        lambda url, **kwargs: calls.append((url, kwargs)) or (_ for _ in ()).throw(
+            server.requests.ConnectionError("[Errno 111] Connection refused")
+        ),
+    )
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage({
+            "prompt": "x" * prompt_len,
+            "width": 1024,
+            "height": 1024,
+            "steps": 8,
+            "teleport": False,
+            "_omniserve_tier": "background",
+        })
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "native fallback is restarting"
+    assert exc_info.value.headers == {"Retry-After": "15"}
+    assert len(calls) == 1
+    assert calls[0][1]["headers"]["X-Omniserve-Tier"] == "background"
+    assert calls[0][1]["json"]["prompt"] == "x" * prompt_len
+    assert sleeps == []
+
+
+def test_remote_fallback_is_not_used_without_explicit_opt_in(monkeypatch):
+    monkeypatch.setattr(server, "ZIMAGE_FAL_FALLBACK_ENABLED", False)
+    monkeypatch.setattr(server, "_call_native_zimage", lambda _payload: {"backend": "native"})
+    monkeypatch.setattr(
+        server,
+        "_call_fal_zimage",
+        lambda *_args, **_kwargs: pytest.fail("metered fallback must remain opt-in"),
+    )
+
+    assert server._call_resilient_zimage({}) == {"backend": "native"}
+
+
+def test_native_payload_preserves_steps_teleport_and_auto_lora(monkeypatch):
+    fake_lora = types.SimpleNamespace(
+        id="pixel_art",
+        name="Pixel Art",
+        url="https://assets.example/TartarusPixel_pixelart_pixels.safetensors",
+        scale=0.75,
+    )
+    monkeypatch.setattr(server, "lora_engine", object())
+    monkeypatch.setattr(
+        server,
+        "_resolve_lora",
+        lambda req: (fake_lora, f"pixel art, {req.prompt}"),
+    )
+    req = server.ZImageRequest(
+        prompt="stone inventory icon",
+        width=530,
+        height=517,
+        seed=42,
+        num_inference_steps=8,
+        auto_lora=True,
+        teleport=True,
+    )
+
+    payload, selected = server._native_zimage_request(req, req.prompt)
+
+    assert selected is fake_lora
+    assert payload == {
+        "model": "zimage-turbo",
+        "prompt": "pixel art, stone inventory icon",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "guidance_scale": server.ZIMAGE_DEFAULT_GUIDANCE,
+        "seed": 42,
+        "teleport": False,
+        "response_format": "b64_json",
+        "_omniserve_tier": "paid",
+        "lora_id": "pixel_art",
+        "lora_filename": "TartarusPixel_pixelart_pixels.safetensors",
+        "lora_scale": 0.75,
+    }
+
+
+@pytest.mark.parametrize("prompt_len", [34, 41, 256, 1024, 4096])
+def test_native_payload_preserves_short_through_very_long_prompts(monkeypatch, prompt_len):
+    prompt = "x" * prompt_len
+    monkeypatch.setattr(server, "lora_engine", object())
+    monkeypatch.setattr(server, "_resolve_lora", lambda req: (None, req.prompt))
+
+    payload, selected = server._native_zimage_request(
+        server.ZImageRequest(prompt=prompt, auto_lora=True, teleport=True),
+        prompt,
+    )
+
+    assert selected is None
+    assert payload["prompt"] == prompt
+    assert len(payload["prompt"]) == prompt_len
+    assert payload["teleport"] is True
+    assert payload["_omniserve_tier"] == "paid"
+
+
+def test_native_payload_marks_low_priority_request_as_background(monkeypatch):
+    monkeypatch.setattr(server, "lora_engine", object())
+    monkeypatch.setattr(server, "_resolve_lora", lambda req: (None, req.prompt))
+
+    payload, selected = server._native_zimage_request(
+        server.ZImageRequest(prompt="gallery farm", low_priority=True),
+        "gallery farm",
+    )
+
+    assert selected is None
+    assert payload["_omniserve_tier"] == "background"
+
+
+def test_training_routes_require_image_api_secret_before_work(monkeypatch):
+    monkeypatch.setattr(server, "IMAGE_API_SECRETS", {"expected-secret"})
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server.start_training(
+            server.LoRATrainRequest(model="zimage", dataset_name="dataset"),
+            secret="wrong-secret",
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.parametrize("model", ["zimage", "chronos2"])
+def test_production_worker_rejects_local_gpu_training_as_nonretryable_conflict_without_starting_thread(
+    monkeypatch, model
+):
+    monkeypatch.setattr(server, "IMAGE_API_SECRETS", set())
+    monkeypatch.setattr(server, "LOCAL_GPU_TRAINING_ENABLED", False)
+    jobs_before = set(server.training_jobs)
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server.start_training(
+            server.LoRATrainRequest(model=model, dataset_name="dataset"),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "inference-only worker" in exc_info.value.detail
+    assert exc_info.value.headers is None
+    assert set(server.training_jobs) == jobs_before
+
+
+def test_local_training_wrapper_always_reclaims_cuda_cache(monkeypatch):
+    cleanup_calls = []
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: cleanup_calls.append(True))
+
+    def fail(_job_id, _req):
+        raise RuntimeError("training failed")
+
+    with pytest.raises(RuntimeError, match="training failed"):
+        server._run_local_training_serialized(
+            fail,
+            "job-id",
+            server.LoRATrainRequest(model="zimage", dataset_name="dataset"),
+        )
+
+    assert cleanup_calls == [True]
+
+
+@pytest.mark.parametrize("prompt_len", [21, 80, 1024, 4096])
+@pytest.mark.parametrize("auto_lora,teleport", [(False, False), (False, True), (True, False), (True, True)])
+def test_native_upload_perf_is_reporting_only(monkeypatch, prompt_len, auto_lora, teleport):
+    seen_payloads = []
+    native_document = _native_image_document(
+        teleport={"method": "exact_prompt_latent_replay", "cache_hit": True}
+    )
+    encoded = native_document["data"][0]["b64_json"]
+    image_bytes = base64.b64decode(encoded)
+    monkeypatch.setattr(server, "lora_engine", object())
+    monkeypatch.setattr(server, "_resolve_lora", lambda req: (None, req.prompt))
+    monkeypatch.setattr(server, "check_if_blob_exists", lambda _path: False)
+    monkeypatch.setattr(
+        server,
+        "_call_native_zimage",
+        lambda payload: seen_payloads.append(dict(payload)) or {
+            "encoded": encoded,
+            "image_bytes": image_bytes,
+            "format": "webp",
+            "width": 512,
+            "height": 512,
+            "inference_time_ms": 123,
+            "teleport": {"method": "exact_prompt_latent_replay", "cache_hit": True},
+            "model": "z_image_turbo-Q4_K",
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "upload_bytes",
+        lambda path, data, content_type: f"https://images/{path}?{content_type}&{len(data)}",
+    )
+
+    result = server._generate_and_upload_native_sync(
+        "x" * prompt_len,
+        512,
+        512,
+        "tests/native.webp",
+        auto_lora,
+        None,
+        True,
+        8,
+        teleport=teleport,
+    )
+
+    without_perf = server._generate_and_upload_native_sync(
+        "x" * prompt_len, 512, 512, "tests/native.webp", auto_lora, None,
+        False, 8, teleport=teleport,
+    )
+    assert seen_payloads[0] == seen_payloads[1]
+    assert without_perf == {key: value for key, value in result.items() if key != "perf"}
+    assert "perf" not in seen_payloads[0]
+    assert result["perf"]["backend"] == "omniserve-native"
+    assert result["perf"]["inference_time_ms"] == 123
+    if teleport:
+        assert result["perf"]["teleport_cache_hit"] is True
+        assert result["teleport"]["method"] == "exact_prompt_latent_replay"
+    else:
+        assert "teleport" not in result
+
+
 @pytest.mark.parametrize("prompt_len", [53, 66, 91, 97, 98, 104, 135, 136, 4096])
 def test_zimage_retry_reclaims_stale_cuda_cache_before_cold_load(monkeypatch, prompt_len):
     class FakeModelManager:
@@ -922,6 +1980,54 @@ def test_zimage_oom_recovery_waits_for_headroom_before_retry(monkeypatch):
     assert server._with_zimage_model_retry("create_and_upload_image_teleport", fn) == {"ok": True}
     assert len(calls) == 2
     assert recoveries == [True]
+
+
+def test_zimage_batch_oom_uses_native_fallback_without_reloading_local_model(monkeypatch):
+    class FakeModelManager:
+        def __init__(self):
+            self.loaded = True
+            self.use_calls = 0
+
+        def is_loaded(self, _model_name):
+            return self.loaded
+
+        @contextlib.contextmanager
+        def use(self, _model_name):
+            self.use_calls += 1
+            yield
+
+    class FakeCudaOOM(RuntimeError):
+        pass
+
+    manager = FakeModelManager()
+    recoveries = []
+    request = server.ZImageRequest(prompt="fallback after OOM")
+    monkeypatch.setattr(server, "model_manager", manager)
+    monkeypatch.setattr(server, "zimage_pipeline", (object(), None))
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native.test")
+    monkeypatch.setattr(server, "_is_cuda_oom", lambda exc: isinstance(exc, FakeCudaOOM))
+    monkeypatch.setattr(
+        server,
+        "_generate_image_batch_sync",
+        lambda _reqs: (_ for _ in ()).throw(FakeCudaOOM("CUDA out of memory")),
+    )
+
+    def recover():
+        recoveries.append(True)
+        manager.loaded = False
+
+    monkeypatch.setattr(server, "_recover_from_cuda_oom", recover)
+    monkeypatch.setattr(
+        server,
+        "_generate_image_native_sync",
+        lambda req: {"backend": "native", "prompt": req.prompt},
+    )
+
+    assert server._generate_image_batch_with_model_sync([request]) == [
+        {"backend": "native", "prompt": "fallback after OOM"}
+    ]
+    assert recoveries == [True]
+    assert manager.use_calls == 1
 
 
 def test_zimage_oom_recovery_detaches_tensor_holding_traceback_before_cleanup(monkeypatch):
@@ -1309,3 +2415,153 @@ def test_no_offload_requests_direct_device_map(monkeypatch):
     assert server._zimage_load_strategy == "direct-device-map"
 def test_auto_offload_threshold_cannot_drop_below_full_cuda_safety_floor():
     assert server.ZIMAGE_NO_OFFLOAD_MIN_FREE_MB >= 24576
+
+
+@pytest.mark.parametrize("prompt_len", [22, 80, 1024, 4096])
+@pytest.mark.parametrize("upload", [False, True])
+@pytest.mark.parametrize("status,detail", [
+    (503, "native fallback returned HTTP 503: image generation needs at least 4096 MB free GPU memory; managed GPU capacity is busy"),
+    (503, "native fallback returned HTTP 500: image generation failed"),
+    (503, "native fallback response failed validation (ConnectionError)"),
+    (429, "native fallback is restarting"),
+    (502, "native fallback returned HTTP 400: invalid dimensions"),
+    (502, "native fallback returned HTTP 400: invalid floral prompt"),
+    (502, "native fallback returned HTTP 403: lora access denied"),
+])
+def test_native_infrastructure_failure_does_not_remove_lora(
+    monkeypatch, prompt_len, upload, status, detail
+):
+    prompt = "x" * prompt_len
+    lora = types.SimpleNamespace(id="pixel_art", name="Pixel Art")
+    payload = {"prompt": prompt, "lora_id": lora.id, "lora_scale": 0.75}
+    failure = server.HTTPException(status, detail, headers={"Retry-After": "5"})
+    calls = []
+
+    def fail(request, selected=None):
+        calls.append((dict(request), selected))
+        raise failure
+
+    monkeypatch.setattr(server, "_native_zimage_request", lambda *_args: (payload, lora))
+    monkeypatch.setattr(server, "_call_resilient_zimage", fail)
+    monkeypatch.setattr(server, "check_if_blob_exists", lambda _path: False)
+    monkeypatch.setattr(server, "upload_bytes", lambda *_args, **_kwargs: pytest.fail("no image to upload"))
+    with pytest.raises(server.HTTPException) as caught:
+        if upload:
+            server._generate_and_upload_native_sync(
+                prompt, 1024, 1024, "test.webp", True, None, False, 9,
+                teleport=True,
+            )
+        else:
+            server._generate_image_native_once_sync(server.ZImageRequest(prompt=prompt), prompt)
+
+    assert caught.value is failure
+    assert calls == [(payload, lora)]
+    assert payload["lora_id"] == "pixel_art"
+    assert payload["prompt"] == prompt
+
+
+@pytest.mark.parametrize("upload", [False, True])
+def test_native_explicit_invalid_lora_can_still_fall_back(monkeypatch, upload):
+    lora = types.SimpleNamespace(id="missing", name="Missing")
+    payload = {"prompt": "pixel art fox", "lora_id": lora.id, "lora_filename": "missing.safetensors", "lora_scale": 1}
+    calls = []
+
+    def generate(request, selected=None):
+        calls.append(dict(request))
+        if selected:
+            raise server.HTTPException(502, "native fallback returned HTTP 400: unknown lora_id")
+        return {"encoded": "image", "image_bytes": b"image", "format": "webp", "width": 1024,
+                "height": 1024, "inference_time_ms": 1, "teleport": None, "model": "zimage"}
+
+    monkeypatch.setattr(server, "_native_zimage_request", lambda *_args: (payload, lora))
+    monkeypatch.setattr(server, "_call_resilient_zimage", generate)
+    monkeypatch.setattr(server, "check_if_blob_exists", lambda _path: False)
+    monkeypatch.setattr(server, "upload_bytes", lambda *_args, **_kwargs: "https://example.com/test.webp")
+    if upload:
+        server._generate_and_upload_native_sync("pixel art fox", 1024, 1024, "test.webp", True, None, False, 9, teleport=True)
+    else:
+        server._generate_image_native_once_sync(server.ZImageRequest(prompt="pixel art fox"), "pixel art fox")
+    assert len(calls) == 2
+    assert calls[0]["lora_id"] == "missing"
+    assert not any(key.startswith("lora_") for key in calls[1])
+
+
+@pytest.mark.parametrize("first_failure,last_failure", [
+    ("headroom", "generation"), ("headroom", "restart"),
+    ("generation", "headroom"), ("generation", "restart"),
+    ("restart", "headroom"), ("restart", "generation"),
+])
+@pytest.mark.parametrize("started", [0.0, 10.0])
+def test_native_recovery_types_share_one_grace_origin(
+    monkeypatch, first_failure, last_failure, started
+):
+    clock = iter([started, started + 6.0])
+    calls = []
+    sleeps = []
+
+    def post(*_args, **_kwargs):
+        calls.append(True)
+        failure = first_failure if len(calls) == 1 else last_failure
+        if failure == "headroom":
+            return types.SimpleNamespace(status_code=503, json=lambda: {"error": {"message":
+                "image generation needs at least 4096 MB free GPU memory; managed GPU capacity is busy"}})
+        if failure == "restart":
+            raise server.requests.ConnectionError("restarting")
+        return types.SimpleNamespace(status_code=500, json=lambda: {"error": {"message": "image generation failed"}})
+
+    monkeypatch.setattr(server.requests, "post", post)
+    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_HEADROOM_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_GENERATION_FAILURE_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_HEADROOM_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_GENERATION_FAILURE_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: None)
+    with pytest.raises(server.HTTPException) as caught:
+        server._call_native_zimage({"prompt": "a small woodland cabin", "width": 1024, "height": 1024})
+    assert caught.value.status_code == 503
+    assert len(calls) == 2
+    assert sleeps == [2.0]
+
+
+@pytest.mark.parametrize("prompt_len", [21, 80, 1024, 4096])
+@pytest.mark.parametrize("tier", ["paid", "background"])
+@pytest.mark.parametrize("failure_status,message", [
+    (503, "image generation needs at least 4096 MB free GPU memory; managed GPU capacity is busy"),
+    (500, "image generation failed"),
+])
+def test_exhausted_capacity_grace_does_not_start_generic_retry(
+    monkeypatch, prompt_len, tier, failure_status, message
+):
+    clock = [0.0]
+    calls = []
+    payload = {"prompt": "x" * prompt_len, "width": 1024, "height": 1024,
+               "steps": 9, "seed": 42, "teleport": True,
+               "lora_id": "pixel_art", "lora_scale": 0.75, "_omniserve_tier": tier}
+
+    def post(_url, **kwargs):
+        calls.append(dict(kwargs["json"]))
+        return types.SimpleNamespace(status_code=failure_status,
+                                     json=lambda: {"error": {"message": message}})
+
+    monkeypatch.setattr(server.requests, "post", post)
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(server.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: None)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 3)
+    for name in ("HEADROOM", "BACKGROUND_HEADROOM", "GENERATION_FAILURE"):
+        monkeypatch.setattr(server, f"ZIMAGE_NATIVE_{name}_GRACE_SECONDS", 2.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_HEADROOM_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_GENERATION_FAILURE_POLL_SECONDS", 2.0)
+
+    with pytest.raises(server.HTTPException) as caught:
+        server._call_native_zimage(payload)
+
+    assert caught.value.status_code == (429 if tier == "background" else 503)
+    assert caught.value.headers == {"Retry-After": "15" if tier == "background" else "5"}
+    assert clock[0] == 2.0
+    expected = {k: v for k, v in payload.items() if k != "_omniserve_tier"}
+    assert calls == [expected, expected]

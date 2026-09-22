@@ -1,8 +1,10 @@
 package main
 
 import (
+	"hash/fnv"
 	"log"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,9 +24,124 @@ type PromptSearchEngine struct {
 	ready     bool
 	indexing  bool
 	indexedAt time.Time
+	cacheOnce sync.Once
+	cache     *searchCache
+	searchFn  func(query string, topK int) ([]SearchResult, error) // test hook
+}
+
+const (
+	searchCacheTTL = 6 * time.Hour
+	searchCacheMax = 20000
+)
+
+type searchCacheEntry struct {
+	results []SearchResult
+	expires time.Time
+}
+
+type searchFlight struct {
+	done    chan struct{}
+	results []SearchResult
+	err     error
+}
+
+// searchCache is a TTL result cache with a soft entry cap and singleflight
+// dedup for concurrent identical queries.
+type searchCache struct {
+	mu      sync.Mutex
+	entries map[string]*searchCacheEntry
+	flight  map[string]*searchFlight
+}
+
+func newSearchCache() *searchCache {
+	return &searchCache{
+		entries: make(map[string]*searchCacheEntry),
+		flight:  make(map[string]*searchFlight),
+	}
+}
+
+func searchCacheKey(query string, topK int) string {
+	if len(query) > 128 {
+		h := fnv.New64a()
+		h.Write([]byte(query))
+		return strconv.Itoa(topK) + ":h:" + strconv.FormatUint(h.Sum64(), 16)
+	}
+	return strconv.Itoa(topK) + ":" + query
+}
+
+func (c *searchCache) get(key string) ([]SearchResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(e.expires) {
+		delete(c.entries, key)
+		return nil, false
+	}
+	return e.results, true
+}
+
+func (c *searchCache) set(key string, results []SearchResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= searchCacheMax {
+		now := time.Now()
+		for k, e := range c.entries {
+			if now.After(e.expires) {
+				delete(c.entries, k)
+			}
+		}
+		for k := range c.entries {
+			if len(c.entries) < searchCacheMax {
+				break
+			}
+			delete(c.entries, k)
+		}
+	}
+	c.entries[key] = &searchCacheEntry{results: results, expires: time.Now().Add(searchCacheTTL)}
+}
+
+func (c *searchCache) flush() {
+	c.mu.Lock()
+	c.entries = make(map[string]*searchCacheEntry)
+	c.mu.Unlock()
+}
+
+func (c *searchCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
+
+func (ps *PromptSearchEngine) getCache() *searchCache {
+	ps.cacheOnce.Do(func() { ps.cache = newSearchCache() })
+	return ps.cache
 }
 
 var promptSearch *PromptSearchEngine
+
+func newPromptSearchIndex(model *gobed.EmbeddingModel) *gobed.SearchEngine {
+	if gobed.IsCUDAAvailable() {
+		return gobed.NewAutoSearchEngine(model)
+	}
+	// gobed's automatic CAGRA preset selects 1,024 IVF centroids even in a
+	// CPU-only build. Its k-means++ initializer is quadratic in the number of
+	// centroids and left the production index unavailable for tens of minutes.
+	// A compact CPU IVF keeps both startup training and per-query candidate
+	// counts bounded for the current ~814k-document catalog.
+	return gobed.NewSearchEngineWithConfig(model, gobed.SearchConfig{
+		AutoMode:           false,
+		MaxExactSearchSize: 1500,
+		NumClusters:        64,
+		SearchClusters:     2,
+		UseCompression:     false,
+		UseGraphRouting:    false,
+		CandidatesToRerank: 256,
+		MaxConcurrency:     runtime.NumCPU(),
+	})
+}
 
 func initPromptSearch() {
 	promptSearch = &PromptSearchEngine{}
@@ -32,7 +149,7 @@ func initPromptSearch() {
 }
 
 // loadAndIndex streams every generated_images row into gobed at startup.
-// Re-runs periodically to pick up newly inserted rows (cheap for DBs < 1M).
+// Re-run on demand to reconcile prompts skipped by best-effort live indexing.
 func (ps *PromptSearchEngine) loadAndIndex() {
 	ps.mu.Lock()
 	ps.indexing = true
@@ -52,15 +169,18 @@ func (ps *PromptSearchEngine) loadAndIndex() {
 		log.Printf("[search] Failed to load gobed model: %v", err)
 		return
 	}
-	ps.model = model
 	log.Printf("[search] Model loaded in %v", time.Since(t0))
 
-	config := gobed.AsyncSearchConfig()
-	config.MaxExactSearchSize = 500000
-	config.AsyncWorkers = runtime.NumCPU() * 2
-	config.AsyncQueueSize = 100000
-	ps.engine = gobed.NewSearchEngineWithConfig(model, config)
-
+	// Auto-select the fastest backend for the available hardware: GPU CAGRA +
+	// int8 when CUDA is present (build with the `gpu` tag), otherwise an
+	// optimized CPU ANN (IVF-HNSW-PQ) index. This replaces the old config that
+	// forced MaxExactSearchSize=500000 — i.e. a brute-force exact scan over every
+	// vector on every query, which does not scale past a few thousand prompts.
+	if gobed.IsCUDAAvailable() {
+		log.Printf("[search] CUDA available — using GPU-accelerated search index")
+	} else {
+		log.Printf("[search] No CUDA — using optimized CPU ANN search index")
+	}
 	// Stream rows from the DB. Skip NSFW by default so the public index stays clean.
 	var (
 		imageIDs []string
@@ -79,41 +199,48 @@ func (ps *PromptSearchEngine) loadAndIndex() {
 
 	if len(prompts) == 0 {
 		ps.mu.Lock()
+		ps.model = model
+		ps.engine = newPromptSearchIndex(model)
+		ps.prompts = nil
+		ps.imageIDs = nil
 		ps.ready = true
 		ps.indexedAt = time.Now()
 		ps.mu.Unlock()
+		ps.getCache().flush()
 		return
 	}
 
-	// Index in batches
-	batchSize := 10000
-	log.Printf("[search] Indexing %d prompts (batch_size=%d)...", len(prompts), batchSize)
+	// The first IndexBatchWithIDs call determines whether gobed constructs a flat
+	// or trained IVF index. Pass the full catalog on that first call: seeding it
+	// with a 10k chunk makes the GPU auto-config choose a flat index, which cannot
+	// grow past its 100k threshold. The implementation parallelizes embeddings
+	// internally and trains on at most 100k vectors.
+	log.Printf("[search] Indexing %d prompts as one catalog-sized build...", len(prompts))
 	indexStart := time.Now()
-
-	for i := 0; i < len(prompts); i += batchSize {
-		end := i + batchSize
-		if end > len(prompts) {
-			end = len(prompts)
-		}
-		batch := prompts[i:end]
-		ids := make([]int, len(batch))
-		for j := range batch {
-			ids[j] = i + j
-		}
-		ps.engine.IndexBatchWithIDs(ids, batch)
-
-		if (i/batchSize)%10 == 0 {
-			log.Printf("[search] Indexed %d/%d prompts (%.1f%%)",
-				end, len(prompts), float64(end)/float64(len(prompts))*100)
-		}
+	engine := newPromptSearchIndex(model)
+	ids := make([]int, len(prompts))
+	for i := range ids {
+		ids[i] = i
+	}
+	if err := engine.IndexBatchWithIDs(ids, prompts); err != nil {
+		_ = engine.Close()
+		log.Printf("[search] Failed to build complete %d-prompt index: %v", len(prompts), err)
+		return
 	}
 
 	ps.mu.Lock()
+	oldEngine := ps.engine
+	ps.model = model
+	ps.engine = engine
 	ps.prompts = prompts
 	ps.imageIDs = imageIDs
 	ps.ready = true
 	ps.indexedAt = time.Now()
 	ps.mu.Unlock()
+	if oldEngine != nil {
+		_ = oldEngine.Close()
+	}
+	ps.getCache().flush()
 
 	log.Printf("[search] Index built: %d prompts in %v (total %v)",
 		len(prompts), time.Since(indexStart), time.Since(t0))
@@ -139,6 +266,27 @@ func (ps *PromptSearchEngine) IndexIncremental(imageID, prompt string) {
 	ps.imageIDs = append(ps.imageIDs, imageID)
 }
 
+// TryIndexIncremental updates the live index only when doing so cannot queue
+// behind active searches. The database remains the source of truth, and the
+// next startup/admin rebuild reconciles any prompt skipped under load.
+func (ps *PromptSearchEngine) TryIndexIncremental(imageID, prompt string) bool {
+	if ps == nil || prompt == "" || !ps.mu.TryLock() {
+		return false
+	}
+	defer ps.mu.Unlock()
+	if ps.engine == nil || !ps.ready {
+		return false
+	}
+	intID := len(ps.prompts)
+	if err := ps.engine.IndexWithID(intID, prompt); err != nil {
+		log.Printf("[search] TryIndexIncremental failed: %v", err)
+		return false
+	}
+	ps.prompts = append(ps.prompts, prompt)
+	ps.imageIDs = append(ps.imageIDs, imageID)
+	return true
+}
+
 // SearchResult is a single semantic match with the mapped image UUID.
 type SearchResult struct {
 	ImageID    string  `json:"image_id"`
@@ -147,7 +295,62 @@ type SearchResult struct {
 }
 
 // Search returns topK semantic matches for query, as (imageID, prompt, sim).
+// Results are cached for searchCacheTTL and concurrent identical queries are
+// deduped so only one embedding forward runs per unique (query, topK).
 func (ps *PromptSearchEngine) Search(query string, topK int) ([]SearchResult, error) {
+	if !ps.IsReady() {
+		return nil, nil
+	}
+
+	key := searchCacheKey(query, topK)
+	cache := ps.getCache()
+	t0 := time.Now()
+
+	if results, ok := cache.get(key); ok {
+		log.Printf("[search] query=%q top_k=%d results=%d time=%v cache_hit=true", query, topK, len(results), time.Since(t0))
+		return results, nil
+	}
+
+	cache.mu.Lock()
+	if f, ok := cache.flight[key]; ok {
+		cache.mu.Unlock()
+		<-f.done
+		if f.err != nil {
+			return nil, f.err
+		}
+		log.Printf("[search] query=%q top_k=%d results=%d time=%v cache_hit=true", query, topK, len(f.results), time.Since(t0))
+		return f.results, nil
+	}
+	f := &searchFlight{done: make(chan struct{})}
+	cache.flight[key] = f
+	cache.mu.Unlock()
+
+	results, err := ps.searchFunc()(query, topK)
+
+	cache.mu.Lock()
+	f.results, f.err = results, err
+	delete(cache.flight, key)
+	cache.mu.Unlock()
+	close(f.done)
+
+	if err != nil {
+		return nil, err
+	}
+	if ps.IsReady() {
+		cache.set(key, results)
+	}
+	log.Printf("[search] query=%q top_k=%d results=%d time=%v cache_hit=false", query, topK, len(results), time.Since(t0))
+	return results, nil
+}
+
+func (ps *PromptSearchEngine) searchFunc() func(string, int) ([]SearchResult, error) {
+	if ps.searchFn != nil {
+		return ps.searchFn
+	}
+	return ps.doSearch
+}
+
+func (ps *PromptSearchEngine) doSearch(query string, topK int) ([]SearchResult, error) {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
 
@@ -155,7 +358,6 @@ func (ps *PromptSearchEngine) Search(query string, topK int) ([]SearchResult, er
 		return nil, nil
 	}
 
-	t0 := time.Now()
 	results, err := ps.engine.Search(query, topK)
 	if err != nil {
 		return nil, err
@@ -172,8 +374,6 @@ func (ps *PromptSearchEngine) Search(query string, topK int) ([]SearchResult, er
 			Similarity: r.Similarity,
 		})
 	}
-
-	log.Printf("[search] query=%q top_k=%d results=%d time=%v", query, topK, len(out), time.Since(t0))
 	return out, nil
 }
 

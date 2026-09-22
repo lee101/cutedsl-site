@@ -3,6 +3,7 @@ const { defineConfig, devices } = require('@playwright/test');
 const port = process.env.PLAYWRIGHT_PORT || '3217';
 const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEBSERVER === '1';
+const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 
 module.exports = defineConfig({
   testDir: './tests/e2e',
@@ -15,6 +16,7 @@ module.exports = defineConfig({
   use: {
     baseURL,
     trace: 'retain-on-failure',
+    ...(chromiumExecutable ? { launchOptions: { executablePath: chromiumExecutable } } : {}),
   },
   projects: [
     {

@@ -166,3 +166,24 @@ test('homepage captures email before Stripe checkout and links a Solana wallet f
   await expect(page.getByPlaceholder('0.1')).toBeVisible();
   await expect(page.getByText(/Wallet connected to your email account|Wallet connected/)).toBeVisible();
 });
+
+test('conversion studio keeps signup and embedded Stripe checkout in one flow', async ({ page }) => {
+  await installHomepageBillingMocks(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: /One prompt/i })).toBeVisible();
+  await page.getByRole('tab', { name: 'Video' }).click();
+  await expect(page.getByText('Add still image')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Start creating' }).click();
+  await page.getByTestId('conversion-email').fill(TEST_EMAIL);
+  await page.getByTestId('conversion-password').fill(TEST_PASSWORD);
+  await page.getByTestId('conversion-continue').click();
+
+  await expect(page.getByText(`Signed in as ${TEST_EMAIL}`)).toBeVisible();
+  await page.getByTestId('conversion-pay').click();
+  await expect(page.getByText(`Secure Stripe checkout for ${TEST_EMAIL}`)).toBeVisible();
+  await expect(page.getByTestId('mock-home-stripe-checkout')).toBeVisible();
+  await expect(page.getByTestId('conversion-stripe-checkout')).toBeVisible();
+});

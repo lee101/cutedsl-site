@@ -3,8 +3,8 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { ArrowLeft, ArrowRight, Copy, Check, Lock, Key, BookOpen } from 'lucide-react';
-import { useAuth, replaceApiKey } from '@/hooks/use-auth';
+import { ArrowLeft, ArrowRight, Copy, Check, Lock, Key, BookOpen, Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { useAuth, maskApiKey, replaceApiKey } from '@/hooks/use-auth';
 import { MODELS, CATEGORY_LABELS, CATEGORY_COLORS } from '@/lib/models';
 import { CodeBlock } from '@/lib/code-block';
 import { staticAssetPath } from '@/lib/static-assets';
@@ -12,8 +12,9 @@ import { staticAssetPath } from '@/lib/static-assets';
 const LOGO_IMG = staticAssetPath('/images/logo.webp');
 
 export default function DocsPage() {
-  const { apiKey, isLoggedIn } = useAuth();
+  const { apiKey, walletAddress, isLoggedIn } = useAuth();
   const [copied, setCopied] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
 
   const copyKey = () => {
     if (!apiKey) return;
@@ -54,15 +55,23 @@ export default function DocsPage() {
             {isLoggedIn ? (
               <div>
                 <p className="text-slate-600 mb-3">Your API key:</p>
-                <div className="flex items-center gap-3 bg-slate-50 rounded-xl px-4 py-3 font-mono text-sm border border-slate-200">
-                  <span className="text-slate-500">Authorization: Bearer</span>
-                  <span className="text-pink-600 font-bold">{apiKey}</span>
-                  <button onClick={copyKey} className="ml-auto text-slate-400 hover:text-pink-500 transition-colors">
+                <div className="flex items-center gap-2 bg-slate-50 rounded-xl px-4 py-3 font-mono text-sm border border-slate-200">
+                  <span className="text-slate-500 shrink-0">Authorization: Bearer</span>
+                  <span className="text-pink-600 font-bold truncate">{showApiKey && apiKey ? apiKey : maskApiKey(apiKey)}</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="ml-auto text-slate-400 hover:text-pink-500 transition-colors"
+                    aria-label={showApiKey ? 'Hide API key' : 'Show API key'}
+                  >
+                    {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                  <button type="button" onClick={copyKey} className="text-slate-400 hover:text-pink-500 transition-colors" aria-label="Copy API key">
                     {copied ? <Check size={16} className="text-green-500" /> : <Copy size={16} />}
                   </button>
                 </div>
-                <p className="text-xs text-green-600 mt-2 flex items-center gap-1">
-                  <Check size={12} /> API key auto-populated in all code examples below
+                <p className="text-xs text-slate-500 mt-2">
+                  Reveal your key to auto-populate code examples below. Copy always uses the full key.
                 </p>
               </div>
             ) : (
@@ -81,6 +90,43 @@ export default function DocsPage() {
           </div>
         </section>
 
+        {/* Rotating API keys */}
+        <section className="mb-16">
+          <h2 className="text-2xl font-bold text-slate-800 mb-4 flex items-center gap-2">
+            <RefreshCw size={22} className="text-cyan-500" /> Rotating Your API Key
+          </h2>
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+            <p className="text-slate-600 mb-4">
+              If your key is leaked, rotate it to get a fresh one. Authenticate with your <span className="font-bold">current</span> API
+              key plus your wallet address — the old key stops working the instant the new one is issued.
+            </p>
+            <CodeBlock language="bash" code={replaceApiKey(`curl -X POST https://cutedsl.cc/api/auth/rotate-api-key \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "wallet_address": "${walletAddress || 'YOUR_WALLET_ADDRESS'}",
+    "api_key": "YOUR_API_KEY"
+  }'`, apiKey, showApiKey)} />
+            <p className="text-slate-600 mt-4 mb-3">The response contains your new key — store it securely:</p>
+            <CodeBlock language="json" code={`{
+  "success": true,
+  "api_key": "cutedsl_xxxxxxxxxxxxxxxxxxxxxxxx",  // your new key
+  "user": { ... }
+}`} />
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <span className="font-bold text-red-700">403</span> <span className="text-red-600">— api_key does not match the wallet</span>
+              </div>
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <span className="font-bold text-red-700">404</span> <span className="text-red-600">— wallet not found</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-4">
+              Your <span className="font-bold">wallet address is public</span> and safe to share; your <span className="font-bold">API key is secret</span>.
+              You can also rotate with one click on the <Link href="/account" className="text-pink-500 hover:text-pink-700 underline">Account</Link> page.
+            </p>
+          </div>
+        </section>
+
         {/* Base Endpoint */}
         <section className="mb-16">
           <h2 className="text-2xl font-bold text-slate-800 mb-4 flex items-center gap-2">
@@ -96,7 +142,7 @@ export default function DocsPage() {
   -d '{
     "service": "<service_name>",
     ...service-specific parameters
-  }'`, apiKey)} />
+  }'`, apiKey, showApiKey)} />
           </div>
         </section>
 
@@ -119,6 +165,42 @@ export default function DocsPage() {
                 <span className="font-bold text-orange-700">402</span> <span className="text-orange-600">— Insufficient $CUTEDSL credits</span>
               </div>
             </div>
+          </div>
+        </section>
+
+        {/* File Uploads */}
+        <section className="mb-16">
+          <h2 className="text-2xl font-bold text-slate-800 mb-4">File Uploads</h2>
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+            <p className="text-slate-600 mb-4">
+              Services take <span className="font-bold">public URLs</span> for audio, image and video inputs. Ask for a
+              presigned URL and <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">PUT</code> the bytes
+              straight to CuteDSL object storage — nothing large passes through the API.
+            </p>
+            <CodeBlock language="bash" code={replaceApiKey(`# 1. Presign (expires in 15 minutes)
+curl "https://cutedsl.cc/api/uploads/presign?filename=speech.wav&content_type=audio/wav&dataset=stt" \\
+  -H "Authorization: Bearer YOUR_API_KEY"
+
+# 2. Upload the bytes directly
+curl -X PUT "PRESIGNED_UPLOAD_URL" -H "Content-Type: audio/wav" --data-binary @speech.wav
+
+# 3. Use the returned public_url with any service
+curl -X POST https://cutedsl.cc/api/service \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{"service": "stt", "audio_url": "PUBLIC_URL"}'`, apiKey, showApiKey)} />
+            <p className="text-slate-600 mt-4 mb-3">Presign response:</p>
+            <CodeBlock language="json" code={`{
+  "upload_url": "https://<account>.r2.cloudflarestorage.com/...",
+  "public_url": "https://appstatic.app.nz/cutedsl/uploads/<user>/<dataset>/<id>-speech.wav",
+  "object_key": "cutedsl/uploads/<user>/<dataset>/<id>-speech.wav",
+  "expires_in": 900
+}`} />
+            <p className="text-xs text-slate-500 mt-4">
+              Browsers can do the same PUT from the page — the{' '}
+              <Link href="/docs/stt" className="text-pink-500 hover:text-pink-700 underline">Speech-to-Text</Link>{' '}
+              playground records from your mic, uploads, and transcribes without leaving the docs.
+            </p>
           </div>
         </section>
 

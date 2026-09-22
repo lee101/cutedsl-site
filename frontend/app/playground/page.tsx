@@ -1,5 +1,7 @@
 'use client';
 
+import { browserStorage } from '@/lib/browser-storage';
+
 import { useCallback, useEffect, useState } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
@@ -21,7 +23,7 @@ function slugify(s: string): string {
 }
 
 function imageSlug(id: string, prompt: string): string {
-  const shortID = id.split('-')[0] ?? id.slice(0, 8);
+  const shortID = id.replace(/-/g, '').toLowerCase().slice(0, 16);
   const slug = slugify(prompt);
   return slug ? `${slug}-${shortID}` : shortID;
 }
@@ -48,7 +50,7 @@ export default function PlaygroundPage() {
   }, []);
 
   useEffect(() => {
-    const savedWallet = localStorage.getItem('cutedsl_wallet');
+    const savedWallet = browserStorage.getItem('cutedsl_wallet');
     setWallet(savedWallet);
     if (savedWallet) loadMyImages(savedWallet);
   }, [loadMyImages]);

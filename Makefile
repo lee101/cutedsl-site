@@ -1,4 +1,4 @@
-.PHONY: dev watch build server frontend inference install clean deploy test test-server test-inference
+.PHONY: dev watch build server frontend inference install clean deploy test test-server test-inference bench-precision pregen-latents diffusion-frontier-preflight
 
 # Install all dependencies
 install:
@@ -25,6 +25,18 @@ inference:
 # Run inference with NVFP4 quantization (RTX 5090)
 inference-nvfp4:
 	cd inference && ENABLE_NVFP4=1 python server.py
+
+# Benchmark precision configs, write inference/autotune/<gpu_slug>.json
+bench-precision:
+	cd inference && python precision_bench.py
+
+# Warm LatentCache with single-word latents (resumable, Ctrl-C safe)
+pregen-latents:
+	cd inference && python pregen_latents.py
+
+# No-download feasibility report for the public diffusion model frontier.
+diffusion-frontier-preflight:
+	python scripts/diffusion_frontier_eval.py --preflight --models zimage-turbo flux-schnell proteus-v0.2 proteus-v0.4 realvisxl-v4 krea2-turbo
 
 # Run all in dev mode
 dev:

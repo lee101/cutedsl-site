@@ -114,3 +114,53 @@ RUNPOD_LORA_BACKEND=serverless
 RUNPOD_LORA_ENDPOINT_ID=...
 RUNPOD_LORA_TIMEOUT_SECONDS=7200
 ```
+
+## Native Z-Image capacity failures
+
+`image generation needs at least 4096 MB free GPU memory; managed GPU capacity
+is busy` is a broker admission rejection before diffusion runs. With the current
+native `OMNISERVE_NATIVE_VRAM_KEEP_FREE_MB=1024`, paid requests need at least
+4352 MiB free (4096 MiB scratch plus the paid 256 MiB floor), plus any applicable
+leases/reservations. Background requests retain the full 1024 MiB floor. Broker
+leases cannot evict models owned by uncoordinated processes.
+
+Inspect both `nvidia-smi` process memory and `http://127.0.0.1:8791/metrics` before
+restarting anything. An extra development model server can consume the scratch
+budget even when the CuteDSL worker is cold. Arrange capacity with the owning
+workload; do not lower the safety floor or load a second BF16 image pipeline.
+
+The native capacity, generation-failure and restart grace windows share the
+first failure's monotonic timestamp. Changing failure type must not reset the
+recovery clock. Production grants 60 seconds of recovery grace, leaving time
+for generation/upload inside the public edge's 120-second response window. A
+150-second grace fits the Go proxy but produces Cloudflare 524s first. LoRA requests preserve their adapter on infrastructure failures;
+only an explicit native HTTP 400 LoRA validation error permits base-model retry.
+`perf=true` remains reporting-only.
+
+On the first capacity rejection within the recovery grace, a cold Python worker
+now clears its own unused CUDA allocator caches before polling. This happens
+once per request during the headroom wait; a resident Z-Image pipeline is left
+alone. Previously that cleanup ran only after the entire grace expired. It
+cannot reclaim another process's resident model or override broker leases.
+
+Once a nonzero native capacity or generation-failure grace expires, the worker
+returns backpressure without entering the generic retry path. Otherwise one
+more native call can outlive the recovery budget. Zero-grace configurations
+retain their configured generic retries. Regression coverage includes the
+21-character incident prompt length and 80/1024/4096-character prompts, paid
+and background tiers, and preservation of the request's LoRA and teleport flags.
+
+Run focused recovery checks with the same related-repository path as the service:
+
+```bash
+PYTHONPATH=/nvme0n1-disk/code/cutedsl /nvme0n1-disk/code/.venv/bin/python -m pytest -q \
+  inference/test_zimage_runtime_recovery.py inference/test_zimage_systemd_config.py \
+  scripts/test_zimage_reliability_probe.py
+```
+
+Under sustained GPU pressure, use `scripts/zimage_reliability_probe.py --width
+1024 --height 1024 --low-priority` to exercise all prompt lengths and modes
+without repeatedly holding the public lane for the paid recovery window. Record
+429s as failed generation attempts, not successful reliability checks. Retest an
+ordinary paid request through the public endpoint too. Capacity-denied requests
+cannot establish generation latency, teleport speedup, or image-quality parity.

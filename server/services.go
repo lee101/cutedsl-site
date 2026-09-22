@@ -19,16 +19,18 @@ import (
 
 // Service pricing in USD (converted to $CUTE at current rate)
 var servicePricesUSD = map[string]float64{
-	"zimage":        0.04,  // per generation
-	"chronos2":      0.02,  // per forecast
-	"tts":           0.005, // per 100 chars
-	"stt":           0.02,  // per minute
-	"gemma4":        0.01,  // per request
-	"caption":       0.01,  // per image
-	"lora_training": 5.00,
-	"ltx_video":     0.30,  // per ~6s 1080p video via fal.ai
-	"flux_image":    0.04,  // per image via fal.ai or netwrck
-	"nsfw_detect":   0.001, // per image classification
+	"zimage":         0.04,  // per generation
+	"chronos2":       0.002, // per forecast (Chronos-2, our own ~120M model, ms-scale call)
+	"tts":            0.005, // per 100 chars
+	"stt":            0.02,  // per minute
+	"gemma4":         0.01,  // per request
+	"caption":        0.01,  // per image
+	"lora_training":  5.00,
+	"ltx_video":      0.30,  // per ~6s 1080p video via fal.ai
+	"video_generate": 0.15,  // OpenPaths auto-video base price; model overrides below
+	"h3_video":       2.688, // per GPU-hour reference rate; exact execution is settled asynchronously
+	"flux_image":     0.04,  // per image via fal.ai or netwrck
+	"nsfw_detect":    0.001, // per image classification
 }
 
 var zimageDefaultSteps = 8
@@ -45,6 +47,15 @@ var firstPartyServices = map[string]bool{
 // FAL API key for third-party proxied services
 var falAPIKey string
 var textGeneratorAPIKey string
+var openPathsAPIKey string
+var openPathsBaseURL string
+
+var videoModelPricesUSD = map[string]float64{
+	"auto-video":             0.15,
+	"ltx-video":              0.08,
+	"ltx-2":                  0.12,
+	"ltx-2.3-image-to-video": 1.85,
+}
 
 // Reusable HTTP client with connection pooling
 var backendClient = &http.Client{
@@ -64,15 +75,17 @@ func initServices() {
 	// CuteDSL inference server serves zimage, chronos2, tts, stt, caption, gemma4
 	inferenceURL := getEnv("INFERENCE_BACKEND_URL", "http://localhost:8100")
 	textGeneratorURL := getEnv("TG_BACKEND_URL", "http://localhost:9080")
+	nativeGatewayURL := getEnv("OMNISERVE_NATIVE_URL", textGeneratorURL)
 
-	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", inferenceURL)
-	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", inferenceURL)
+	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", nativeGatewayURL)
+	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", nativeGatewayURL)
 	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", textGeneratorURL)
 	serviceBackends["stt"] = getEnv("STT_BACKEND_URL", inferenceURL)
 	serviceBackends["gemma4"] = getEnv("GEMMA4_BACKEND_URL", inferenceURL)
 	serviceBackends["caption"] = getEnv("CAPTION_BACKEND_URL", inferenceURL)
 	serviceBackends["lora_training"] = getEnv("LORA_TRAINING_BACKEND_URL", inferenceURL)
 	serviceBackends["ltx_video"] = "https://fal.run"
+	serviceBackends["video_generate"] = getEnv("OPENPATHS_BASE_URL", "https://openpaths.io")
 	serviceBackends["flux_image"] = "https://fal.run"
 
 	falAPIKey = getEnv("FAL_KEY", getEnv("FAL_API_KEY", ""))
@@ -80,22 +93,29 @@ func initServices() {
 		log.Printf("FAL API key configured for ltx_video and flux_image services")
 	}
 	textGeneratorAPIKey = getEnv("TG_API_KEY", getEnv("TEXT_GENERATOR_API_KEY", getEnv("TEXT_GENERATOR_SECRET", "")))
+	openPathsAPIKey = getEnv("OPENPATHS_API_KEY", "")
+	openPathsBaseURL = strings.TrimRight(getEnv("OPENPATHS_BASE_URL", "https://openpaths.io"), "/")
+	if openPathsAPIKey != "" {
+		log.Printf("OpenPaths video generation configured: %s", openPathsBaseURL)
+	}
 	if textGeneratorAPIKey != "" {
 		log.Printf("Text-generator API key configured for tts service")
 	}
 
 	// Load custom prices from env
 	envPriceMap := map[string]string{
-		"zimage":        "ZIMAGE_PRICE_USD",
-		"chronos2":      "CHRONOS_PRICE_USD",
-		"tts":           "TTS_PRICE_USD_PER_100CHARS",
-		"stt":           "STT_PRICE_USD_PER_MINUTE",
-		"gemma4":        "GEMMA4_PRICE_USD",
-		"caption":       "CAPTION_PRICE_USD",
-		"lora_training": "LORA_TRAINING_PRICE_USD",
-		"ltx_video":     "LTX_VIDEO_PRICE_USD",
-		"flux_image":    "FLUX_IMAGE_PRICE_USD",
-		"nsfw_detect":   "NSFW_DETECT_PRICE_USD",
+		"zimage":         "ZIMAGE_PRICE_USD",
+		"chronos2":       "CHRONOS_PRICE_USD",
+		"tts":            "TTS_PRICE_USD_PER_100CHARS",
+		"stt":            "STT_PRICE_USD_PER_MINUTE",
+		"gemma4":         "GEMMA4_PRICE_USD",
+		"caption":        "CAPTION_PRICE_USD",
+		"lora_training":  "LORA_TRAINING_PRICE_USD",
+		"ltx_video":      "LTX_VIDEO_PRICE_USD",
+		"video_generate": "VIDEO_GENERATE_PRICE_USD",
+		"h3_video":       "H3_VIDEO_PRICE_USD_PER_GPU_HOUR",
+		"flux_image":     "FLUX_IMAGE_PRICE_USD",
+		"nsfw_detect":    "NSFW_DETECT_PRICE_USD",
 	}
 	for svc, envKey := range envPriceMap {
 		if p := os.Getenv(envKey); p != "" {
@@ -150,6 +170,11 @@ func getRequestServicePriceUSD(req ServiceUsageRequest) float64 {
 	if req.Service == "zimage" && getZImageSteps(req) >= 20 {
 		return zimageHighStepPriceUSD
 	}
+	if req.Service == "video_generate" {
+		if price, exists := videoModelPricesUSD[normalizeVideoModel(req.Model)]; exists {
+			return price
+		}
+	}
 	return usdPrice
 }
 
@@ -183,15 +208,17 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	cutePrice := getCUTEPriceUSD()
 
 	units := map[string]string{
-		"zimage":        fmt.Sprintf("per generation (base); $%.2f for 20+ steps", zimageHighStepPriceUSD),
-		"chronos2":      "per forecast",
-		"tts":           "per 100 characters",
-		"stt":           "per minute",
-		"gemma4":        "per request",
-		"caption":       "per image",
-		"lora_training": "per training job",
-		"ltx_video":     "per ~6s video",
-		"flux_image":    "per image",
+		"zimage":         fmt.Sprintf("per generation (base); $%.2f for 20+ steps", zimageHighStepPriceUSD),
+		"chronos2":       "per forecast",
+		"tts":            "per 100 characters",
+		"stt":            "per minute",
+		"gemma4":         "per request",
+		"caption":        "per image",
+		"lora_training":  "per training job",
+		"ltx_video":      "per ~6s video",
+		"video_generate": "per generated video (model dependent)",
+		"h3_video":       "per GPU-hour, metered by app.nz execution time (includes 20% reseller markup)",
+		"flux_image":     "per image",
 	}
 
 	var pricing []ServicePricing
@@ -225,6 +252,9 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	if req.Service == "" {
 		req.Service = "zimage"
 	}
+	if req.Service == "z-image-turbo" || req.Service == "zimage-turbo" {
+		req.Service = "zimage"
+	}
 
 	// Validate service exists
 	_, ok := servicePricesUSD[req.Service]
@@ -254,6 +284,10 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 401, "authorization required: use Authorization header with API key or wallet_address in body")
 		return
 	}
+	if req.Service == "h3_video" {
+		handleH3VideoService(ctx, req, user)
+		return
+	}
 
 	// Calculate cost in $CUTE
 	cuteCost := getRequestServicePriceCUTE(req)
@@ -273,7 +307,10 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 
 	newBalance := user.Credits
 	billableCost := cuteCost
-	if user.UnlimitedAPI {
+	// Subscriptions include unlimited image generation only. Video and every
+	// other service continue to consume the subscriber's rollover credits.
+	unlimitedImage := user.UnlimitedAPI && req.Service == "zimage"
+	if unlimitedImage {
 		billableCost = 0
 	} else {
 		// Deduct credits
@@ -292,7 +329,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	// double-booking — the deduction above is a hold).
 	cutePrice := getCUTEPriceUSD()
 	usdEquiv := cuteCost * cutePrice
-	if req.Service != "lora_training" && !user.UnlimitedAPI {
+	if req.Service != "lora_training" && !unlimitedImage {
 		go dbConn.CreateBillingEvent(&BillingEvent{
 			UserID:       user.ID,
 			EventType:    req.Service,
@@ -315,10 +352,13 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	result, err := proxyToBackend(req, backendURL)
+	if err == nil && req.Service == "video_generate" {
+		result, err = prepareGeneratedVideoResult(req, user, result)
+	}
 	if err != nil {
 		log.Printf("Backend proxy error for %s: %v", req.Service, err)
 		// Refund on backend failure
-		if !user.UnlimitedAPI {
+		if !unlimitedImage {
 			refundBalance, refundErr := dbConn.AddUserCredits(user.ID, cuteCost)
 			if refundErr == nil {
 				go dbConn.CreateBillingEvent(&BillingEvent{
@@ -335,11 +375,12 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		jsonError(ctx, 502, "service temporarily unavailable")
 		return
 	}
+	result = optimizeGeneratedVideo(req, user, result)
 
 	// LoRA training is async — deduction above is a HOLD. A background
 	// watcher polls the inference job and either finalizes (keep deducted +
 	// log billing event) or refunds on training failure.
-	if req.Service == "lora_training" && !user.UnlimitedAPI {
+	if req.Service == "lora_training" && !unlimitedImage {
 		var r struct {
 			JobID string `json:"job_id"`
 		}
@@ -348,7 +389,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
-	if !user.UnlimitedAPI {
+	if !unlimitedImage {
 		maybeTriggerAutoTopup(user.ID)
 	}
 
@@ -360,7 +401,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		"credits_used":    billableCost,
 		"credits_remain":  newBalance,
 		"usd_equivalent":  billableCost * cutePrice,
-		"unlimited_api":   user.UnlimitedAPI,
+		"unlimited_api":   unlimitedImage,
 		"metered_credits": cuteCost,
 	}
 	if savedImage != nil {
@@ -578,9 +619,23 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		}
 
 		// Fallback: HTTP proxy to backend
-		endpoint = fmt.Sprintf("%s/generate_image", backendURL)
-		payload := map[string]interface{}{
-			"prompt": req.Prompt,
+		backendStyle := getEnv("ZIMAGE_BACKEND_STYLE", "legacy")
+		payload := map[string]interface{}{"prompt": req.Prompt}
+		if backendStyle == "openai" {
+			endpoint = fmt.Sprintf("%s/v1/images/generations", strings.TrimRight(backendURL, "/"))
+			width, height := req.Width, req.Height
+			if width <= 0 {
+				width = 1024
+			}
+			if height <= 0 {
+				height = 1024
+			}
+			payload["size"] = fmt.Sprintf("%dx%d", width, height)
+			payload["n"] = 1
+			payload["response_format"] = "b64_json"
+			payload["steps"] = getZImageSteps(req)
+		} else {
+			endpoint = fmt.Sprintf("%s/generate_image", strings.TrimRight(backendURL, "/"))
 		}
 		if req.Width > 0 {
 			payload["width"] = req.Width
@@ -595,7 +650,16 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		if req.Seed > 0 {
 			payload["seed"] = req.Seed
 		}
+		if req.LoRAID != "" {
+			payload["lora_id"] = req.LoRAID
+		}
+		if req.AutoLoRA != nil {
+			payload["auto_lora"] = *req.AutoLoRA
+		}
 		jsonBody, _ := json.Marshal(payload)
+		if backendStyle == "openai" {
+			return proxyZImageOpenAIBackend(req, endpoint, jsonBody)
+		}
 		body = strings.NewReader(string(jsonBody))
 
 	case "chronos2":
@@ -656,6 +720,9 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		jsonBody, _ := json.Marshal(payload)
 		body = strings.NewReader(string(jsonBody))
 		// FAL auth is handled below in the request
+
+	case "video_generate":
+		return proxyOpenPathsVideo(req)
 
 	case "flux_image":
 		endpoint = "https://fal.run/fal-ai/flux/schnell"
@@ -723,8 +790,100 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("backend returned %d: %s", resp.StatusCode, string(respBody))
 	}
+	if req.Service == "zimage" && getEnv("ZIMAGE_BACKEND_STYLE", "legacy") == "openai" {
+		return normalizeOpenAIImageResponse(respBody, req)
+	}
 
 	return respBody, nil
+}
+
+func proxyZImageOpenAIBackend(req ServiceUsageRequest, endpoint string, payload []byte) ([]byte, error) {
+	retryGrace, err := time.ParseDuration(getEnv("ZIMAGE_BACKEND_CAPACITY_RETRY_GRACE", "150s"))
+	if err != nil || retryGrace < 0 {
+		retryGrace = 150 * time.Second
+	}
+	retryInterval, err := time.ParseDuration(getEnv("ZIMAGE_BACKEND_CAPACITY_RETRY_INTERVAL", "2s"))
+	if err != nil || retryInterval <= 0 {
+		retryInterval = 2 * time.Second
+	}
+	started := time.Now()
+	deadline := started.Add(retryGrace)
+	retried := false
+
+	for {
+		httpReq, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(payload)))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		// /api/service has already authenticated and charged (or validated an
+		// unlimited subscription for) this request. Do not let background GPU
+		// work take its native admission priority.
+		httpReq.Header.Set("X-Omniserve-Tier", "paid")
+
+		resp, err := backendClient.Do(httpReq)
+		if err != nil {
+			return nil, err
+		}
+		respBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode < 400 {
+			if retried {
+				log.Printf("zimage backend capacity recovered after %v", time.Since(started).Round(time.Millisecond))
+			}
+			return normalizeOpenAIImageResponse(respBody, req)
+		}
+
+		if resp.StatusCode != http.StatusServiceUnavailable || !isRetryableZImageCapacityResponse(respBody) || time.Now().Add(retryInterval).After(deadline) {
+			return nil, fmt.Errorf("backend returned %d: %s", resp.StatusCode, string(respBody))
+		}
+		if !retried {
+			log.Printf("zimage backend capacity is temporarily busy; retrying for up to %v", retryGrace)
+			retried = true
+		}
+		time.Sleep(retryInterval)
+	}
+}
+
+func isRetryableZImageCapacityResponse(body []byte) bool {
+	message := strings.ToLower(string(body))
+	return strings.Contains(message, "managed gpu capacity is busy") ||
+		strings.Contains(message, "image generation needs at least") ||
+		strings.Contains(message, "admission timeout; retry")
+}
+
+func normalizeOpenAIImageResponse(response []byte, req ServiceUsageRequest) ([]byte, error) {
+	var payload struct {
+		Format string `json:"format"`
+		Data   []struct {
+			B64JSON string `json:"b64_json"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response, &payload); err != nil {
+		return nil, fmt.Errorf("decode OpenAI image response: %w", err)
+	}
+	if len(payload.Data) == 0 || payload.Data[0].B64JSON == "" {
+		return nil, fmt.Errorf("OpenAI image response contained no b64_json image")
+	}
+	width, height := req.Width, req.Height
+	if width <= 0 {
+		width = 1024
+	}
+	if height <= 0 {
+		height = 1024
+	}
+	format := payload.Format
+	if format == "" {
+		format = "webp"
+	}
+	return json.Marshal(map[string]interface{}{
+		"image_base64": payload.Data[0].B64JSON,
+		"width":        width, "height": height, "seed": req.Seed,
+		"format": format, "engine": "openai-images",
+	})
 }
 
 func getTTSText(req ServiceUsageRequest) string {

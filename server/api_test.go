@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +39,7 @@ func TestMain(m *testing.M) {
 	devMode = true
 	frontendURL = "http://localhost:3000"
 	os.Setenv("ZIMAGE_PRICE_USD", "0.04")
-	os.Setenv("CHRONOS_PRICE_USD", "0.02")
+	os.Setenv("CHRONOS_PRICE_USD", "0.002")
 	os.Setenv("TTS_PRICE_USD_PER_100CHARS", "0.005")
 	os.Setenv("STT_PRICE_USD_PER_MINUTE", "0.02")
 	os.Setenv("GEMMA4_PRICE_USD", "0.01")
@@ -104,12 +107,38 @@ func doPost(t *testing.T, path string, payload interface{}, headers ...string) (
 		t.Fatalf("POST %s: %v", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if strings.HasPrefix(path, "/api/stripe-webhook") && stripeWebhookSecret != "" {
+		timestamp := time.Now().Unix()
+		mac := hmac.New(sha256.New, []byte(stripeWebhookSecret))
+		_, _ = mac.Write([]byte(fmt.Sprintf("%d.%s", timestamp, jsonBody)))
+		req.Header.Set("Stripe-Signature", fmt.Sprintf("t=%d,v1=%s", timestamp, hex.EncodeToString(mac.Sum(nil))))
+	}
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result map[string]interface{}
+	json.Unmarshal(body, &result)
+	return resp.StatusCode, result
+}
+
+func doGetWithHeaders(t *testing.T, path string, headers ...string) (int, map[string]interface{}) {
+	t.Helper()
+	req, err := http.NewRequest("GET", baseURL()+path, nil)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -173,9 +202,10 @@ func TestFrontendErrorEndpointLogsBrowserContext(t *testing.T) {
 			"effectiveType": "4g",
 			"rtt":           40,
 		},
+		"occurredAt":  time.Now().UTC().Format(time.RFC3339Nano),
 		"sessionId":   "session-test",
 		"fingerprint": "synthetic|app.js|12|34",
-	})
+	}, "Origin", "https://cutedsl.cc", "User-Agent", "Mozilla/5.0 Test Browser")
 	if status != 202 {
 		t.Fatalf("expected 202, got %d: %v", status, body)
 	}
@@ -203,12 +233,142 @@ func TestFrontendErrorEndpointLogsBrowserContext(t *testing.T) {
 }
 
 func TestFrontendErrorEndpointRejectsNonErrors(t *testing.T) {
-	status, _ := doPost(t, "/api/frontend-error", map[string]interface{}{
-		"level":   "info",
-		"message": "not an error",
-	})
-	if status != 400 {
-		t.Fatalf("expected 400 for non-error frontend event, got %d", status)
+	for _, level := range []string{"info", ""} {
+		status, _ := doPost(t, "/api/frontend-error", map[string]interface{}{
+			"level":   level,
+			"message": "not an error",
+		})
+		if status != 400 {
+			t.Fatalf("expected 400 for frontend event with level %q, got %d", level, status)
+		}
+	}
+}
+
+func TestFrontendErrorEndpointIgnoresDirectScannerSubmissions(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "frontend-errors.jsonl")
+	t.Setenv("FRONTEND_ERROR_LOG_PATH", logPath)
+
+	tests := []map[string]interface{}{
+		{
+			"level":   "error",
+			"message": "test error",
+			"stack":   "Error: test\n    at test.js:1:1",
+			"url":     "https://cutedsl.cc",
+		},
+		{
+			"level":   "error",
+			"message": "__DEBUG__",
+			"stack":   "process.env",
+			"url":     "https://cutedsl.cc",
+		},
+	}
+
+	for _, payload := range tests {
+		status, _ := doPost(t, "/api/frontend-error", payload, "User-Agent", "python-requests/2.34.2")
+		if status != 204 {
+			t.Fatalf("expected 204 for direct scanner submission, got %d", status)
+		}
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected ignored scanner events not to create log file, stat err=%v", err)
+	}
+}
+
+func TestFrontendErrorEndpointIgnoresCEFSharpObjectNoise(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "frontend-errors.jsonl")
+	t.Setenv("FRONTEND_ERROR_LOG_PATH", logPath)
+
+	messages := []string{
+		"Object Not Found Matching Id:7, MethodName:update, ParamCount:4",
+		"Object Not Found Matching Id:9, MethodName:simulateEvent, ParamCount:1",
+		" Object Not Found Matching Id:11, MethodName:simulateEvent, ParamCount:3 ",
+	}
+	for _, message := range messages {
+		for _, source := range []string{"unhandledrejection", "https://cutedsl.cc/_next/static/chunks/app.js"} {
+			status, _ := doPost(t, "/api/frontend-error", frontendReporterTestPayload(message, source),
+				"Origin", "https://cutedsl.cc", "User-Agent", "Mozilla/5.0 Test Browser")
+			if status != 204 {
+				t.Fatalf("expected 204 for ignored browser host-object noise %q from %q, got %d", message, source, status)
+			}
+		}
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected ignored event not to create log file, stat err=%v", err)
+	}
+}
+
+func TestFrontendErrorEndpointKeepsCEFSharpNearMatch(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "frontend-errors.jsonl")
+	t.Setenv("FRONTEND_ERROR_LOG_PATH", logPath)
+
+	message := "Object Not Found Matching Id:7, MethodName:update, ParamCount:5"
+	status, body := doPost(t, "/api/frontend-error", frontendReporterTestPayload(message, "unhandledrejection"),
+		"Origin", "https://cutedsl.cc", "User-Agent", "Mozilla/5.0 Test Browser")
+	if status != 202 {
+		t.Fatalf("expected 202 for a non-matching real error, got %d: %v", status, body)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read frontend error log: %v", err)
+	}
+	if !strings.Contains(string(raw), message) {
+		t.Fatalf("expected near-match error to be logged, got %s", raw)
+	}
+}
+
+func frontendReporterTestPayload(message, source string) map[string]interface{} {
+	return map[string]interface{}{
+		"level":       "error",
+		"message":     message,
+		"name":        "UnhandledPromiseRejection",
+		"source":      source,
+		"fingerprint": "unhandledrejection|" + message,
+		"url":         "https://cutedsl.cc/gallery",
+		"userAgent":   "Mozilla/5.0 Test Browser",
+		"occurredAt":  time.Now().UTC().Format(time.RFC3339Nano),
+		"viewport":    map[string]int{"width": 1920, "height": 1080},
+		"screen":      map[string]int{"width": 1920, "height": 1080},
+	}
+}
+
+func TestFrontendErrorEndpointIgnoresOpaqueCrossOriginScriptErrors(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "frontend-errors.jsonl")
+	t.Setenv("FRONTEND_ERROR_LOG_PATH", logPath)
+
+	for _, payload := range []map[string]interface{}{
+		frontendReporterTestPayload("Script error.", ""),
+		frontendReporterTestPayload("  Script error.  ", ""),
+	} {
+		status, _ := doPost(t, "/api/frontend-error", payload,
+			"Origin", "https://cutedsl.cc", "User-Agent", "Mozilla/5.0 Test Browser")
+		if status != 204 {
+			t.Fatalf("expected 204 for masked cross-origin script error, got %d", status)
+		}
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected masked events not to create log file, stat err=%v", err)
+	}
+}
+
+func TestFrontendErrorEndpointKeepsUnmaskedScriptErrors(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "frontend-errors.jsonl")
+	t.Setenv("FRONTEND_ERROR_LOG_PATH", logPath)
+
+	payload := frontendReporterTestPayload("Script error.", "https://appstatic.app.nz/cutedsl/static/chunk.js")
+	payload["stack"] = "Error: Script error.\n    at app/page.tsx:1:1"
+	payload["lineno"] = 1
+	payload["colno"] = 33
+	status, body := doPost(t, "/api/frontend-error", payload,
+		"Origin", "https://cutedsl.cc", "User-Agent", "Mozilla/5.0 Test Browser")
+	if status != 202 {
+		t.Fatalf("expected 202 for script error carrying source details, got %d: %v", status, body)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read frontend error log: %v", err)
+	}
+	if !strings.Contains(string(raw), "chunk.js") {
+		t.Fatalf("expected attributed script error to be logged, got %s", raw)
 	}
 }
 
@@ -465,6 +625,34 @@ func TestService_APIKeyAuth(t *testing.T) {
 	// Should get 402 (insufficient credits) or 503 (pricing unavailable), not 401
 	if status == 401 {
 		t.Fatalf("API key auth failed: got 401: %v", body)
+	}
+}
+
+func TestSession_ValidAndStaleKey(t *testing.T) {
+	wallet := fmt.Sprintf("SessionTest_%d", time.Now().UnixNano())
+	_, authBody := doPost(t, "/api/auth/wallet", map[string]string{"wallet_address": wallet})
+	apiKey := authBody["api_key"].(string)
+
+	status, body := doGetWithHeaders(t, "/api/auth/session", "Authorization", "Bearer "+apiKey)
+	if status != 200 {
+		t.Fatalf("expected 200 for valid key, got %d: %v", status, body)
+	}
+	if body["api_key"] != apiKey {
+		t.Fatalf("expected session to echo the key, got %v", body["api_key"])
+	}
+	user, ok := body["user"].(map[string]interface{})
+	if !ok || user["wallet_address"] != wallet {
+		t.Fatalf("expected session user %s, got %v", wallet, body["user"])
+	}
+
+	staleStatus, _ := doGetWithHeaders(t, "/api/auth/session", "Authorization", "Bearer cutedsl_stale_key_12345")
+	if staleStatus != 401 {
+		t.Fatalf("expected 401 for stale key, got %d", staleStatus)
+	}
+
+	noKeyStatus, _ := doGetWithHeaders(t, "/api/auth/session")
+	if noKeyStatus != 401 {
+		t.Fatalf("expected 401 without a key, got %d", noKeyStatus)
 	}
 }
 

@@ -747,6 +747,9 @@ func verifyTransaction(intent CryptoCheckoutIntent, txSig string) bool {
 		post := txResult.Result.Meta.PostBalances
 		if len(pre) > 1 && len(post) > 1 {
 			// Deposit address should have received funds
+			if post[1] < pre[1] {
+				return false
+			}
 			received := post[1] - pre[1]
 			// Allow 1% slippage
 			expected := intent.AmountLamports
@@ -755,9 +758,10 @@ func verifyTransaction(intent CryptoCheckoutIntent, txSig string) bool {
 		}
 	}
 
-	// For SPL tokens, would need to check token balance changes
-	// Simplified: accept any transaction to the deposit address for now
-	return true
+	// SPL token transfers require parsing token account owners and mint
+	// amounts. Never treat an otherwise valid transaction as payment without
+	// that verification.
+	return false
 }
 
 func processCompletedPayment(intent CryptoCheckoutIntent, txSig string) {

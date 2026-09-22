@@ -14,14 +14,40 @@ echo "=== CuteDSL Site Deploy ==="
 echo ""
 
 # R2 Configuration (Cloudflare R2 - S3 compatible)
-R2_ENDPOINT="${R2_ENDPOINT:-https://f76d25b8b86cfa5638f43016510d8f77.r2.cloudflarestorage.com}"
-R2_BUCKET="${R2_BUCKET:-appstatic}"
-BUCKET_PATH="${BUCKET_PATH:-cutedsl}"
-STATIC_PATH="${STATIC_PATH:-static}"
-STATIC_BASE_URL="${STATIC_BASE_URL:-https://appstatic.app.nz/$BUCKET_PATH/$STATIC_PATH}"
-DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/cutedsl-site}"
+# Keep deployment overrides project-scoped. Generic R2_BUCKET/BUCKET_PATH
+# variables are commonly exported by other sites on this host and can silently
+# send CuteDSL assets to the wrong bucket.
+R2_ENDPOINT="${CUTEDSL_R2_ENDPOINT:-https://f76d25b8b86cfa5638f43016510d8f77.r2.cloudflarestorage.com}"
+R2_BUCKET="${CUTEDSL_R2_BUCKET:-appstatic}"
+BUCKET_PATH="${CUTEDSL_BUCKET_PATH:-cutedsl}"
+STATIC_PATH="${CUTEDSL_STATIC_PATH:-static}"
+STATIC_BASE_URL="${CUTEDSL_STATIC_BASE_URL:-https://appstatic.app.nz/$BUCKET_PATH/$STATIC_PATH}"
+DEPLOY_ROOT="${CUTEDSL_DEPLOY_ROOT:-/opt/cutedsl-site}"
 AWS=(aws --endpoint-url "$R2_ENDPOINT")
 SYNC_OPTS=(--size-only)
+LOCAL_INSTALL=()
+LOCAL_RSYNC_OPTS=()
+
+# The export embeds STATIC_BASE_URL, while uploads below use the fixed R2
+# object prefix BUCKET_PATH/STATIC_PATH. Refuse a split-brain configuration
+# before building or deleting any old objects.
+python3 scripts/validate_static_deploy_config.py \
+    --static-base-url "$STATIC_BASE_URL" \
+    --bucket-path "$BUCKET_PATH" \
+    --static-path "$STATIC_PATH"
+
+# Validate local install privileges before publishing remote route documents.
+# Production is root-owned on this host even when deploys run as the
+# administrator account, so use non-interactive sudo when it is available.
+if [ -d "$DEPLOY_ROOT" ] && { [ ! -w "$DEPLOY_ROOT/frontend/out" ] || [ ! -w "$DEPLOY_ROOT/server" ]; }; then
+    if sudo -n true 2>/dev/null; then
+        LOCAL_INSTALL=(sudo -n)
+        LOCAL_RSYNC_OPTS=(--chown=root:root)
+    else
+        echo "ERROR: $DEPLOY_ROOT is not writable and non-interactive sudo is unavailable"
+        exit 1
+    fi
+fi
 
 # Step 1: Build frontend (static export for R2)
 echo "[1/4] Building Next.js frontend (static export)..."
@@ -58,20 +84,30 @@ echo "[2/4] Syncing to s3://$R2_BUCKET/$BUCKET_PATH/ ..."
 
 # Static export mode: keep route documents at /cutedsl and hashed/static
 # assets under /cutedsl/static so public asset URLs are predictable.
+#
+# Do not delete older _next assets here. Route HTML is served by both R2 and
+# the local Go origin, so those two origins cannot switch builds atomically.
+# Next.js assets are content-hashed and immutable; retaining prior builds keeps
+# in-flight and cached HTML valid while every HTML origin converges.
 if [ -d "$OUT_DIR/_next" ]; then
-    "${AWS[@]}" s3 sync "$OUT_DIR/_next" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/_next/" "${SYNC_OPTS[@]}" --delete \
+    "${AWS[@]}" s3 sync "$OUT_DIR/_next" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/_next/" "${SYNC_OPTS[@]}" \
         --exclude '*.map' \
         --cache-control "public, max-age=31536000, immutable"
 fi
 
 if [ -d "$OUT_DIR/images" ]; then
-    "${AWS[@]}" s3 sync "$OUT_DIR/images" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/images/" "${SYNC_OPTS[@]}" --delete \
+    "${AWS[@]}" s3 sync "$OUT_DIR/images" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/images/" "${SYNC_OPTS[@]}" \
+        --cache-control "public, max-age=31536000, immutable"
+fi
+
+if [ -d "$OUT_DIR/videos" ]; then
+    "${AWS[@]}" s3 sync "$OUT_DIR/videos" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/videos/" "${SYNC_OPTS[@]}" \
         --cache-control "public, max-age=31536000, immutable"
 fi
 
 # Do not publish route HTML until every hashed asset is present. A missing
 # chunk turns a successful 200 response into a client-side ChunkLoadError.
-asset_drift=$("${AWS[@]}" s3 sync "$OUT_DIR/_next" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/_next/" "${SYNC_OPTS[@]}" --delete \
+asset_drift=$("${AWS[@]}" s3 sync "$OUT_DIR/_next" "s3://$R2_BUCKET/$BUCKET_PATH/$STATIC_PATH/_next/" "${SYNC_OPTS[@]}" \
     --exclude '*.map' \
     --cache-control "public, max-age=31536000, immutable" \
     --dryrun)
@@ -81,10 +117,14 @@ if [ -n "$asset_drift" ]; then
     exit 1
 fi
 
-"${AWS[@]}" s3 sync "$OUT_DIR" "s3://$R2_BUCKET/$BUCKET_PATH/" "${SYNC_OPTS[@]}" \
+# Route documents are mutable and can change build references without changing
+# byte length. Use the default timestamp-and-size comparison here; --size-only
+# can leave old HTML pointing at a different set of chunks.
+"${AWS[@]}" s3 sync "$OUT_DIR" "s3://$R2_BUCKET/$BUCKET_PATH/" \
     --exclude '*.map' \
     --exclude '_next/*' \
     --exclude 'images/*' \
+    --exclude 'videos/*' \
     --cache-control "public, max-age=3600"
 
 # Remove stale root-level asset directories from the older layout.
@@ -110,17 +150,13 @@ cd ..
 
 if [ -d "$DEPLOY_ROOT" ]; then
     echo "  Installing frontend to $DEPLOY_ROOT/frontend/out ..."
-    mkdir -p "$DEPLOY_ROOT/frontend/out"
-    rsync -a --delete "$OUT_DIR/" "$DEPLOY_ROOT/frontend/out/"
-    find "$DEPLOY_ROOT/frontend/out" \( -name '*.fasthttp.gz' -o -name '*.fasthttp.br' \) -delete
+    "${LOCAL_INSTALL[@]}" mkdir -p "$DEPLOY_ROOT/frontend/out"
+    "${LOCAL_INSTALL[@]}" rsync -a "${LOCAL_RSYNC_OPTS[@]}" "$OUT_DIR/" "$DEPLOY_ROOT/frontend/out/"
+    "${LOCAL_INSTALL[@]}" find "$DEPLOY_ROOT/frontend/out" \( -name '*.fasthttp.gz' -o -name '*.fasthttp.br' \) -delete
     echo "  ✓ Frontend installed locally"
 
-    if [ -w "$DEPLOY_ROOT/server" ]; then
-        install -m 755 server/cutedsl-server "$DEPLOY_ROOT/server/cutedsl-server"
-        echo "  ✓ Server binary installed locally"
-    else
-        echo "  ⚠ Skipping server binary install ($DEPLOY_ROOT/server is not writable)"
-    fi
+    "${LOCAL_INSTALL[@]}" install -m 755 server/cutedsl-server "$DEPLOY_ROOT/server/cutedsl-server"
+    echo "  ✓ Server binary installed locally"
 else
     echo "  ⚠ Skipping local install ($DEPLOY_ROOT not found)"
 fi
@@ -136,20 +172,32 @@ CF_ZONE_APPNZ="${CLOUDFLARE_ZONE_APP_NZ}"
 # cutedsl.cc zone (if configured separately)
 CF_ZONE_CUTEDSL_CC="${CLOUDFLARE_ZONE_CUTEDSL_CC}"
 
+cf_curl_headers() {
+    # Scoped API tokens (40+ chars) use Bearer auth; legacy Global API keys use email+key.
+    if [ "${#CF_API_KEY}" -ge 40 ]; then
+        printf '%s\n' "-H" "Authorization: Bearer ${CF_API_KEY}"
+    else
+        printf '%s\n' "-H" "X-Auth-Email: ${CF_EMAIL}" "-H" "X-Auth-Key: ${CF_API_KEY}"
+    fi
+}
+
 purge_urls() {
     local zone_id="$1"
     shift
     local urls=("$@")
     local batch_size=30
     local total=${#urls[@]}
+    local -a cf_auth_headers=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && cf_auth_headers+=("$line")
+    done < <(cf_curl_headers)
 
     for ((i=0; i<total; i+=batch_size)); do
         local batch=("${urls[@]:i:batch_size}")
         local json_files=$(printf '%s\n' "${batch[@]}" | jq -R . | jq -s .)
         local resp
         resp=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/purge_cache" \
-            -H "X-Auth-Email: ${CF_EMAIL}" \
-            -H "X-Auth-Key: ${CF_API_KEY}" \
+            "${cf_auth_headers[@]}" \
             -H "Content-Type: application/json" \
             --data "{\"files\": ${json_files}}")
         local ok=$(echo "$resp" | jq -r '.success // false')
@@ -187,6 +235,13 @@ APPSTATIC_URLS=(
     "https://appstatic.app.nz/cutedsl/static/images/training.webp"
     "https://appstatic.app.nz/cutedsl/static/images/token-bg.webp"
 )
+
+# Purge exact build-asset URLs as well. This is normally unnecessary for
+# immutable content-hashed files, but it clears cached 404 responses when a
+# previously interrupted upload is repaired and the object appears later.
+while IFS= read -r asset_path; do
+    APPSTATIC_URLS+=("$STATIC_BASE_URL/_next/$asset_path")
+done < <(find "$OUT_DIR/_next" -type f ! -name '*.map' -printf '%P\n')
 
 # URLs to purge on cutedsl.cc (if proxied through CF)
 CUTEDSL_CC_URLS=(

@@ -11,9 +11,17 @@ ExecStart=/opt/cutedsl-site/server/cutedsl-server
 Restart=always
 RestartSec=5
 EnvironmentFile=/opt/cutedsl-site/.env
+# Default first-party model traffic to the shared native scheduler. A deployed
+# CHRONOS_BACKEND_URL in .env can still override this during rollback.
+Environment=OMNISERVE_NATIVE_URL=http://127.0.0.1:8791
+Environment=ZIMAGE_BACKEND_URL=http://127.0.0.1:8791
+Environment=ZIMAGE_BACKEND_STYLE=openai
 Environment=PORT=8090
 Environment=DEV=false
 Environment=DIST_DIR=/opt/cutedsl-site/frontend/out
+# ProtectSystem=strict leaves /tmp read-only; AV1 video optimization needs a
+# writable scratch dir, so point Go's os.TempDir() at a ReadWritePath.
+Environment=TMPDIR=/nvme0n1-disk/tmp
 
 # Logging
 StandardOutput=journal
@@ -23,7 +31,7 @@ SyslogIdentifier=cutedsl
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/cutedsl-site /nvme0n1-disk/tmp
+ReadWritePaths=/opt/cutedsl-site /nvme0n1-disk/tmp /sdb-disk/cutedsl-images
 
 [Install]
 WantedBy=multi-user.target

@@ -86,7 +86,7 @@ func TestStripeCheckoutEmbeddedSessionAndWebhook(t *testing.T) {
 		baseURL:   stripeMock.URL,
 		client:    stripeMock.Client(),
 	}
-	stripeWebhookSecret = ""
+	stripeWebhookSecret = "whsec_test"
 	t.Setenv("STRIPE_PUBLISHABLE_KEY", "pk_test_local")
 
 	wallet := fmt.Sprintf("StripeWallet_%d", time.Now().UnixNano())
@@ -257,7 +257,7 @@ func TestStripeSubscriptionCheckoutActivatesUnlimitedAPI(t *testing.T) {
 		baseURL:   stripeMock.URL,
 		client:    stripeMock.Client(),
 	}
-	stripeWebhookSecret = ""
+	stripeWebhookSecret = "whsec_test"
 	t.Setenv("STRIPE_PUBLISHABLE_KEY", "pk_test_local")
 	t.Setenv("STRIPE_MONTHLY_PRICE_ID", priceID)
 

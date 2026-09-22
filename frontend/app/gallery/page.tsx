@@ -5,7 +5,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import {
   ArrowLeft, Loader2, ImageIcon, X, ExternalLink, Copy, Check,
-  Sparkles, Star, Heart, Search as SearchIcon,
+  Sparkles, Star, Heart, Search as SearchIcon, ChevronDown,
 } from 'lucide-react';
 import { linkifyPrompt } from '@/lib/prompt-linkify';
 import { SiteFooter } from '../site-footer';
@@ -58,41 +58,153 @@ function slugify(s: string): string {
 }
 
 function imageSlug(id: string, prompt: string): string {
-  const shortID = id.split('-')[0] ?? id.slice(0, 8);
+  const shortID = id.replace(/-/g, '').toLowerCase().slice(0, 16);
   const slug = slugify(prompt);
   return slug ? `${slug}-${shortID}` : shortID;
+}
+
+// First segment of the UUID — what the slug's trailing token resolves to.
+function shortId(id: string): string {
+  return id.replace(/-/g, '').toLowerCase().slice(0, 16);
+}
+
+// Trailing token of a gallery slug is the compact 16-hex UUID prefix.
+function shortIdFromSlug(slug: string): string {
+  const idx = slug.lastIndexOf('-');
+  return idx >= 0 ? slug.slice(idx + 1) : slug;
+}
+
+// Extract the image slug from a /gallery/<slug> pathname (empty string for the bare /gallery).
+function gallerySlugFromPath(pathname: string): string {
+  const m = pathname.match(/\/gallery\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+const GALLERY_PATH = '/gallery';
+
+// Fetch a single image by slug/shortID for deep links (/gallery/<slug> opened directly).
+async function fetchImageBySlug(slug: string): Promise<GeneratedImage | null> {
+  try {
+    const res = await fetch(`${API_BASE}/prompt/${encodeURIComponent(slug)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.image as GeneratedImage) || null;
+  } catch {
+    return null;
+  }
 }
 
 export default function GalleryPage() {
   const [images, setImages] = useState<GeneratedImage[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
   const [initialLoad, setInitialLoad] = useState(true);
   const [imageCount, setImageCount] = useState(0);
   const [selectedImage, setSelectedImage] = useState<GeneratedImage | null>(null);
   const [copied, setCopied] = useState(false);
   const loaderRef = useRef<HTMLDivElement>(null);
+  // Per-visit random seed → each new tab gets a different, well-mixed slice.
+  const seedRef = useRef<number | null>(null);
+  if (seedRef.current === null) seedRef.current = Math.random();
+  // Keyset cursor (last random_sort returned) for varied infinite scroll.
+  const cursorRef = useRef<string | null>(null);
+  const cursorWrappedRef = useRef(false);
+  // Keep latest images accessible inside the popstate listener without re-subscribing.
+  const imagesRef = useRef<GeneratedImage[]>([]);
+  useEffect(() => { imagesRef.current = images; }, [images]);
 
+  // Open the lightbox and reflect it in the URL as /gallery/<slug> (pushState by default
+  // so the browser Back button closes the modal and the URL is shareable / SEO-friendly).
+  const openImage = useCallback((img: GeneratedImage, opts?: { push?: boolean }) => {
+    setSelectedImage(img);
+    if (typeof window === 'undefined') return;
+    const url = `${GALLERY_PATH}/${imageSlug(img.id, img.prompt)}`;
+    if (opts?.push === false) {
+      window.history.replaceState({ galleryModal: img.id }, '', url);
+    } else {
+      window.history.pushState({ galleryModal: img.id }, '', url);
+    }
+  }, []);
+
+  // Close the lightbox. If we pushed a modal entry, go Back so forward-nav stays consistent;
+  // otherwise (deep link / replaced entry) just rewrite the URL back to /gallery.
+  const closeImage = useCallback(() => {
+    if (typeof window === 'undefined') { setSelectedImage(null); return; }
+    if (window.history.state && window.history.state.galleryModal) {
+      window.history.back(); // popstate handler clears selectedImage
+    } else {
+      window.history.replaceState({}, '', GALLERY_PATH);
+      setSelectedImage(null);
+    }
+  }, []);
+
+  // Sync the modal to the URL on browser Back/Forward.
+  useEffect(() => {
+    const onPop = () => {
+      const slug = gallerySlugFromPath(window.location.pathname);
+      if (!slug) { setSelectedImage(null); return; }
+      const sid = shortIdFromSlug(slug);
+      const found = imagesRef.current.find(i => shortId(i.id) === sid);
+      if (found) {
+        setSelectedImage(found);
+      } else {
+        fetchImageBySlug(slug).then(img => { if (img) setSelectedImage(img); });
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  // Deep link: if the page loaded at /gallery/<slug>, open that image's modal.
+  useEffect(() => {
+    const slug = gallerySlugFromPath(window.location.pathname);
+    if (!slug) return;
+    const sid = shortIdFromSlug(slug);
+    const found = imagesRef.current.find(i => shortId(i.id) === sid);
+    if (found) { setSelectedImage(found); return; }
+    fetchImageBySlug(slug).then(img => { if (img) setSelectedImage(img); });
+    // Run once on mount; imagesRef is read live inside.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Total drives the "Showing X of Y" line and the infinite-scroll stop point.
+  // The cheap, cached /images/count is the source of truth — the varied browse
+  // endpoint deliberately skips the per-page COUNT(*).
   useEffect(() => {
     fetch(`${API_BASE}/images/count`)
       .then(r => r.json())
-      .then(data => setImageCount(data.count || 0))
+      .then(data => {
+        const c = data.count || 0;
+        setImageCount(c);
+        setTotal(c);
+      })
       .catch(() => {});
   }, []);
 
-  const fetchImages = useCallback(async (p: number, append = false) => {
+  const fetchImages = useCallback(async (append = false) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(p), per_page: String(PER_PAGE), skip_total: 'true' });
+      const params = new URLSearchParams({
+        per_page: String(PER_PAGE),
+        skip_total: 'true',
+        varied: 'true',
+        seed: String(seedRef.current),
+      });
+      if (append && cursorRef.current != null) params.set('after', cursorRef.current);
+      if (append && cursorWrappedRef.current) params.set('wrapped', 'true');
       const res = await fetch(`${API_BASE}/images?${params}`);
       const data = await res.json();
       const imgs: GeneratedImage[] = data.images || [];
       setImages(prev => append ? [...prev, ...imgs] : imgs);
-      if (typeof data.total === 'number' && data.total > 0) {
-        setTotal(data.total);
+      if (typeof data.next_cursor === 'number') {
+        cursorRef.current = String(data.next_cursor);
+        cursorWrappedRef.current = data.cursor_wrapped === true;
+        setHasMore(imgs.length > 0);
+      } else {
+		cursorRef.current = null;
+        setHasMore(false);
       }
-      setPage(p);
       setInitialLoad(false);
     } catch {
       setInitialLoad(false);
@@ -102,33 +214,36 @@ export default function GalleryPage() {
   }, []);
 
   useEffect(() => {
-    fetchImages(1);
+    fetchImages(false);
   }, [fetchImages]);
 
   // Close lightbox with Escape
   useEffect(() => {
     if (!selectedImage) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setSelectedImage(null);
+      if (e.key === 'Escape') closeImage();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedImage]);
+  }, [selectedImage, closeImage]);
 
-  // Infinite scroll
+  // Infinite scroll. Stop once we've cycled through the whole catalog (total) so
+  // the wrap-around cursor doesn't loop forever; total === 0 means count hasn't
+  // loaded yet, so keep flowing.
   useEffect(() => {
     if (!loaderRef.current) return;
     const observer = new IntersectionObserver(
       entries => {
-        if (entries[0].isIntersecting && !loading && images.length < total) {
-          fetchImages(page + 1, true);
+        const more = hasMore && (total === 0 || images.length < total);
+        if (entries[0].isIntersecting && !loading && more) {
+          fetchImages(true);
         }
       },
       { threshold: 0.1, rootMargin: '400px' }
     );
     observer.observe(loaderRef.current);
     return () => observer.disconnect();
-  }, [loading, images.length, total, page, fetchImages]);
+  }, [loading, images.length, total, hasMore, fetchImages]);
 
   const copyPrompt = async (prompt: string) => {
     await navigator.clipboard.writeText(prompt);
@@ -249,7 +364,7 @@ export default function GalleryPage() {
                     // Open lightbox for normal clicks; allow new-tab via modifiers.
                     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                     e.preventDefault();
-                    setSelectedImage(img);
+                    openImage(img);
                   }}
                   className="content-visibility-auto group relative block cursor-pointer overflow-hidden rounded-md border border-pink-100 bg-white shadow-sm transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-0.5 hover:border-pink-300 hover:shadow-lg"
                   title={img.prompt}
@@ -274,18 +389,24 @@ export default function GalleryPage() {
               ))}
             </div>
 
-            {images.length < total && (
+            {hasMore && (total === 0 || images.length < total) && (
               <div ref={loaderRef} className="flex justify-center py-10">
                 {loading ? (
                   <Loader2 className="animate-spin text-pink-400" size={32} />
                 ) : (
-                  <div className="h-4" />
+                  <button
+                    onClick={() => fetchImages(true)}
+                    className="flex items-center gap-2 px-6 py-3 bg-white border border-pink-200 rounded-xl text-slate-600 font-bold hover:bg-pink-50 hover:border-pink-300 transition-all"
+                  >
+                    <ChevronDown size={18} />
+                    Load more
+                  </button>
                 )}
               </div>
             )}
 
             <p className="text-center text-slate-400 text-sm mt-4">
-              Showing {images.length.toLocaleString()} of {total.toLocaleString()} images
+              Showing {images.length.toLocaleString()} of {(total || imageCount).toLocaleString()} images
             </p>
             </>
           )}
@@ -305,8 +426,15 @@ export default function GalleryPage() {
           </p>
           <p className="text-slate-600 leading-relaxed mb-4">
             Click any image to see its <strong>prompt, seed, model, and related art</strong>.
-            Every image has its own SEO-friendly page under <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">/image/...</code>,
-            and the full catalog is indexed in the <Link href="/sitemap.xml" className="text-pink-500 hover:text-pink-600 underline">image sitemap</Link>.
+            Every image has its own SEO-friendly page under <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">/image/...</code>.
+          </p>
+          <p className="text-slate-600 leading-relaxed mb-4">
+            Z-Image Turbo is just one of the models we&apos;ve accelerated with CuteDSL. Try
+            {' '}<strong>CuteChronos2</strong> — our 27× faster Chronos-2 time-series forecaster —
+            {' '}<strong>LTX 2.3 text-to-video</strong>, and Flux Schnell image generation, plus
+            Kokoro TTS, speech-to-text, and Gemma4 chat &amp; vision. Compare the numbers on the
+            {' '}<Link href="/evals" className="text-pink-500 hover:text-pink-600 underline">benchmarks page</Link>
+            {' '}or run them live in the <Link href="/playground" className="text-pink-500 hover:text-pink-600 underline">playground</Link>.
           </p>
           <p className="text-slate-600 leading-relaxed">
             Want to generate your own? <Link href="/#api" className="text-pink-500 hover:text-pink-600 font-semibold">Grab an API key</Link>,
@@ -322,7 +450,7 @@ export default function GalleryPage() {
           aria-modal="true"
           aria-label="Image detail"
           className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-2 sm:p-4 backdrop-blur-sm"
-          onClick={() => setSelectedImage(null)}
+          onClick={closeImage}
         >
           <div
             className="bg-white rounded-2xl w-full max-w-[min(96vw,1100px)] max-h-[94vh] overflow-y-auto shadow-2xl"
@@ -338,7 +466,7 @@ export default function GalleryPage() {
                 style={{ aspectRatio: `${selectedImage.width} / ${selectedImage.height}` }}
               />
               <button
-                onClick={() => setSelectedImage(null)}
+                onClick={closeImage}
                 aria-label="Close"
                 className="absolute top-3 right-3 p-2 bg-black/50 hover:bg-black/70 rounded-full text-white transition-colors"
               >

@@ -8,9 +8,11 @@ Optimized for RTX 5090 with NVFP4 quantization support.
 
 import asyncio
 import base64
+import binascii
 import io
 import json
 import logging
+import re
 import math
 import os
 import shlex
@@ -23,10 +25,11 @@ import contextlib
 import ipaddress
 import traceback
 import socket
+import unicodedata
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Callable, Iterator, Optional
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse
 
 import httpx
 import requests
@@ -71,6 +74,7 @@ if IMAGE_API_SECRET:
 ERROR_LOG_PATH = os.getenv("ERROR_LOG_PATH", "/nvme0n1-disk/tmp/cutedsl-inference-errors.jsonl")
 
 DEVICE = os.getenv("DEVICE", "cuda")
+NSFW_DEVICE = os.getenv("NSFW_DEVICE", "cpu").strip() or "cpu"
 DTYPE_STR = os.getenv("DTYPE", "bfloat16")
 DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
@@ -245,9 +249,65 @@ ZIMAGE_OOM_RECOVERY_WAIT_SECONDS = float(os.getenv("ZIMAGE_OOM_RECOVERY_WAIT_SEC
 ZIMAGE_OOM_RECOVERY_POLL_SECONDS = float(os.getenv("ZIMAGE_OOM_RECOVERY_POLL_SECONDS", "0.5"))
 ZIMAGE_FATAL_RESTART_DELAY_SECONDS = float(os.getenv("ZIMAGE_FATAL_RESTART_DELAY_SECONDS", "10"))
 ZIMAGE_REQUIRE_CUDA_READY = os.getenv("ZIMAGE_REQUIRE_CUDA_READY", "1") == "1"
+# A co-resident quantized Z-Image backend can keep image service available when
+# this BF16 worker is cold. A warm CuteDSL pipeline always retains the existing
+# generation path; a failed native call may use the local loader only when the
+# CUDA cold-load headroom check says doing so is safe.
+ZIMAGE_NATIVE_FALLBACK_URL = os.getenv("ZIMAGE_NATIVE_FALLBACK_URL", "").strip().rstrip("/")
+ZIMAGE_NATIVE_FALLBACK_TIMEOUT_SECONDS = float(
+    os.getenv("ZIMAGE_NATIVE_FALLBACK_TIMEOUT_SECONDS", "180")
+)
+ZIMAGE_NATIVE_FALLBACK_RETRIES = max(
+    0, int(os.getenv("ZIMAGE_NATIVE_FALLBACK_RETRIES", "1"))
+)
+# A failed resident native backend is normally a signal that shared GPU
+# capacity is unavailable.  Starting the much larger local BF16 pipeline in
+# that state can monopolize the interpreter during checkpoint loading and make
+# even /healthz time out.  Development deployments can opt back into that
+# legacy fallback explicitly.
+ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED = (
+    os.getenv("ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED", "0") == "1"
+)
+ZIMAGE_NATIVE_HEADROOM_GRACE_SECONDS = max(
+    0.0, float(os.getenv("ZIMAGE_NATIVE_HEADROOM_GRACE_SECONDS", "0"))
+)
+ZIMAGE_NATIVE_HEADROOM_POLL_SECONDS = max(
+    0.1, float(os.getenv("ZIMAGE_NATIVE_HEADROOM_POLL_SECONDS", "2"))
+)
+# Background producers have their own durable retry queues.  Do not let one of
+# them occupy the single native image lane for the full interactive request
+# budget when another GPU tenant owns the card; return explicit backpressure
+# quickly so paid/interactive work can be admitted ahead of it.
+ZIMAGE_NATIVE_BACKGROUND_HEADROOM_GRACE_SECONDS = max(
+    0.0, float(os.getenv("ZIMAGE_NATIVE_BACKGROUND_HEADROOM_GRACE_SECONDS", "5"))
+)
+ZIMAGE_NATIVE_GENERATION_FAILURE_GRACE_SECONDS = max(
+    0.0, float(os.getenv("ZIMAGE_NATIVE_GENERATION_FAILURE_GRACE_SECONDS", "0"))
+)
+ZIMAGE_NATIVE_GENERATION_FAILURE_POLL_SECONDS = max(
+    0.1, float(os.getenv("ZIMAGE_NATIVE_GENERATION_FAILURE_POLL_SECONDS", "2"))
+)
+ZIMAGE_NATIVE_RESTART_GRACE_SECONDS = max(
+    0.0, float(os.getenv("ZIMAGE_NATIVE_RESTART_GRACE_SECONDS", "0"))
+)
+ZIMAGE_NATIVE_RESTART_POLL_SECONDS = max(
+    0.1, float(os.getenv("ZIMAGE_NATIVE_RESTART_POLL_SECONDS", "2"))
+)
+# A remote Z-Image endpoint is the last-resort lane when every local CUDA path
+# is unavailable.  Keep it explicitly opt-in because it is metered, but use
+# the same model, dimensions, steps, seed, prompt and LoRA so recovery does not
+# silently turn into a different generation product.
+ZIMAGE_FAL_FALLBACK_ENABLED = os.getenv("ZIMAGE_FAL_FALLBACK_ENABLED", "0") == "1"
+ZIMAGE_FAL_FALLBACK_TIMEOUT_SECONDS = float(
+    os.getenv("ZIMAGE_FAL_FALLBACK_TIMEOUT_SECONDS", "180")
+)
+ZIMAGE_NATIVE_FAILURE_COOLDOWN_SECONDS = max(
+    0.0, float(os.getenv("ZIMAGE_NATIVE_FAILURE_COOLDOWN_SECONDS", "30"))
+)
 ALLOW_PRIVATE_IMAGE_URLS = os.getenv("ALLOW_PRIVATE_IMAGE_URLS", "0") == "1"
 REMOTE_IMAGE_TIMEOUT_SECONDS = float(os.getenv("REMOTE_IMAGE_TIMEOUT_SECONDS", "15"))
 REMOTE_IMAGE_MAX_BYTES = int(os.getenv("REMOTE_IMAGE_MAX_BYTES", str(20 * 1024 * 1024)))
+REMOTE_IMAGE_MAX_REDIRECTS = int(os.getenv("REMOTE_IMAGE_MAX_REDIRECTS", "3"))
 ZIMAGE_PROMPT_CACHE_SIZE = max(0, int(os.getenv("ZIMAGE_PROMPT_CACHE_SIZE", "64")))
 ZIMAGE_ENHANCE_PROMPT = os.getenv("ZIMAGE_ENHANCE_PROMPT", "1") == "1"
 ZIMAGE_PREWARM_LORA_IDS = tuple(
@@ -260,7 +320,7 @@ ZIMAGE_PREWARM_LORA_IDS = tuple(
 # Model memory manager — lazy load, LRU eviction, idle unload
 # ---------------------------------------------------------------------------
 
-MODEL_IDLE_TIMEOUT = int(os.getenv("MODEL_IDLE_TIMEOUT", "3600"))  # 1 hour default for batch generation
+MODEL_IDLE_TIMEOUT = int(os.getenv("MODEL_IDLE_TIMEOUT", "20"))  # Release shared GPU memory between bursts
 BATCH_WINDOW_MS = int(os.getenv("BATCH_WINDOW_MS", "50"))  # ms to wait for batching
 ZIMAGE_DYNAMIC_BATCH_ENABLED = os.getenv("ZIMAGE_DYNAMIC_BATCH_ENABLED", "1") == "1"
 ZIMAGE_DYNAMIC_BATCH_MAX_SIZE = max(1, int(os.getenv("ZIMAGE_DYNAMIC_BATCH_MAX_SIZE", "4")))
@@ -759,20 +819,31 @@ class ModelManager:
             return max(0.0, self._hold_until - time.time()), {}
 
     @contextlib.contextmanager
-    def reserve(self, model_name: str):
-        """Protect accepted async work from a later peer admission hold."""
+    def reserve(self, model_name: str, *, allow_while_held: bool = False):
+        """Protect accepted async work from a later peer admission hold.
+
+        ``allow_while_held`` is only for work that is guaranteed to execute on
+        a separately managed backend. Such work must not be counted as local
+        GPU admission while a peer already owns the local-model hold.
+        """
+        admitted = False
         with self._lock:
-            self._raise_if_held_locked()
-            self._admitted[model_name] = self._admitted.get(model_name, 0) + 1
+            held = self._hold_until > time.time()
+            if held and not allow_while_held:
+                self._raise_if_held_locked()
+            if not held:
+                self._admitted[model_name] = self._admitted.get(model_name, 0) + 1
+                admitted = True
         try:
             yield
         finally:
-            with self._lock:
-                remaining = max(0, self._admitted.get(model_name, 0) - 1)
-                if remaining:
-                    self._admitted[model_name] = remaining
-                else:
-                    self._admitted.pop(model_name, None)
+            if admitted:
+                with self._lock:
+                    remaining = max(0, self._admitted.get(model_name, 0) - 1)
+                    if remaining:
+                        self._admitted[model_name] = remaining
+                    else:
+                        self._admitted.pop(model_name, None)
 
     def release_hold(self) -> None:
         with self._lock:
@@ -1207,6 +1278,19 @@ def _zimage_memory_pressure_detail(min_free_mb: int, operation_name: str) -> str
     return (
         f"{operation_name} needs at least {min_free_mb} MB free CUDA memory "
         f"before starting Z-Image; only {free_mb} MB is free"
+    )
+
+
+def _should_use_native_zimage_fallback(operation_name: str) -> bool:
+    """Prefer the resident quantized backend over a duplicate BF16 cold load."""
+    del operation_name  # retained for readable call sites and health diagnostics
+    return bool(ZIMAGE_NATIVE_FALLBACK_URL and not model_manager.is_loaded("zimage"))
+
+
+def _native_failure_allows_local_cold_load(operation_name: str) -> bool:
+    return (
+        ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED
+        and _zimage_memory_pressure_detail(ZIMAGE_LOAD_MIN_FREE_MB, operation_name) is None
     )
 
 
@@ -1669,9 +1753,27 @@ def _remember_request_inference_params(request: Request, **params) -> None:
     request.state.inference_params = params
 
 
-def _require_nonempty_prompt(prompt: str, field_name: str = "prompt"):
+def _validate_prompt_text(prompt: str, field_name: str = "prompt") -> str:
     if not prompt or not prompt.strip():
-        raise HTTPException(400, f"{field_name} must not be empty")
+        raise ValueError(f"{field_name} must not be empty")
+    # The native image backend accepts a C string. Embedded controls (notably
+    # NUL) can truncate or corrupt that string after JSON decoding and have
+    # caused stable-diffusion.cpp's text conditioner to abort the whole worker.
+    # Keep ordinary multiline prompts, but reject non-text controls and lone
+    # UTF-16 surrogates before they reach any inference backend.
+    if any(
+        unicodedata.category(char) in {"Cc", "Cs"} and char not in "\t\n\r"
+        for char in prompt
+    ):
+        raise ValueError(f"{field_name} contains unsupported control characters")
+    return prompt
+
+
+def _require_nonempty_prompt(prompt: str, field_name: str = "prompt"):
+    try:
+        _validate_prompt_text(prompt, field_name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _write_error_event(event: dict):
@@ -1774,7 +1876,10 @@ def _check_secret(secret: str = ""):
 
 
 def _require_http_url(value: str, field_name: str = "url"):
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError as e:
+        raise HTTPException(400, f"{field_name} is not a valid URL") from e
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(400, f"{field_name} must be an http(s) URL")
 
@@ -1806,46 +1911,91 @@ def _is_public_ip_address(host: str) -> bool:
 def _validate_remote_image_url(value: str, field_name: str = "image_url"):
     _require_http_url(value, field_name)
     parsed = urlparse(value)
-    host = parsed.hostname
+    try:
+        host = parsed.hostname
+        # Accessing port makes urllib reject malformed/out-of-range ports here,
+        # before the HTTP client can turn them into an unhandled InvalidURL.
+        parsed.port
+    except ValueError as e:
+        raise HTTPException(400, f"{field_name} is not a valid URL") from e
     if not host:
         raise HTTPException(400, f"{field_name} must include a host")
+    # Numeric dotted hosts with leading zeroes have inconsistent octal/decimal
+    # interpretations across URL parsers and resolvers. Reject them instead of
+    # letting the fetch client fail or accidentally resolve one as loopback.
+    if all(part.isdigit() for part in host.split(".")) and len(host.split(".")) == 4:
+        try:
+            ipaddress.IPv4Address(host)
+        except ipaddress.AddressValueError as e:
+            raise HTTPException(400, f"{field_name} has an invalid IPv4 address") from e
     if not ALLOW_PRIVATE_IMAGE_URLS and not _is_public_ip_address(host):
         raise HTTPException(400, f"{field_name} must resolve to a public address")
 
 
-def _load_remote_image(image_url: str) -> Image.Image:
-    _validate_remote_image_url(image_url, "image_url")
+def _load_image_bytes(image_bytes: bytes, source_name: str = "image") -> Image.Image:
+    if not image_bytes:
+        raise HTTPException(400, f"{source_name} is empty")
+    if len(image_bytes) > REMOTE_IMAGE_MAX_BYTES:
+        raise HTTPException(413, f"{source_name} is too large")
     try:
-        with requests.get(
-            image_url,
-            stream=True,
-            timeout=REMOTE_IMAGE_TIMEOUT_SECONDS,
-            headers={"User-Agent": "CuteDSL inference image fetcher"},
-        ) as response:
-            if response.status_code >= 400:
-                raise HTTPException(400, f"image_url returned HTTP {response.status_code}")
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            if content_type and not content_type.startswith("image/"):
-                raise HTTPException(400, "image_url did not return an image")
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            source.load()
+            return source.convert("RGB")
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
+        raise HTTPException(400, f"{source_name} did not contain a valid image") from e
 
-            buf = io.BytesIO()
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if not chunk:
+
+def _load_base64_image(image_base64: str) -> Image.Image:
+    # Bound the encoded payload before allocating the decoded copy. The small
+    # allowance covers padding and whitespace used by wrapped base64 encoders.
+    if len(image_base64) > REMOTE_IMAGE_MAX_BYTES * 2:
+        raise HTTPException(413, "image_base64 is too large")
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError, TypeError) as e:
+        raise HTTPException(400, "image_base64 is not valid base64") from e
+    return _load_image_bytes(image_bytes, "image_base64")
+
+
+def _load_remote_image(image_url: str) -> Image.Image:
+    try:
+        current_url = image_url
+        for redirect_count in range(REMOTE_IMAGE_MAX_REDIRECTS + 1):
+            _validate_remote_image_url(current_url, "image_url")
+            with requests.get(
+                current_url,
+                stream=True,
+                timeout=REMOTE_IMAGE_TIMEOUT_SECONDS,
+                headers={"User-Agent": "CuteDSL inference image fetcher"},
+                allow_redirects=False,
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location", "")
+                    if not location:
+                        raise HTTPException(400, "image_url returned a redirect without a location")
+                    if redirect_count >= REMOTE_IMAGE_MAX_REDIRECTS:
+                        raise HTTPException(400, "image_url returned too many redirects")
+                    current_url = urljoin(current_url, location)
                     continue
-                buf.write(chunk)
-                if buf.tell() > REMOTE_IMAGE_MAX_BYTES:
-                    raise HTTPException(413, "image_url image is too large")
-            if buf.tell() == 0:
-                raise HTTPException(400, "image_url returned an empty response")
+                if response.status_code >= 400:
+                    raise HTTPException(400, f"image_url returned HTTP {response.status_code}")
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if content_type and not content_type.startswith("image/"):
+                    raise HTTPException(400, "image_url did not return an image")
 
-        buf.seek(0)
-        return Image.open(buf).convert("RGB")
+                buf = io.BytesIO()
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    buf.write(chunk)
+                    if buf.tell() > REMOTE_IMAGE_MAX_BYTES:
+                        raise HTTPException(413, "image_url image is too large")
+                return _load_image_bytes(buf.getvalue(), "image_url")
+        raise HTTPException(400, "image_url returned too many redirects")
     except HTTPException:
         raise
     except requests.exceptions.RequestException as e:
         raise HTTPException(400, f"image_url could not be fetched: {type(e).__name__}") from e
-    except (UnidentifiedImageError, OSError) as e:
-        raise HTTPException(400, "image_url did not contain a valid image") from e
 
 
 # ---------------------------------------------------------------------------
@@ -1961,6 +2111,12 @@ def health(request: Request):
             "zimage": model_manager.is_loaded("zimage"),
             "chronos2": model_manager.is_loaded("chronos2"),
             "zimage_enabled": LOAD_ZIMAGE,
+            "zimage_native_fallback_enabled": bool(ZIMAGE_NATIVE_FALLBACK_URL),
+            "zimage_native_fallback_active": _should_use_native_zimage_fallback("health"),
+            "zimage_fal_fallback_enabled": ZIMAGE_FAL_FALLBACK_ENABLED,
+            "zimage_native_circuit_open": (
+                time.monotonic() < _native_fallback_disabled_until
+            ),
             "chronos2_enabled": LOAD_CHRONOS,
             "nsfw": nsfw_classifier is not None,
             "text_encoder": _zimage_text_encoder_placement
@@ -2058,7 +2214,12 @@ def _load_nsfw_classifier():
         nsfw_classifier = hf_pipeline(
             "image-classification",
             model="Falconsai/nsfw_image_detection",
-            device=DEVICE if torch.cuda.is_available() else "cpu",
+            # This small safety model is latency-tolerant and shares the host
+            # with several much larger CUDA services. Loading it on GPU raced
+            # other tenants and produced a 500 while only 35 MiB was free.
+            # CPU placement is deterministic and leaves image-generation VRAM
+            # untouched even when global CUDA admission changes concurrently.
+            device=NSFW_DEVICE,
         )
         # Compile for faster inference
         try:
@@ -2108,19 +2269,15 @@ class NSFWRequest(BaseModel):
 
 
 @app.post("/nsfw_detect")
-async def nsfw_detect(req: NSFWRequest):
+async def nsfw_detect(req: NSFWRequest, secret: str = ""):
     """Classify an image as NSFW or not. Model loads on demand and unloads after."""
-    from PIL import Image as PILImage
-
+    _check_secret(secret)
     if req.image_base64:
-        img_bytes = base64.b64decode(req.image_base64)
-        image = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
+        image = _load_base64_image(req.image_base64)
     elif req.image_url:
-        import httpx as hx
-        async with hx.AsyncClient() as client:
-            resp = await client.get(req.image_url, timeout=30)
-            resp.raise_for_status()
-        image = PILImage.open(io.BytesIO(resp.content)).convert("RGB")
+        image = await asyncio.get_event_loop().run_in_executor(
+            None, _load_remote_image, req.image_url
+        )
     else:
         raise HTTPException(400, "image_url or image_base64 required")
 
@@ -2139,12 +2296,12 @@ async def nsfw_detect(req: NSFWRequest):
 async def nsfw_detect_file(
     image_file: UploadFile = File(...),
     unload_after: bool = True,
+    secret: str = "",
 ):
     """Classify an uploaded image as NSFW or not."""
-    from PIL import Image as PILImage
-
+    _check_secret(secret)
     content = await image_file.read()
-    image = PILImage.open(io.BytesIO(content)).convert("RGB")
+    image = _load_image_bytes(content, "image_file")
 
     async with gpu_semaphore:
         result = await asyncio.get_event_loop().run_in_executor(
@@ -2170,19 +2327,17 @@ class AestheticRequest(BaseModel):
 
 
 @app.post("/aesthetic_score")
-async def aesthetic_score(req: AestheticRequest):
+async def aesthetic_score(req: AestheticRequest, secret: str = ""):
     """Score image aesthetics (LAION predictor, ~1-10). CPU by default."""
+    _check_secret(secret)
     if req.image_base64:
-        img_bytes = base64.b64decode(req.image_base64)
+        image = _load_base64_image(req.image_base64)
     elif req.image_url:
-        import httpx as hx
-        async with hx.AsyncClient() as client:
-            resp = await client.get(req.image_url, timeout=30)
-            resp.raise_for_status()
-        img_bytes = resp.content
+        image = await asyncio.get_event_loop().run_in_executor(
+            None, _load_remote_image, req.image_url
+        )
     else:
         raise HTTPException(400, "image_url or image_base64 required")
-    image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     scores = await asyncio.get_event_loop().run_in_executor(
         None, aesthetic_score_images, [image]
     )
@@ -2224,9 +2379,7 @@ class ZImageRequest(BaseModel):
     @field_validator("prompt")
     @classmethod
     def _validate_prompt(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("prompt must not be empty")
-        return value
+        return _validate_prompt_text(value)
 
 
 _lora_cache_dir = os.path.join(os.path.dirname(__file__), ".lora_cache")
@@ -2234,6 +2387,8 @@ _lora_cache_dir = os.path.join(os.path.dirname(__file__), ".lora_cache")
 
 _lora_swapper = None
 _lora_swapper_lock = threading.Lock()
+_native_fallback_circuit_lock = threading.Lock()
+_native_fallback_disabled_until = 0.0
 
 
 def _get_lora_swapper(transformer):
@@ -2615,6 +2770,542 @@ def _decode_result_image(result: dict) -> Image.Image | None:
     except Exception as e:
         logger.warning("zimage result decode failed: %s", e)
         return None
+
+
+def _native_zimage_request(req: ZImageRequest, prompt: str) -> tuple[dict, object | None]:
+    """Build the canonical native request while preserving CuteDSL LoRA routing."""
+    if lora_engine is None:
+        _init_lora_engine()
+    resolved_req = _copy_zimage_request(req, prompt)
+    lora, final_prompt = _resolve_lora(resolved_req)
+    width = (req.width // 64) * 64 or 1024
+    height = (req.height // 64) * 64 or 1024
+    payload = {
+        "model": "zimage-turbo",
+        "prompt": final_prompt,
+        "width": width,
+        "height": height,
+        "steps": req.num_inference_steps,
+        "guidance_scale": req.guidance_scale,
+        "seed": req.seed,
+        "teleport": bool(req.teleport and lora is None),
+        "response_format": "b64_json",
+        # Private routing metadata. _call_native_zimage removes this before
+        # serialising the OpenAI-compatible request body.
+        "_omniserve_tier": "background" if req.low_priority else "paid",
+    }
+    if req.teleport_approx:
+        logger.info("native fallback ignores approximate teleport and uses exact-key replay only")
+    if lora is not None:
+        lora_filename = unquote(os.path.basename(urlparse(lora.url).path))
+        if not lora_filename:
+            raise HTTPException(503, f"native LoRA {lora.id} has no cache filename")
+        payload.update({
+            "lora_id": lora.id,
+            "lora_filename": lora_filename,
+            "lora_scale": _effective_lora_scale(lora, req.lora_scale),
+        })
+    return payload, lora
+
+
+def _call_native_zimage(payload: dict) -> dict:
+    """Call the co-resident native backend with bounded transient retry."""
+    tier = str(payload.get("_omniserve_tier") or "paid").strip().lower()
+    if tier not in {"paid", "sub", "free", "background"}:
+        tier = "paid"
+    request_payload = {
+        key: value for key, value in payload.items() if key != "_omniserve_tier"
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Omniserve-Internal": "local",
+        "X-Omniserve-Tier": tier,
+    }
+    if IMAGE_API_SECRET:
+        headers["Authorization"] = f"Bearer {IMAGE_API_SECRET}"
+
+    last_error = "native fallback failed"
+    transient_statuses = {429, 500, 502, 503, 504}
+    attempt = 0
+    # Capacity, generation and restart errors can alternate during one outage.
+    # Measure every recovery grace from the first failure, not each new type.
+    recovery_started = None
+    headroom_cache_reclaimed = False
+    while True:
+        try:
+            response = requests.post(
+                f"{ZIMAGE_NATIVE_FALLBACK_URL}/v1/images/generations",
+                json=request_payload,
+                headers=headers,
+                timeout=max(1.0, ZIMAGE_NATIVE_FALLBACK_TIMEOUT_SECONDS),
+            )
+            if response.status_code >= 400:
+                message = ""
+                try:
+                    error_document = response.json()
+                    error_value = error_document.get("error") if isinstance(error_document, dict) else None
+                    if isinstance(error_value, dict):
+                        message = str(error_value.get("message") or "")
+                    elif error_value is not None:
+                        message = str(error_value)
+                except (ValueError, TypeError):
+                    pass
+                message = " ".join(message.split())[:240]
+                last_error = f"native fallback returned HTTP {response.status_code}"
+                if message:
+                    last_error = f"{last_error}: {message}"
+                # Another managed GPU workload can temporarily keep the native
+                # backend below its explicit safety floor. The old generic
+                # 100-ms retry could not outlive even a short model residency,
+                # so otherwise healthy image requests failed immediately.
+                # Queue only this precise capacity response; arbitrary native
+                # 5xx failures retain the tightly bounded generic retry below.
+                headroom_failure = (
+                    response.status_code == 503
+                    and "image generation needs at least" in message
+                    and "free GPU memory" in message
+                )
+                admission_timeout_failure = (
+                    response.status_code == 503
+                    and message == "admission timeout; retry"
+                )
+                if headroom_failure:
+                    headroom_grace_seconds = (
+                        ZIMAGE_NATIVE_BACKGROUND_HEADROOM_GRACE_SECONDS
+                        if tier == "background"
+                        else ZIMAGE_NATIVE_HEADROOM_GRACE_SECONDS
+                    )
+                    now = time.monotonic()
+                    if recovery_started is None:
+                        recovery_started = now
+                    headroom_deadline = recovery_started + headroom_grace_seconds
+                    if now < headroom_deadline:
+                        # Reclaim our unused allocator blocks before waiting on
+                        # another tenant. Doing this only in the generic retry
+                        # below leaves reclaimable VRAM idle for the entire
+                        # capacity grace (60 seconds in production). Never
+                        # unload a resident pipeline or alter the request.
+                        if not headroom_cache_reclaimed:
+                            headroom_cache_reclaimed = True
+                            if not model_manager.is_loaded("zimage"):
+                                _clear_torch_cuda_caches()
+                        delay = min(
+                            ZIMAGE_NATIVE_HEADROOM_POLL_SECONDS,
+                            headroom_deadline - now,
+                        )
+                        logger.warning(
+                            "%s; waiting %.1fs for managed GPU capacity",
+                            last_error,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                # stable-diffusion.cpp currently reports CUDA allocation and
+                # conditioner failures through this one opaque native error.
+                # They can happen after the admission check when another GPU
+                # tenant grows during denoising. Keep only that exact runtime
+                # failure attached to a bounded recovery window; detailed 5xx
+                # errors and all client errors retain the generic retry below.
+                generation_capacity_failure = (
+                    response.status_code == 500
+                    and message == "image generation failed"
+                )
+                generation_failure_grace_seconds = (
+                    ZIMAGE_NATIVE_BACKGROUND_HEADROOM_GRACE_SECONDS
+                    if tier == "background"
+                    else ZIMAGE_NATIVE_GENERATION_FAILURE_GRACE_SECONDS
+                )
+                if generation_capacity_failure and generation_failure_grace_seconds:
+                    now = time.monotonic()
+                    if recovery_started is None:
+                        recovery_started = now
+                    generation_failure_deadline = (
+                        recovery_started + generation_failure_grace_seconds
+                    )
+                    if now < generation_failure_deadline:
+                        if not model_manager.is_loaded("zimage"):
+                            _clear_torch_cuda_caches()
+                        delay = min(
+                            ZIMAGE_NATIVE_GENERATION_FAILURE_POLL_SECONDS,
+                            generation_failure_deadline - now,
+                        )
+                        logger.warning(
+                            "%s; waiting %.1fs for transient native GPU recovery",
+                            last_error,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                if (
+                    response.status_code in transient_statuses
+                    and attempt < ZIMAGE_NATIVE_FALLBACK_RETRIES
+                    and not (tier == "background" and admission_timeout_failure)
+                    # The dedicated recovery loop has already spent its
+                    # budget. Do not start another potentially slow native
+                    # request via the generic retry after that deadline.
+                    and not (headroom_failure and headroom_grace_seconds > 0)
+                    and not (
+                        generation_capacity_failure
+                        and generation_failure_grace_seconds > 0
+                    )
+                ):
+                    # This worker can retain unreferenced CUDA allocations after
+                    # a failed local training/load attempt even while its BF16
+                    # inference model is cold.  The co-resident native backend
+                    # then fails its first scratch allocation.  Reclaim those
+                    # allocations before retrying; a plain sleep cannot change
+                    # the memory condition which produced the 500.
+                    if not model_manager.is_loaded("zimage"):
+                        before_mb = _cuda_free_mb()
+                        _clear_torch_cuda_caches()
+                        after_mb = _cuda_free_mb()
+                        logger.warning(
+                            "%s; reclaimed local CUDA cache (%d -> %d MB free) before retry",
+                            last_error,
+                            before_mb,
+                            after_mb,
+                        )
+                    else:
+                        logger.warning("%s; retrying once", last_error)
+                    time.sleep(0.1)
+                    attempt += 1
+                    continue
+                background_backpressure = tier == "background" and (
+                    headroom_failure
+                    or generation_capacity_failure
+                    or admission_timeout_failure
+                )
+                raise HTTPException(
+                    429 if background_backpressure else (
+                        503 if response.status_code in transient_statuses else 502
+                    ),
+                    last_error,
+                    headers={"Retry-After": "15" if background_backpressure else "5"},
+                )
+            document = response.json()
+            rows = document.get("data") if isinstance(document, dict) else None
+            row = rows[0] if isinstance(rows, list) and rows else None
+            encoded = row.get("b64_json") if isinstance(row, dict) else None
+            if not isinstance(encoded, str) or not encoded:
+                raise ValueError("response has no b64_json image")
+            image_bytes = base64.b64decode(encoded, validate=True)
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                actual_width, actual_height = image.size
+                image_format = (image.format or row.get("format") or "webp").lower()
+            expected = (int(request_payload["width"]), int(request_payload["height"]))
+            if (actual_width, actual_height) != expected:
+                raise ValueError(
+                    f"response dimensions {actual_width}x{actual_height} do not match "
+                    f"requested {expected[0]}x{expected[1]}"
+                )
+            return {
+                "encoded": encoded,
+                "image_bytes": image_bytes,
+                "format": image_format,
+                "width": actual_width,
+                "height": actual_height,
+                "inference_time_ms": int(row.get("inference_time_ms") or 0),
+                "teleport": row.get("teleport"),
+                "model": document.get("model"),
+                "backend": "omniserve-native",
+            }
+        except HTTPException:
+            raise
+        except requests.ConnectionError as exc:
+            # The native service is managed by systemd. A fatal assertion can
+            # make its socket refuse connections while the model reloads; the
+            # old 0.1-second retry immediately fell through to a metered Fal
+            # account that may itself be unavailable. In production, allow a
+            # bounded grace window for that same managed service to return.
+            # Background producers already have durable retry queues, though,
+            # and must not occupy the single image lane throughout that grace
+            # period. Treat an unavailable native socket as the same explicit
+            # backpressure used for native admission/capacity failures.
+            if tier == "background":
+                last_error = "native fallback is restarting"
+                raise HTTPException(
+                    429,
+                    last_error,
+                    headers={"Retry-After": "15"},
+                ) from exc
+            now = time.monotonic()
+            if recovery_started is None:
+                recovery_started = now
+            restart_deadline = recovery_started + ZIMAGE_NATIVE_RESTART_GRACE_SECONDS
+            if attempt < ZIMAGE_NATIVE_FALLBACK_RETRIES or now < restart_deadline:
+                logger.warning(
+                    "native fallback connection failed; waiting %.1fs for managed restart",
+                    ZIMAGE_NATIVE_RESTART_POLL_SECONDS,
+                )
+                time.sleep(ZIMAGE_NATIVE_RESTART_POLL_SECONDS)
+                attempt += 1
+                continue
+            last_error = "native fallback response failed validation (ConnectionError)"
+            raise HTTPException(503, last_error, headers={"Retry-After": "5"}) from exc
+        except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError) as exc:
+            last_error = f"native fallback response failed validation ({type(exc).__name__})"
+            if attempt < ZIMAGE_NATIVE_FALLBACK_RETRIES:
+                logger.warning("%s; retrying once", last_error)
+                time.sleep(0.1)
+                attempt += 1
+                continue
+            raise HTTPException(503, last_error, headers={"Retry-After": "5"}) from exc
+    raise HTTPException(503, last_error, headers={"Retry-After": "5"})
+
+
+def _fal_result_image_bytes(location: str) -> bytes:
+    """Decode a trusted fal result URL without accepting an unbounded body."""
+    if not isinstance(location, str) or not location:
+        raise ValueError("fal response image has no URL")
+    if location.startswith("data:"):
+        header, separator, encoded = location.partition(",")
+        if not separator or ";base64" not in header.lower():
+            raise ValueError("fal response data URL is not base64")
+        if len(encoded) > REMOTE_IMAGE_MAX_BYTES * 2:
+            raise ValueError("fal response image is too large")
+        return base64.b64decode(encoded, validate=True)
+    parsed = urlparse(location)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("fal response image URL is invalid")
+    with requests.get(
+        location,
+        stream=True,
+        timeout=max(1.0, ZIMAGE_FAL_FALLBACK_TIMEOUT_SECONDS),
+        headers={"User-Agent": "CuteDSL inference fal fallback"},
+    ) as response:
+        response.raise_for_status()
+        output = io.BytesIO()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            output.write(chunk)
+            if output.tell() > REMOTE_IMAGE_MAX_BYTES:
+                raise ValueError("fal response image is too large")
+        return output.getvalue()
+
+
+def _call_fal_zimage(payload: dict, lora: object | None = None) -> dict:
+    """Run the same Z-Image request remotely after local CUDA exhaustion."""
+    steps = int(payload.get("steps") or ZIMAGE_DEFAULT_STEPS)
+    if steps < 1 or steps > 8:
+        raise HTTPException(503, "remote Z-Image fallback supports 1 to 8 steps")
+    try:
+        import fal_client
+    except ImportError as exc:
+        raise HTTPException(503, "remote Z-Image fallback client is unavailable") from exc
+
+    width = int(payload["width"])
+    height = int(payload["height"])
+    arguments = {
+        "prompt": str(payload["prompt"]),
+        "image_size": {"width": width, "height": height},
+        "num_inference_steps": steps,
+        "seed": int(payload.get("seed") or 0),
+        "sync_mode": True,
+        "num_images": 1,
+        "enable_safety_checker": False,
+        "output_format": "webp",
+        "enable_prompt_expansion": False,
+    }
+    endpoint = "fal-ai/z-image/turbo"
+    if lora is not None:
+        lora_url = str(getattr(lora, "url", "") or "")
+        if not lora_url:
+            raise HTTPException(503, "remote Z-Image LoRA has no URL")
+        endpoint += "/lora"
+        arguments["loras"] = [{
+            "path": lora_url,
+            "scale": _effective_lora_scale(lora, float(payload.get("lora_scale") or 1.0)),
+        }]
+
+    started = time.perf_counter()
+    try:
+        document = fal_client.subscribe(
+            endpoint,
+            arguments=arguments,
+            start_timeout=max(1.0, ZIMAGE_FAL_FALLBACK_TIMEOUT_SECONDS),
+            client_timeout=max(1.0, ZIMAGE_FAL_FALLBACK_TIMEOUT_SECONDS),
+        )
+        rows = document.get("images") if isinstance(document, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows else None
+        location = row.get("url") if isinstance(row, dict) else None
+        image_bytes = _fal_result_image_bytes(location)
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.load()
+            actual_width, actual_height = image.size
+            image_format = (image.format or "webp").lower()
+        if (actual_width, actual_height) != (width, height):
+            raise ValueError(
+                f"fal response dimensions {actual_width}x{actual_height} do not match "
+                f"requested {width}x{height}"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("remote Z-Image fallback failed: %s", type(exc).__name__)
+        raise HTTPException(
+            503,
+            f"remote Z-Image fallback failed ({type(exc).__name__})",
+            headers={"Retry-After": "5"},
+        ) from exc
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    teleport = None
+    if payload.get("teleport"):
+        teleport = {
+            "method": "remote_full_generation",
+            "cache_hit": False,
+            "fallback_reason": "local_cuda_unavailable",
+        }
+    return {
+        "encoded": base64.b64encode(image_bytes).decode(),
+        "image_bytes": image_bytes,
+        "format": image_format,
+        "width": actual_width,
+        "height": actual_height,
+        "inference_time_ms": elapsed_ms,
+        "teleport": teleport,
+        "model": "fal-ai/z-image/turbo/lora" if lora is not None else "fal-ai/z-image/turbo",
+        "backend": "fal",
+    }
+
+
+def _call_resilient_zimage(payload: dict, lora: object | None = None) -> dict:
+    """Prefer native inference, opening a short circuit after CUDA failures."""
+    global _native_fallback_disabled_until
+    if not ZIMAGE_FAL_FALLBACK_ENABLED:
+        return _call_native_zimage(payload)
+
+    now = time.monotonic()
+    with _native_fallback_circuit_lock:
+        native_circuit_open = now < _native_fallback_disabled_until
+    if not native_circuit_open:
+        try:
+            result = _call_native_zimage(payload)
+            with _native_fallback_circuit_lock:
+                _native_fallback_disabled_until = 0.0
+            return result
+        except HTTPException as native_error:
+            with _native_fallback_circuit_lock:
+                _native_fallback_disabled_until = (
+                    time.monotonic() + ZIMAGE_NATIVE_FAILURE_COOLDOWN_SECONDS
+                )
+            logger.warning(
+                "%s; opening native image circuit for %.1fs and using remote Z-Image",
+                native_error.detail,
+                ZIMAGE_NATIVE_FAILURE_COOLDOWN_SECONDS,
+            )
+    else:
+        logger.info("native image circuit is open; using remote Z-Image")
+    return _call_fal_zimage(payload, lora)
+
+
+def _native_lora_validation_failure(error: HTTPException) -> bool:
+    """Only discard an adapter when the backend explicitly rejects that adapter.
+
+    Capacity, restart and transport failures apply equally to the base model.
+    Retrying them without LoRA repeats the recovery wait and changes image style.
+    Native client/validation errors are mapped to 502 by _call_native_zimage.
+    """
+    detail = str(error.detail)
+    return (
+        error.status_code == 502
+        and detail.startswith("native fallback returned HTTP 400:")
+        and re.search(r"\bloras?(?:\b|_)", detail, re.IGNORECASE) is not None
+    )
+
+
+def _generate_image_native_once_sync(req: ZImageRequest, prompt: str) -> dict:
+    payload, lora = _native_zimage_request(req, prompt)
+    try:
+        native = _call_resilient_zimage(payload, lora)
+    except HTTPException as exc:
+        if lora is None or not _native_lora_validation_failure(exc):
+            raise
+        # Match the local path: a bad adapter must not take down image serving.
+        logger.warning("native LoRA %s failed; retrying the same prompt without LoRA", lora.id)
+        for key in ("lora_id", "lora_filename", "lora_scale"):
+            payload.pop(key, None)
+        native = _call_resilient_zimage(payload)
+        lora = None
+    return {
+        "image_base64": native["encoded"],
+        "format": native["format"],
+        "width": native["width"],
+        "height": native["height"],
+        "inference_time_ms": native["inference_time_ms"],
+        "seed": req.seed,
+        "prompt_used": payload["prompt"],
+        "lora": {"lora_id": lora.id, "lora_name": lora.name} if lora else None,
+        "teleport": native["teleport"],
+        "backend": native.get("backend") or "omniserve-native",
+        "backend_model": native["model"],
+        "prompt_embedding_cache": None,
+        "pipeline_timing": None,
+        "early_exit": None,
+    }
+
+
+def _generate_image_native_sync(req: ZImageRequest) -> dict:
+    """Native equivalent of the local quality/best-of policy."""
+    first_prompt = compact_prompt(req.prompt)
+    if ZIMAGE_ENHANCE_PROMPT and req.enhance_prompt:
+        first_prompt = enhance_prompt(first_prompt)
+    if req.best_of > 1:
+        candidates = []
+        for index in range(req.best_of):
+            attempt_req = _copy_zimage_request(req, first_prompt)
+            attempt_req.seed = req.seed + index
+            result = _generate_image_native_once_sync(attempt_req, first_prompt)
+            image = _decode_result_image(result)
+            candidates.append({
+                "result": result,
+                "image": image,
+                "bumpy": detect_too_bumpy(image) if image is not None else True,
+            })
+        images = [item["image"] for item in candidates if item["image"] is not None]
+        scores = aesthetic_score_images(images) if images else None
+        score_iter = iter(scores) if scores else None
+        for candidate in candidates:
+            raw = next(score_iter) if (score_iter and candidate["image"] is not None) else 0.0
+            candidate["score"] = raw
+            candidate["ranked"] = raw - (100.0 if candidate["bumpy"] else 0.0)
+        best_index = max(range(len(candidates)), key=lambda i: candidates[i]["ranked"])
+        best = candidates[best_index]["result"]
+        if scores:
+            best["aesthetic_score"] = round(candidates[best_index]["score"], 3)
+        best["best_of"] = {
+            "candidates": req.best_of,
+            "best_index": best_index,
+            "scores": [round(item["score"], 3) for item in candidates],
+            "bumpy": [item["bumpy"] for item in candidates],
+        }
+        return best
+
+    prompts = [first_prompt]
+    if req.quality_retry:
+        prompts.append(retry_prompt(first_prompt))
+    last_result = None
+    for attempt, prompt in enumerate(prompts):
+        attempt_req = _copy_zimage_request(req, prompt)
+        attempt_req.seed = req.seed + attempt
+        result = _generate_image_native_once_sync(attempt_req, prompt)
+        last_result = result
+        image = _decode_result_image(result)
+        if image is None or not req.quality_retry or not detect_too_bumpy(image):
+            if attempt:
+                result["quality_retry"] = {
+                    "reason": "bumpy_image",
+                    "prompt_used": prompt,
+                    "attempts": attempt + 1,
+                }
+            if req.score_aesthetic:
+                _attach_aesthetic_score(result, image)
+            return result
+    if last_result is not None:
+        last_result["quality_warning"] = "bumpy_image_after_retry"
+        return last_result
+    raise HTTPException(503, "native image generation failed")
 
 
 def _attach_aesthetic_score(result: dict, image: Image.Image | None = None) -> None:
@@ -3145,6 +3836,10 @@ def _detach_recoverable_exception_traceback(exc: BaseException) -> None:
     exc.__traceback__ = None
 
 
+class _ZImageOOMRecoveredForNativeFallback(Exception):
+    """Signal that local OOM cleanup completed and native serving can resume."""
+
+
 def _with_zimage_model_retry(operation_name: str, fn):
     last_exc = None
     for attempt in range(3):
@@ -3175,10 +3870,20 @@ def _with_zimage_model_retry(operation_name: str, fn):
                     headers={"Retry-After": "30"},
                 ) from e
             if _is_cuda_oom(e):
-                logger.warning("%s hit CUDA OOM; reloading model and retrying once", operation_name)
+                logger.warning("%s hit CUDA OOM; recovering and retrying safely", operation_name)
                 _detach_recoverable_exception_traceback(e)
                 last_exc = None
                 _recover_from_cuda_oom()
+                if ZIMAGE_NATIVE_FALLBACK_URL and operation_name in {
+                    "generate_image",
+                    "generate_image_batch",
+                }:
+                    # The local model is cold after recovery. Loading the same
+                    # large BF16 pipeline immediately can make the HTTP worker
+                    # unresponsive for minutes under shared-GPU memory pressure.
+                    # Let the image wrappers retry this request on the already
+                    # resident quantized backend instead.
+                    raise _ZImageOOMRecoveredForNativeFallback() from None
                 if attempt > 0:
                     raise HTTPException(503, f"{operation_name} failed after CUDA OOM recovery")
                 if not _wait_for_zimage_memory_headroom(ZIMAGE_LOAD_MIN_FREE_MB, operation_name):
@@ -3206,11 +3911,29 @@ def _with_zimage_model_retry(operation_name: str, fn):
 
 
 def _generate_image_with_model_sync(req: ZImageRequest):
-    return _with_zimage_model_retry("generate_image", lambda: _generate_image_sync(req))
+    try:
+        return _with_zimage_model_retry("generate_image", lambda: _generate_image_sync(req))
+    except _ZImageOOMRecoveredForNativeFallback:
+        logger.warning("routing image request to native fallback after local CUDA OOM recovery")
+        return _generate_image_native_sync(req)
 
 
 def _generate_image_batch_with_model_sync(reqs: list[ZImageRequest]) -> list[dict]:
     """Keep one model lease while executing one or more adaptive chunks."""
+    if _should_use_native_zimage_fallback("generate_image_batch"):
+        logger.warning(
+            "routing %d image request(s) to native fallback because the BF16 pipeline is cold",
+            len(reqs),
+        )
+        try:
+            return [_generate_image_native_sync(req) for req in reqs]
+        except HTTPException:
+            if not _native_failure_allows_local_cold_load("generate_image_batch"):
+                raise
+            logger.exception(
+                "native image fallback failed with safe BF16 headroom; trying the local loader"
+            )
+
     def _run() -> list[dict]:
         outputs: list[dict] = []
         offset = 0
@@ -3234,7 +3957,14 @@ def _generate_image_batch_with_model_sync(reqs: list[ZImageRequest]) -> list[dic
             offset += len(chunk)
         return outputs
 
-    return _with_zimage_model_retry("generate_image_batch", _run)
+    try:
+        return _with_zimage_model_retry("generate_image_batch", _run)
+    except _ZImageOOMRecoveredForNativeFallback:
+        logger.warning(
+            "routing %d image request(s) to native fallback after local CUDA OOM recovery",
+            len(reqs),
+        )
+        return [_generate_image_native_sync(req) for req in reqs]
 
 
 async def _run_zimage_dynamic_batch(reqs: list[ZImageRequest]) -> list[dict]:
@@ -3246,7 +3976,10 @@ async def _run_zimage_dynamic_batch(reqs: list[ZImageRequest]) -> list[dict]:
 
 
 async def _submit_zimage_request(req: ZImageRequest) -> dict:
-    with model_manager.reserve("zimage"):
+    with model_manager.reserve(
+        "zimage",
+        allow_while_held=_should_use_native_zimage_fallback("generate_image"),
+    ):
         if zimage_dynamic_batcher is None:
             async with gpu_slot(req.low_priority):
                 return await asyncio.get_running_loop().run_in_executor(
@@ -3269,6 +4002,7 @@ async def generate_image(req: ZImageRequest, request: Request):
         auto_lora=req.auto_lora,
         teleport=False,
         perf=False,
+        low_priority=req.low_priority,
     )
     return await _submit_zimage_request(req)
 
@@ -3367,6 +4101,7 @@ async def openai_images_generations(request: Request):
         request, model="zimage-turbo", width=width, height=height,
         num_inference_steps=base["num_inference_steps"],
         auto_lora=base["auto_lora"], teleport=False, perf=False,
+        low_priority=base["low_priority"],
     )
     requests_to_run = [ZImageRequest(seed=seed + i, **base) for i in range(n)]
     results = await asyncio.gather(*(_submit_zimage_request(req) for req in requests_to_run))
@@ -3656,6 +4391,11 @@ def _require_finite_forecast(*tensors: torch.Tensor) -> None:
 
 
 def _forecast_sync(req: ChronosRequest):
+    with model_manager.use("chronos2"):
+        return _forecast_loaded_sync(req)
+
+
+def _forecast_loaded_sync(req: ChronosRequest):
     """Synchronous GPU work for forecasting."""
     t0 = time.time()
     quantile_levels = req.quantile_levels or [0.1, 0.5, 0.9]
@@ -3765,6 +4505,11 @@ class ChronosBatchRequest(BaseModel):
 
 
 def _forecast_batch_sync(req: ChronosBatchRequest):
+    with model_manager.use("chronos2"):
+        return _forecast_batch_loaded_sync(req)
+
+
+def _forecast_batch_loaded_sync(req: ChronosBatchRequest):
     """Batch GPU forecasting — all series in one model call."""
     t0 = time.time()
     contexts = [torch.tensor(s, dtype=torch.float32) for s in req.series]
@@ -3948,6 +4693,9 @@ def _caption_backend_error(exc: httpx.HTTPError) -> HTTPException:
 
 @app.post("/caption")
 async def caption_image(req: CaptionRequest):
+    await asyncio.get_event_loop().run_in_executor(
+        None, _validate_remote_image_url, req.image_url, "image_url"
+    )
     try:
         resp = await tg_client.post(
             "/api/v1/image-caption",
@@ -4016,6 +4764,21 @@ async def gemma4_chat(req: Gemma4Request):
 from r2_upload import (
     upload_bytes, check_if_blob_exists, build_save_path,
 )
+
+
+def _validated_save_path(save_path: str, suffix: str | None = None) -> str:
+    """Build a safe object key suffix or reject traversal/control input."""
+    if len(save_path) > 1024:
+        raise HTTPException(400, "save_path is too long")
+    if "\\" in save_path or any(ord(char) < 32 for char in save_path):
+        raise HTTPException(400, "save_path contains invalid characters")
+    parts = [part for part in save_path.split("/") if part]
+    if not parts or len(parts) > 32 or any(part in {".", ".."} for part in parts):
+        raise HTTPException(400, "save_path must be a relative object path without traversal")
+    built = build_save_path(save_path, suffix=suffix)
+    if not built or len(built) > 1024:
+        raise HTTPException(400, "save_path is invalid")
+    return built
 
 
 def _image_to_webp_bytes(image, quality: int = 85) -> bytes:
@@ -4692,10 +5455,123 @@ def _generate_and_upload_teleport_sync(prompt: str, width: int, height: int, sav
     return result
 
 
+def _generate_and_upload_native_sync(
+    prompt: str,
+    width: int,
+    height: int,
+    save_path: str,
+    auto_lora: bool,
+    lora_id: str | None,
+    return_perf: bool,
+    num_inference_steps: int | None,
+    *,
+    teleport: bool,
+    low_priority: bool = False,
+    teleport_approx: bool = False,
+    teleport_start_step: int | None = None,
+) -> dict:
+    """Generate through the resident native backend and preserve the upload API."""
+    seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % (2**31)
+    steps = _normalize_zimage_steps(num_inference_steps)
+    target_path = save_path or _fallback_image_path(prompt, seed, steps)
+    if target_path and check_if_blob_exists(target_path):
+        from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
+        result = {"path": f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{target_path}"}
+        if teleport:
+            result["teleport"] = {"method": "r2_cache", "cache_hit": True}
+        if return_perf:
+            result["perf"] = {"cache_hit": True, "upload_time_ms": 0, "inference_time_ms": 0}
+        return result
+
+    req = ZImageRequest(
+        prompt=prompt,
+        width=width,
+        height=height,
+        seed=seed,
+        num_inference_steps=steps,
+        guidance_scale=ZIMAGE_DEFAULT_GUIDANCE,
+        lora_id=lora_id,
+        auto_lora=auto_lora,
+        quality_retry=False,
+        enhance_prompt=False,
+        teleport=teleport,
+        teleport_approx=teleport_approx,
+        low_priority=low_priority,
+    )
+    payload, lora = _native_zimage_request(req, prompt)
+    if teleport_start_step is not None and teleport and lora is None:
+        payload["teleport_start_step"] = max(1, min(int(teleport_start_step), steps - 1))
+    started = time.perf_counter()
+    try:
+        native = _call_resilient_zimage(payload, lora)
+    except HTTPException as exc:
+        if lora is None or not _native_lora_validation_failure(exc):
+            raise
+        logger.warning("native LoRA %s failed; retrying upload generation without LoRA", lora.id)
+        for key in ("lora_id", "lora_filename", "lora_scale"):
+            payload.pop(key, None)
+        native = _call_resilient_zimage(payload)
+        lora = None
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    upload_started = time.perf_counter()
+    url = upload_bytes(
+        target_path,
+        native["image_bytes"],
+        content_type=f"image/{native['format']}",
+    )
+    upload_ms = int((time.perf_counter() - upload_started) * 1000)
+    result = {"path": url}
+    teleport_meta = native.get("teleport") if teleport and lora is None else None
+    if teleport:
+        result["teleport"] = teleport_meta or {
+            "method": "full_generation_lora" if lora else "full_generation",
+            "cache_hit": False,
+        }
+    if return_perf:
+        result["perf"] = {
+            "cache_hit": bool((teleport_meta or {}).get("cache_hit")),
+            "inference_time_ms": native["inference_time_ms"] or elapsed_ms,
+            "encode_time_ms": 0,
+            "upload_time_ms": upload_ms,
+            "width": native["width"],
+            "height": native["height"],
+            "steps": steps,
+            "lora": lora.id if lora else None,
+            "backend": native.get("backend") or "omniserve-native",
+            "backend_model": native["model"],
+        }
+        if teleport:
+            result["perf"].update({
+                "teleport_method": (teleport_meta or {}).get("method"),
+                "teleport_cache_hit": bool((teleport_meta or {}).get("cache_hit")),
+            })
+    logger.info(
+        "%s fallback upload: %dx%d in %.2fs (steps=%d, teleport=%s, lora=%s)",
+        native.get("backend") or "omniserve-native",
+        native["width"], native["height"], elapsed_ms / 1000, steps,
+        teleport, lora.id if lora else "none",
+    )
+    return result
+
+
 def _generate_and_upload_with_model_sync(prompt: str, width: int, height: int, save_path: str,
                                          auto_lora: bool = True, lora_id: str | None = None,
                                          return_perf: bool = False,
-                                         num_inference_steps: int | None = None) -> dict:
+                                         num_inference_steps: int | None = None,
+                                         low_priority: bool = False) -> dict:
+    if _should_use_native_zimage_fallback("create_and_upload_image"):
+        try:
+            return _generate_and_upload_native_sync(
+                prompt, width, height, save_path, auto_lora, lora_id,
+                return_perf, num_inference_steps, teleport=False,
+                low_priority=low_priority,
+            )
+        except HTTPException:
+            if not _native_failure_allows_local_cold_load("create_and_upload_image"):
+                raise
+            logger.exception(
+                "native upload fallback failed with safe BF16 headroom; trying the local loader"
+            )
     return _with_zimage_model_retry(
         "create_and_upload_image",
         lambda: _generate_and_upload_sync(prompt, width, height, save_path, auto_lora, lora_id, return_perf, num_inference_steps),
@@ -4708,7 +5584,23 @@ def _generate_and_upload_teleport_with_model_sync(prompt: str, width: int, heigh
                                                   num_inference_steps: int | None = None,
                                                   teleport_approx: bool = False,
                                                   teleport_approx_min_sim: float | None = None,
-                                                  teleport_start_step: int | None = None) -> dict:
+                                                  teleport_start_step: int | None = None,
+                                                  low_priority: bool = False) -> dict:
+    if _should_use_native_zimage_fallback("create_and_upload_image_teleport"):
+        try:
+            return _generate_and_upload_native_sync(
+                prompt, width, height, save_path, auto_lora, lora_id,
+                return_perf, num_inference_steps, teleport=True,
+                low_priority=low_priority,
+                teleport_approx=teleport_approx,
+                teleport_start_step=teleport_start_step,
+            )
+        except HTTPException:
+            if not _native_failure_allows_local_cold_load("create_and_upload_image_teleport"):
+                raise
+            logger.exception(
+                "native teleport fallback failed with safe BF16 headroom; trying the local loader"
+            )
     return _with_zimage_model_retry(
         "create_and_upload_image_teleport",
         lambda: _generate_and_upload_teleport_sync(
@@ -4811,13 +5703,17 @@ async def create_and_upload_image(
         auto_lora=auto_lora,
         teleport=teleport,
         perf=perf,
+        low_priority=low_priority or background,
     )
     _require_nonempty_prompt(prompt)
-    sp = build_save_path(save_path) if save_path else ""
+    sp = _validated_save_path(save_path) if save_path else ""
     if sp and check_if_blob_exists(sp):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         return {"path": f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{sp}"}
-    with model_manager.reserve("zimage"):
+    with model_manager.reserve(
+        "zimage",
+        allow_while_held=_should_use_native_zimage_fallback("create_and_upload_image"),
+    ):
         async with gpu_slot(low_priority or background):
             if teleport:
                 return await asyncio.get_event_loop().run_in_executor(
@@ -4834,6 +5730,7 @@ async def create_and_upload_image(
                     teleport_approx,
                     teleport_approx_min_sim,
                     teleport_start_step,
+                    low_priority or background,
                 )
             return await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -4846,6 +5743,7 @@ async def create_and_upload_image(
                 lora_id,
                 perf,
                 num_inference_steps,
+                low_priority or background,
             )
 
 
@@ -4862,7 +5760,7 @@ async def style_transfer_and_upload_image(
     _check_secret(secret)
     _remember_request_prompt(request, prompt)
     _require_nonempty_prompt(prompt)
-    sp = build_save_path(save_path) if save_path else ""
+    sp = _validated_save_path(save_path) if save_path else ""
     if sp and check_if_blob_exists(sp):
         from r2_upload import R2_PUBLIC_BASE_URL, R2_BUCKET_PATH
         return {"path": f"https://{R2_PUBLIC_BASE_URL}/{R2_BUCKET_PATH}/{sp}"}
@@ -4901,7 +5799,7 @@ async def style_transfer_bytes_and_upload_image(
 
         seed = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16) % (2**31)
         suffix = uuid.uuid4().hex[:7]
-        sp = build_save_path(save_path, suffix=suffix) if save_path else f"style_{suffix}.webp"
+        sp = _validated_save_path(save_path, suffix=suffix) if save_path else f"style_{suffix}.webp"
 
         def _do():
             if hasattr(img2img_pipe, "_offload_gpu_id"):
@@ -4923,7 +5821,7 @@ async def style_transfer_bytes_and_upload_image(
                 return await asyncio.get_event_loop().run_in_executor(None, _do)
 
     elif image_url:
-        sp = build_save_path(save_path) if save_path else ""
+        sp = _validated_save_path(save_path) if save_path else ""
         input_image = await asyncio.get_event_loop().run_in_executor(None, _load_remote_image, image_url)
         async with gpu_semaphore:
             return await asyncio.get_event_loop().run_in_executor(
@@ -4944,6 +5842,19 @@ async def style_transfer_bytes_and_upload_image(
 # In-memory cache backed by JSON status files so long-running jobs survive a
 # process restart and frontend polling can resume cleanly.
 training_jobs: dict[str, dict] = load_jobs()
+LOCAL_GPU_TRAINING_ENABLED = os.getenv("LOCAL_GPU_TRAINING_ENABLED", "1") == "1"
+LOCAL_TRAINING_MAX_CONCURRENT = max(
+    1, int(os.getenv("LOCAL_TRAINING_MAX_CONCURRENT", "1"))
+)
+_local_training_semaphore = threading.BoundedSemaphore(LOCAL_TRAINING_MAX_CONCURRENT)
+
+
+def _require_local_gpu_training_enabled() -> None:
+    if not LOCAL_GPU_TRAINING_ENABLED:
+        raise HTTPException(
+            409,
+            "local GPU training is disabled on this inference-only worker; route training to the remote backend",
+        )
 
 
 def _save_training_job(job_id: str) -> None:
@@ -4978,7 +5889,7 @@ def _validate_training_mode(model: str, dataset_mode: str, min_tileability: floa
         raise HTTPException(400, "texture dataset mode currently supports zimage only")
 
 
-def _run_chronos2_training(job_id: str, req: LoRATrainRequest):
+def _run_chronos2_training_impl(job_id: str, req: LoRATrainRequest):
     """Background thread for Chronos2 LoRA training."""
     job = training_jobs[job_id]
     try:
@@ -5105,7 +6016,7 @@ def _dataset_dir(dataset_name: str) -> str:
     return os.path.join(DATASET_ROOT, safe)
 
 
-def _run_zimage_training(job_id: str, req: LoRATrainRequest):
+def _run_zimage_training_impl(job_id: str, req: LoRATrainRequest):
     """Background thread for Z-Image LoRA fine-tuning via rectified flow matching.
 
     Uses the real diffusers Z-Image transformer call convention:
@@ -5387,12 +6298,37 @@ def _run_zimage_training(job_id: str, req: LoRATrainRequest):
         _save_training_job(job_id)
 
 
+def _run_local_training_serialized(runner, job_id: str, req: LoRATrainRequest) -> None:
+    """Run at most one in-process trainer and always return CUDA memory.
+
+    Training is a legacy/dev fallback; production uses a remote worker.  It
+    must never load several complete diffusion pipelines into the public image
+    process or leave their allocations behind after an exception.
+    """
+    with _local_training_semaphore:
+        try:
+            runner(job_id, req)
+        finally:
+            _clear_torch_cuda_caches()
+
+
+def _run_chronos2_training(job_id: str, req: LoRATrainRequest) -> None:
+    _run_local_training_serialized(_run_chronos2_training_impl, job_id, req)
+
+
+def _run_zimage_training(job_id: str, req: LoRATrainRequest) -> None:
+    _run_local_training_serialized(_run_zimage_training_impl, job_id, req)
+
+
 @app.post("/train/upload_dataset")
 async def upload_dataset(
     dataset_name: str = Form(...),
     files: list[UploadFile] = File(...),
+    secret: str = "",
 ):
     """Upload images (and optional caption .txt files) for a LoRA training dataset."""
+    _check_secret(secret)
+    _require_local_gpu_training_enabled()
     try:
         ds_dir = _dataset_dir(dataset_name)
     except ValueError as e:
@@ -5437,8 +6373,9 @@ class LoRATrainFromURLsRequest(BaseModel):
 
 
 @app.post("/train/from_urls")
-def start_training_from_urls(req: LoRATrainFromURLsRequest):
+def start_training_from_urls(req: LoRATrainFromURLsRequest, secret: str = ""):
     """Download images from URLs into a local dataset, then start training."""
+    _check_secret(secret)
     if req.model not in ("zimage", "chronos2"):
         raise HTTPException(400, "model must be 'zimage' or 'chronos2'")
     if not req.image_urls:
@@ -5477,6 +6414,7 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
             "runpod_cost_per_hr": job.get("runpod_cost_per_hr"),
         }
 
+    _require_local_gpu_training_enabled()
     try:
         ds_dir = _dataset_dir(req.dataset_name)
     except ValueError as e:
@@ -5557,8 +6495,9 @@ def start_training_from_urls(req: LoRATrainFromURLsRequest):
 
 
 @app.get("/train/datasets")
-def list_datasets():
+def list_datasets(secret: str = ""):
     """List uploaded LoRA training datasets."""
+    _check_secret(secret)
     if not os.path.isdir(DATASET_ROOT):
         return {"datasets": []}
     out = []
@@ -5572,11 +6511,13 @@ def list_datasets():
 
 
 @app.post("/train")
-def start_training(req: LoRATrainRequest):
+def start_training(req: LoRATrainRequest, secret: str = ""):
     """Start an async LoRA training job."""
+    _check_secret(secret)
     if req.model not in ("zimage", "chronos2"):
         raise HTTPException(400, "model must be 'zimage' or 'chronos2'")
     _validate_training_mode(req.model, req.dataset_mode, req.min_tileability)
+    _require_local_gpu_training_enabled()
 
     job_id = str(uuid.uuid4())
     training_jobs[job_id] = {
@@ -5605,8 +6546,9 @@ def start_training(req: LoRATrainRequest):
 
 
 @app.get("/train/{job_id}")
-def get_training_status(job_id: str):
+def get_training_status(job_id: str, secret: str = ""):
     """Check training job status."""
+    _check_secret(secret)
     job = training_jobs.get(job_id)
     if not job:
         raise HTTPException(404, "training job not found")
@@ -5620,8 +6562,9 @@ def get_training_status(job_id: str):
 
 
 @app.get("/train")
-def list_training_jobs():
+def list_training_jobs(secret: str = ""):
     """List all training jobs."""
+    _check_secret(secret)
     return {"jobs": list(training_jobs.values())}
 
 

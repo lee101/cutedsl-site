@@ -1,5 +1,7 @@
 'use client';
 
+import { browserStorage } from '@/lib/browser-storage';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import Link from 'next/link';
@@ -103,9 +105,9 @@ function errorMessage(err: unknown, fallback: string) {
 }
 
 function storeAuth(data: AuthResponse) {
-  localStorage.setItem('cutedsl_wallet', data.user.wallet_address);
-  localStorage.setItem('cutedsl_api_key', data.api_key);
-  if (data.user.email) localStorage.setItem('cutedsl_email', data.user.email);
+  browserStorage.setItem('cutedsl_wallet', data.user.wallet_address);
+  browserStorage.setItem('cutedsl_api_key', data.api_key);
+  if (data.user.email) browserStorage.setItem('cutedsl_email', data.user.email);
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -143,11 +145,11 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
   const embeddedCheckoutRef = useRef<StripeEmbeddedCheckout | null>(null);
 
   useEffect(() => {
-    const savedPrompt = localStorage.getItem('cutedsl_last_art_prompt');
+    const savedPrompt = browserStorage.getItem('cutedsl_last_art_prompt');
     if (!initialPrompt && savedPrompt) setPrompt(savedPrompt);
-    setWallet(localStorage.getItem('cutedsl_wallet'));
-    setApiKey(localStorage.getItem('cutedsl_api_key'));
-    setEmail(localStorage.getItem('cutedsl_email') || '');
+    setWallet(browserStorage.getItem('cutedsl_wallet'));
+    setApiKey(browserStorage.getItem('cutedsl_api_key'));
+    setEmail(browserStorage.getItem('cutedsl_email') || '');
   }, [initialPrompt]);
 
   useEffect(() => {
@@ -217,7 +219,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
   };
 
   const startMonthlyCheckout = async () => {
-    const activeWallet = wallet || localStorage.getItem('cutedsl_wallet');
+    const activeWallet = wallet || browserStorage.getItem('cutedsl_wallet');
     if (!activeWallet) {
       setAuthOpen(true);
       return;
@@ -248,7 +250,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
   };
 
   const generate = useCallback(async () => {
-    const activeKey = apiKey || localStorage.getItem('cutedsl_api_key');
+    const activeKey = apiKey || browserStorage.getItem('cutedsl_api_key');
     if (!activeKey) {
       setAuthOpen(true);
       return;
@@ -258,7 +260,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
       setStatus('Prompt is too short.');
       return;
     }
-    localStorage.setItem('cutedsl_last_art_prompt', cleanPrompt);
+    browserStorage.setItem('cutedsl_last_art_prompt', cleanPrompt);
     const normalizedWidth = clampToStep(width, 512, 1536, 64);
     const normalizedHeight = clampToStep(height, 512, 1536, 64);
     const normalizedSteps = Math.round(clamp(steps, 4, 40));
@@ -317,7 +319,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <h3 className="font-fredoka text-2xl font-bold text-slate-900">{title}</h3>
-          <p className="text-sm text-slate-500">$12/mo includes unlimited UI generations and $12 API credits.</p>
+          <p className="text-sm text-slate-500">$14/mo includes unlimited image generation and $10 in rollover credits.</p>
         </div>
         {showPlaygroundLink && (
           <Link href="/playground" className="hidden items-center gap-1 rounded-lg px-3 py-2 text-sm font-bold text-pink-600 hover:bg-pink-50 sm:inline-flex">
@@ -428,7 +430,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
           className="inline-flex items-center justify-center gap-2 rounded-xl border border-pink-200 bg-white px-5 py-3 text-sm font-bold text-slate-800 hover:bg-pink-50 disabled:opacity-60"
         >
           {loadingCheckout ? <Loader2 size={17} className="animate-spin" /> : <CreditCard size={17} />}
-          $12/mo
+          $14/mo
         </button>
       </div>
 
@@ -480,8 +482,8 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
         <Modal title="Unlock Unlimited UI Generation" onClose={() => { setPaymentOpen(false); setClientSecret(''); }}>
           <div className="space-y-4">
             <div className="rounded-xl border border-pink-100 bg-pink-50 p-4">
-              <div className="text-3xl font-bold text-slate-950">$12 <span className="text-base font-semibold text-slate-500">/ month</span></div>
-              <div className="mt-1 text-sm text-slate-600">Unlimited generations in the web UI plus $12 in API credits each checkout.</div>
+              <div className="text-3xl font-bold text-slate-950">$14 <span className="text-base font-semibold text-slate-500">/ month</span></div>
+              <div className="mt-1 text-sm text-slate-600">Unlimited image generation plus $10 in monthly rollover credits for video and other models.</div>
             </div>
             {clientSecret ? (
               <div className="rounded-lg border border-slate-200 bg-white p-2">
