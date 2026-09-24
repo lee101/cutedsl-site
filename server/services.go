@@ -271,17 +271,17 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		apiKey := strings.TrimPrefix(authHeader, "Bearer ")
 		user, err = dbConn.GetUserByAPIKey(apiKey)
 		if err != nil {
-			jsonError(ctx, 401, "invalid API key")
+			paywallError(ctx, 401, "invalid API key")
 			return
 		}
 	} else if req.WalletAddress != "" {
 		user, err = dbConn.GetUserByWallet(req.WalletAddress)
 		if err != nil {
-			jsonError(ctx, 401, "wallet not registered - deposit $CUTEDSL first")
+			paywallError(ctx, 401, "wallet not registered - deposit $CUTEDSL first")
 			return
 		}
 	} else {
-		jsonError(ctx, 401, "authorization required: use Authorization header with API key or wallet_address in body")
+		paywallError(ctx, 401, "authorization required: use Authorization header with API key or wallet_address in body")
 		return
 	}
 	if req.Service == "h3_video" {
@@ -309,7 +309,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	billableCost := cuteCost
 	// Subscriptions include unlimited image generation only. Video and every
 	// other service continue to consume the subscriber's rollover credits.
-	unlimitedImage := user.UnlimitedAPI && req.Service == "zimage"
+	unlimitedImage := user.UnlimitedAPI && isUnlimitedImageService(req.Service)
 	if unlimitedImage {
 		billableCost = 0
 	} else {
@@ -317,7 +317,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		newBalance, err = dbConn.DeductUserCredits(user.ID, cuteCost)
 		if err != nil {
 			if strings.Contains(err.Error(), "insufficient") {
-				jsonError(ctx, 402, fmt.Sprintf("insufficient credits: need %.2f $CUTEDSL, have %.2f", cuteCost, user.Credits))
+				paywallError(ctx, 402, fmt.Sprintf("insufficient credits: need %.2f $CUTEDSL, have %.2f. Subscribe for unlimited images or top up credits.", cuteCost, user.Credits))
 				return
 			}
 			jsonError(ctx, 500, "failed to deduct credits")
@@ -371,6 +371,10 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 					CreditsAfter: refundBalance,
 				})
 			}
+		}
+		if pe, ok := asUpstreamPaywall(err); ok {
+			paywallError(ctx, pe.Status, pe.Message)
+			return
 		}
 		jsonError(ctx, 502, "service temporarily unavailable")
 		return
@@ -787,6 +791,9 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 		return nil, err
 	}
 
+	if err := checkUpstreamPaywall(resp.StatusCode, respBody); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("backend returned %d: %s", resp.StatusCode, string(respBody))
 	}

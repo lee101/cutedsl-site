@@ -16,6 +16,8 @@ function messageFromData(data: unknown): string | null {
   if (!data || typeof data !== 'object') return null;
   const record = data as Record<string, unknown>;
   if (typeof record.error === 'string' && record.error.trim()) return record.error;
+  const err = record.error as Record<string, unknown> | null;
+  if (err && typeof err === 'object' && typeof err.message === 'string' && err.message.trim()) return err.message;
   if (typeof record.message === 'string' && record.message.trim()) return record.message;
   return null;
 }

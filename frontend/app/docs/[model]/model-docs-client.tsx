@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { ArrowLeft, Copy, Check, Play, Loader2, Download, ChevronRight, Lock, Eye, EyeOff } from 'lucide-react';
@@ -10,6 +10,7 @@ import { CodeBlock } from '@/lib/code-block';
 import { parseJSONResponse } from '@/lib/http';
 import { staticAssetPath } from '@/lib/static-assets';
 import { MediaUploadField } from '@/lib/media-upload-field';
+import { SubscribeCard, SubscribeModal, paywallFromError, SUBSCRIBE_PATH, type PaywallInfo } from '@/lib/subscribe-prompt';
 
 const API_BASE = '/api';
 const LOGO_IMG = staticAssetPath('/images/logo.webp');
@@ -192,6 +193,26 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
   const [response, setResponse] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
+  const [paywall, setPaywall] = useState<PaywallInfo | null>(null);
+  const [entitlement, setEntitlement] = useState<{ unlimited: boolean; creditsUSD: number } | null>(null);
+  const isImage = config?.category === 'image';
+
+  useEffect(() => {
+    if (!isImage || !apiKey) return;
+    fetch(`${API_BASE}/auth/session`, { headers: { Authorization: `Bearer ${apiKey}` } })
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (d?.user) setEntitlement({ unlimited: !!d.user.unlimited_api, creditsUSD: Number(d.credits_usd) || 0 });
+      })
+      .catch(() => {});
+  }, [isImage, apiKey]);
+
+  const gateInfo = (): PaywallInfo | null => {
+    if (!isImage) return null;
+    if (!isLoggedIn) return { reason: 'login', subscribeUrl: SUBSCRIBE_PATH };
+    if (entitlement && !entitlement.unlimited && entitlement.creditsUSD <= 0) return { reason: 'subscribe', subscribeUrl: SUBSCRIBE_PATH };
+    return null;
+  };
 
   if (!config) {
     return (
@@ -240,6 +261,11 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
   const runPlayground = async () => {
     setError(null);
     setResponse(null);
+    const gate = gateInfo();
+    if (gate) {
+      setPaywall(gate);
+      return;
+    }
     setLoading(true);
     try {
       const payload = buildPayload();
@@ -255,6 +281,11 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
       setResponse(data);
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
     } catch (e) {
+      const pw = paywallFromError(e);
+      if (pw) {
+        setPaywall(pw);
+        return;
+      }
       setError(e instanceof Error ? e.message : 'Request failed');
     } finally {
       setLoading(false);
@@ -380,7 +411,13 @@ export default function ModelDocsClient({ slug }: { slug: string }) {
             <Play size={20} className="text-pink-500" /> Playground
           </h2>
 
-          {!isLoggedIn ? (
+          {paywall && <SubscribeModal info={paywall} onClose={() => setPaywall(null)} />}
+          {isImage && gateInfo() && (
+            <div className="mb-6">
+              <SubscribeCard info={gateInfo()!} compact />
+            </div>
+          )}
+          {!isLoggedIn && !isImage ? (
             <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center shadow-sm">
               <Lock size={32} className="text-slate-300 mx-auto mb-3" />
               <p className="text-slate-600 mb-3">Connect your wallet to try the playground.</p>
