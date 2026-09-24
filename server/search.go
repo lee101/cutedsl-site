@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"hash/fnv"
 	"log"
 	"runtime"
@@ -27,6 +28,8 @@ type PromptSearchEngine struct {
 	cacheOnce sync.Once
 	cache     *searchCache
 	searchFn  func(query string, topK int) ([]SearchResult, error) // test hook
+	relOnce   sync.Once
+	rel       *lruCache
 }
 
 const (
@@ -113,6 +116,108 @@ func (c *searchCache) len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
+}
+
+// Long-lived per-page cache for related/tag results. Crawlers hit each
+// /image/ and /tag/ page roughly once per day with a unique prompt, so the
+// query-keyed cache above almost never hits; keying by page lets each page's
+// ANN search run at most once per relatedCacheTTL. Only image IDs and
+// similarities are kept, and the cache survives index rebuilds because image
+// IDs are stable.
+const (
+	relatedCacheTTL = 36 * time.Hour
+	relatedCacheMax = 100000
+)
+
+type lruEntry struct {
+	key     string
+	results []SearchResult
+	expires time.Time
+}
+
+type lruCache struct {
+	mu    sync.Mutex
+	max   int
+	ttl   time.Duration
+	ll    *list.List
+	items map[string]*list.Element
+}
+
+func newLRUCache(max int, ttl time.Duration) *lruCache {
+	return &lruCache{max: max, ttl: ttl, ll: list.New(), items: make(map[string]*list.Element)}
+}
+
+func (c *lruCache) get(key string) ([]SearchResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.items[key]
+	if !ok {
+		return nil, false
+	}
+	e := el.Value.(*lruEntry)
+	if time.Now().After(e.expires) {
+		c.ll.Remove(el)
+		delete(c.items, key)
+		return nil, false
+	}
+	c.ll.MoveToFront(el)
+	return e.results, true
+}
+
+func (c *lruCache) set(key string, results []SearchResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exp := time.Now().Add(c.ttl)
+	if el, ok := c.items[key]; ok {
+		e := el.Value.(*lruEntry)
+		e.results, e.expires = results, exp
+		c.ll.MoveToFront(el)
+		return
+	}
+	c.items[key] = c.ll.PushFront(&lruEntry{key: key, results: results, expires: exp})
+	for c.ll.Len() > c.max {
+		el := c.ll.Back()
+		c.ll.Remove(el)
+		delete(c.items, el.Value.(*lruEntry).key)
+	}
+}
+
+func (c *lruCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ll.Len()
+}
+
+func (ps *PromptSearchEngine) getRelCache() *lruCache {
+	ps.relOnce.Do(func() { ps.rel = newLRUCache(relatedCacheMax, relatedCacheTTL) })
+	return ps.rel
+}
+
+// SearchByPage runs query once per pageKey per relatedCacheTTL, bypassing the
+// short-lived query cache so unique prompts do not evict popular searches.
+func (ps *PromptSearchEngine) SearchByPage(pageKey, query string, topK int) ([]SearchResult, error) {
+	if !ps.IsReady() {
+		return nil, nil
+	}
+	cache := ps.getRelCache()
+	key := strconv.Itoa(topK) + ":" + pageKey
+	if r, ok := cache.get(key); ok {
+		return r, nil
+	}
+	t0 := time.Now()
+	results, err := ps.searchFunc()(query, topK)
+	if err != nil {
+		return nil, err
+	}
+	slim := make([]SearchResult, len(results))
+	for i, r := range results {
+		slim[i] = SearchResult{ImageID: r.ImageID, Similarity: r.Similarity}
+	}
+	if ps.IsReady() {
+		cache.set(key, slim)
+	}
+	log.Printf("[search] page=%q top_k=%d results=%d time=%v cache_hit=false", pageKey, topK, len(slim), time.Since(t0))
+	return slim, nil
 }
 
 func (ps *PromptSearchEngine) getCache() *searchCache {
@@ -378,9 +483,10 @@ func (ps *PromptSearchEngine) doSearch(query string, topK int) ([]SearchResult, 
 }
 
 // SearchRelated finds the topK most-similar image prompts to a given prompt,
-// excluding the exact source image. Used by the /prompt/<id> page.
+// excluding the exact source image. Used by the /prompt/<id> page. Results are
+// cached per source image (see SearchByPage) and carry no Prompt text.
 func (ps *PromptSearchEngine) SearchRelated(prompt, excludeImageID string, topK int) ([]SearchResult, error) {
-	results, err := ps.Search(prompt, topK+1)
+	results, err := ps.SearchByPage("img:"+excludeImageID, prompt, topK+1)
 	if err != nil {
 		return nil, err
 	}

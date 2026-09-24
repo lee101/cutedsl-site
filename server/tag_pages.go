@@ -294,7 +294,7 @@ func handleTagPage(ctx *fasthttp.RequestCtx, slug string) {
 	// Gobed semantic search for matching images.
 	var images []GeneratedImage
 	if promptSearch != nil && promptSearch.IsReady() {
-		sims, _ := promptSearch.Search(query, 60)
+		sims, _ := promptSearch.SearchByPage("tag:"+slug, query, 60)
 		if len(sims) > 0 {
 			ids := make([]string, 0, len(sims))
 			for _, r := range sims {
