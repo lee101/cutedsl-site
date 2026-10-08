@@ -1025,6 +1025,9 @@ func serveStatic(ctx *fasthttp.RequestCtx, path string) {
 		if strings.HasPrefix(path, "/_next/") || strings.HasPrefix(path, "/assets/") {
 			ctx.Response.Header.Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
+		if ext == ".html" {
+			ctx.Response.Header.Set("Cache-Control", "public, max-age=0, s-maxage=300")
+		}
 
 		fasthttp.ServeFile(ctx, filePath)
 		return

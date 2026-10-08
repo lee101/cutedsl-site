@@ -297,6 +297,17 @@ type stripeCheckoutRequest struct {
 	ReturnURL     string  `json:"return_url"`
 	SuccessURL    string  `json:"success_url"`
 	CancelURL     string  `json:"cancel_url"`
+	THClientID    string  `json:"th_cid"`
+	THSessionID   string  `json:"th_sid"`
+	THSurface     string  `json:"th_surface"`
+}
+
+func (r stripeCheckoutRequest) addAnalyticsMetadata(md map[string]string) {
+	for k, v := range map[string]string{"th_cid": r.THClientID, "th_sid": r.THSessionID, "th_surface": r.THSurface} {
+		if v = strings.TrimSpace(v); v != "" && len(v) <= 128 {
+			md[k] = v
+		}
+	}
 }
 
 func stripeMonthlyPriceID() string {
@@ -417,6 +428,7 @@ func handleStripeCheckout(ctx *fasthttp.RequestCtx) {
 			"plan":           plan,
 			"price_id":       priceID,
 		}
+		req.addAnalyticsMetadata(metadata)
 		session, err := stripeSvc.createSubscriptionCheckoutSession(customerID, returnURL, priceID, metadata)
 		if err != nil {
 			log.Printf("stripe subscription checkout error: %v", err)
@@ -454,6 +466,7 @@ func handleStripeCheckout(ctx *fasthttp.RequestCtx) {
 		"amount_usd":     fmt.Sprintf("%.2f", float64(amountUSDCents)/100),
 		"type":           "credits_purchase",
 	}
+	req.addAnalyticsMetadata(metadata)
 	session, err := stripeSvc.createCheckoutSession(customerID, returnURL, amountUSDCents, metadata)
 	if err != nil {
 		log.Printf("stripe checkout error: %v", err)
@@ -546,6 +559,7 @@ func handleStripeCheckoutCompleted(raw json.RawMessage) {
 	}
 	if credited {
 		log.Printf("stripe credited user=%s session=%s cute=%.2f balance=%.2f", userID, session.ID, cuteAmount, balance)
+		trackStripePurchase(session, userID, "credits", usdAmount)
 	}
 
 	if session.PaymentIntent != "" {
@@ -591,6 +605,7 @@ func handleStripeSubscriptionCheckoutCompleted(session stripeCheckoutSession, us
 		return
 	}
 	grantSubscriptionAPICredits(session, userID, plan)
+	trackStripePurchase(session, userID, plan, float64(session.AmountTotal)/100)
 	log.Printf("stripe subscription updated user=%s subscription=%s status=%s plan=%s", userID, subscriptionID, status, plan)
 }
 
@@ -640,6 +655,19 @@ func handleStripeInvoicePaid(raw json.RawMessage) {
 		return
 	}
 	creditSubscriptionAllowance(user.ID, invoice.Customer, "subscription-invoice:"+invoice.ID, "", subscriptionCreditGrantUSD(user.SubscriptionPlan))
+	trackServerEvent(thEvent{
+		Name:    "purchase",
+		UserID:  user.ID,
+		EventID: "stripe:" + invoice.ID,
+		Props: map[string]interface{}{
+			"plan":           user.SubscriptionPlan,
+			"revenue":        float64(invoice.AmountPaid) / 100,
+			"currency":       "USD",
+			"transaction_id": invoice.ID,
+			"method":         "stripe",
+			"renewal":        true,
+		},
+	})
 }
 
 func handleStripeSubscriptionUpdated(raw json.RawMessage) {

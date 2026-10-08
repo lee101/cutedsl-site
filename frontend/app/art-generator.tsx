@@ -7,6 +7,7 @@ import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { ArrowRight, Check, CreditCard, Loader2, Lock, SlidersHorizontal, Sparkles, X } from 'lucide-react';
 import { HTTPResponseError, parseJSONResponse } from '@/lib/http';
+import { analyticsIds, track, trackAuthCompleted, trackAuthStarted } from '@/lib/analytics';
 
 const API_BASE = '/api';
 const IMG_BASE = '/images';
@@ -199,6 +200,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
     }
     setLoadingAuth(true);
     setStatus(null);
+    trackAuthStarted('email', 'art_generator');
     try {
       const res = await fetch(`${API_BASE}/auth/email-login`, {
         method: 'POST',
@@ -207,6 +209,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
       });
       const data = await parseJSONResponse<AuthResponse>(res, 'Sign in failed');
       storeAuth(data);
+      trackAuthCompleted('email', 'art_generator', data);
       setWallet(data.user.wallet_address);
       setApiKey(data.api_key);
       setAuthOpen(false);
@@ -231,6 +234,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          ...analyticsIds('art_generator'),
           wallet_address: activeWallet,
           type: 'subscription',
           plan: 'monthly',
@@ -239,6 +243,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
       });
       const data = await parseJSONResponse<StripeCheckoutResponse>(res, 'Checkout failed');
       if (!data.client_secret || !data.publishable_key) throw new Error('Stripe checkout did not return an embedded client secret');
+      track('begin_checkout', { plan: 'monthly', value: 14, currency: 'USD', surface: 'art_generator' });
       setPublishableKey(data.publishable_key);
       setClientSecret(data.client_secret);
       setPaymentOpen(true);
@@ -295,7 +300,10 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
       const data = await parseJSONResponse<any>(res, 'Generation failed').catch(err => {
         if (err instanceof HTTPResponseError) {
           if (err.status === 401) setAuthOpen(true);
-          if (err.status === 402) setPaymentOpen(true);
+          if (err.status === 402) {
+            track('paywall_open', { surface: 'art_generator_quota' });
+            setPaymentOpen(true);
+          }
         }
         throw err;
       });

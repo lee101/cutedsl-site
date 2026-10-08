@@ -20,6 +20,7 @@ const nunito = Nunito({
 });
 
 const siteUrl = 'https://cutedsl.cc';
+const thConfig = "window.__thConfig={siteId:'thw_7fwTDwXBYrLeDq4mob3NytcXhB4BqyxU'};window.th=window.th||function(){(window.th.q=window.th.q||[]).push(arguments)};";
 const staticOrigin = STATIC_BASE_URL.startsWith('http') ? new URL(STATIC_BASE_URL).origin : null;
 
 export const metadata: Metadata = {
@@ -124,6 +125,8 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
       <head>
         {staticOrigin && <link rel="dns-prefetch" href={staticOrigin} />}
         {staticOrigin && <link rel="preconnect" href={staticOrigin} crossOrigin="anonymous" />}
+        <script dangerouslySetInnerHTML={{ __html: thConfig }} />
+        <script async src="https://twohelixes.com/static/th.js" />
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}

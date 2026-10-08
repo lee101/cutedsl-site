@@ -16,6 +16,7 @@ import { parseJSONResponse as parseHTTPJSONResponse, HTTPResponseError } from '@
 import { uploadToBucket } from '@/lib/uploads';
 import { STATIC_BASE_URL } from '@/lib/static-assets';
 import { SiteFooter } from './site-footer';
+import { analyticsIds, identify, track, trackAuthCompleted, trackAuthStarted } from '@/lib/analytics';
 
 const API_BASE = '/api';
 const IMG_BASE = `${STATIC_BASE_URL}/images`;
@@ -190,6 +191,29 @@ export default function Home() {
   const embeddedCheckoutRef = useRef<StripeEmbeddedCheckout | null>(null);
   const pendingAutotopupRef = useRef(false);
   const persistAutotopupRef = useRef<(() => Promise<void>) | null>(null);
+  const conversionSurfaceRef = useRef('nav_cta');
+
+  const openConversionFlow = useCallback((surface: string) => {
+    conversionSurfaceRef.current = surface;
+    setShowConversionFlow(true);
+  }, []);
+
+  useEffect(() => {
+    if (showConversionFlow) track('paywall_open', { surface: conversionSurfaceRef.current });
+  }, [showConversionFlow]);
+
+  useEffect(() => {
+    const el = document.getElementById('credits');
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        track('paywall_open', { surface: 'pricing_section' });
+        io.disconnect();
+      }
+    }, { threshold: 0.25 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   useEffect(() => {
     setClientOrigin(window.location.origin);
@@ -206,6 +230,7 @@ export default function Home() {
   }, [creatorReference]);
 
   const storeAuth = useCallback((user: UserPayload, key: string) => {
+    identify(user.id);
     setWalletAddress(user.wallet_address);
     setApiKey(key);
     setEmail(user.email || null);
@@ -233,8 +258,8 @@ export default function Home() {
   const handleExpiredSession = useCallback((message?: string) => {
     clearStoredAuth();
     setAuthStatus(message || 'Your session expired. Sign in again to keep creating.');
-    setShowConversionFlow(true);
-  }, [clearStoredAuth]);
+    openConversionFlow('session_expired');
+  }, [clearStoredAuth, openConversionFlow]);
 
   // Fetch pricing on mount
   useEffect(() => {
@@ -405,6 +430,8 @@ export default function Home() {
 
     setAuthLoading(true);
     setAuthStatus(null);
+    const surface = showConversionFlow ? 'conversion_flow' : 'home';
+    trackAuthStarted('email', surface);
     try {
       const res = await fetch(`${API_BASE}/auth/email-login`, {
         method: 'POST',
@@ -413,6 +440,7 @@ export default function Home() {
       });
       const data = await parseJSONResponse<AuthResponse>(res, 'Email login failed');
       storeAuth(data.user, data.api_key);
+      trackAuthCompleted('email', surface, data);
       setBalance((current) => current ? { ...current, wallet_address: data.user.wallet_address, has_password: true } : {
         wallet_address: data.user.wallet_address,
         credits: 0,
@@ -486,7 +514,7 @@ export default function Home() {
     }
     if (!signedIn || !apiKey) {
       setCreatorStatus(null);
-      setShowConversionFlow(true);
+      openConversionFlow('create_gated');
       return;
     }
     if (creatorMode === 'video' && !creatorReference && creatorModel === 'ltx-2.3-image-to-video') {
@@ -544,7 +572,7 @@ export default function Home() {
     } catch (err: any) {
       const message = err?.message || `Could not create ${creatorMode}`;
       setCreatorStatus(message);
-      if (/credit|payment|402/i.test(message)) setShowConversionFlow(true);
+      if (/credit|payment|402/i.test(message)) openConversionFlow('quota');
     } finally {
       setCreatorLoading(false);
     }
@@ -564,6 +592,8 @@ export default function Home() {
       // Check for Phantom wallet
       const solana = (window as any).solana;
       const registerWallet = async (addr: string) => {
+        const surface = showConversionFlow ? 'conversion_flow' : 'home';
+        trackAuthStarted('wallet', surface);
         const res = await fetch(`${API_BASE}/auth/wallet`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -576,6 +606,7 @@ export default function Home() {
         });
         const data = await parseJSONResponse<AuthResponse>(res, 'Wallet login failed');
         storeAuth(data.user, data.api_key);
+        trackAuthCompleted('wallet', surface, data);
         fetchBalance(data.user.wallet_address);
         fetchHistory(data.user.wallet_address);
         setAuthStatus(data.user.email ? 'Wallet connected to your email account.' : 'Wallet connected.');
@@ -678,6 +709,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (res.ok) {
+        track('begin_checkout', { plan: 'cute_deposit', method: 'crypto', surface: 'pricing_section' });
         setDepositResult(data);
         // Start listening for payment
         const es = new EventSource(`${API_BASE}/crypto-checkout/${data.intent_id}/events`);
@@ -725,10 +757,12 @@ export default function Home() {
       const billingWallet = await ensureStripeBillingAccount();
       if (!billingWallet) return false;
       const amount = amountUsd ?? parseFloat(stripeAmount);
+      const surface = showConversionFlow ? 'conversion_flow' : 'pricing_section';
       const res = await fetch(`${API_BASE}/stripe-checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          ...analyticsIds(surface),
           wallet_address: billingWallet,
           amount_usd: amount,
           return_url: `${window.location.origin}/?payment=success&session_id={CHECKOUT_SESSION_ID}#credits`,
@@ -738,6 +772,7 @@ export default function Home() {
       if (!res.ok) {
         throw new Error(data.error || 'Failed to start Stripe checkout');
       }
+      if (data.client_secret || data.url) track('begin_checkout', { plan: 'credits', value: amount, currency: 'USD', surface });
       if (data.client_secret && data.publishable_key) {
         setStripePublishableKey(data.publishable_key);
         setEmbeddedCheckoutClientSecret(data.client_secret);
@@ -763,10 +798,12 @@ export default function Home() {
     try {
       const billingWallet = await ensureStripeBillingAccount();
       if (!billingWallet) return false;
+      const surface = showConversionFlow ? 'conversion_flow' : 'pricing_section';
       const res = await fetch(`${API_BASE}/stripe-checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          ...analyticsIds(surface),
           wallet_address: billingWallet,
           type: 'subscription',
           plan,
@@ -776,6 +813,7 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to start subscription checkout');
       if (!data.client_secret || !data.publishable_key) throw new Error('Stripe checkout response did not include a client secret');
+      track('begin_checkout', { plan, value: plan === 'annual' ? 140 : 14, currency: 'USD', surface });
       setStripePublishableKey(data.publishable_key);
       setEmbeddedCheckoutClientSecret(data.client_secret);
       return true;
@@ -1008,7 +1046,7 @@ export default function Home() {
             <button
               type="button"
               aria-label="Start creating"
-              onClick={() => setShowConversionFlow(true)}
+              onClick={() => openConversionFlow('nav_cta')}
               className="bg-slate-950 text-white font-bold px-4 sm:px-6 py-2.5 rounded-xl shadow-lg shadow-slate-900/10 hover:bg-slate-800 transition-colors flex items-center gap-2"
             >
               <Sparkles size={17} />

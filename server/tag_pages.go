@@ -127,7 +127,7 @@ h1{font-size:2.5rem;font-weight:800;color:#0f172a;margin:0 0 .5rem;background:li
 footer{text-align:center;color:#94a3b8;font-size:.82rem;padding:2.5rem 1rem 3rem}
 footer a{color:#db2777}
 </style>
-</head>
+` + thHeadSnippet + `</head>
 <body>
 <nav class="nav">
   <a href="/" class="nav-logo">🦋 CuteDSL</a>
@@ -238,7 +238,7 @@ h1{font-size:2.5rem;font-weight:800;margin:1.5rem 0 .25rem;background:linear-gra
 footer{text-align:center;color:#94a3b8;font-size:.82rem;padding:1.5rem 1rem 3rem}
 footer a{color:#db2777}
 </style>
-</head>
+` + thHeadSnippet + `</head>
 <body>
 <nav class="nav">
   <a href="/" class="nav-logo">🦋 CuteDSL</a>

@@ -406,7 +406,7 @@ h2{font-size:1.2rem;font-weight:800;color:#0f172a;margin:0 0 1rem;display:flex;a
 footer{text-align:center;color:#94a3b8;font-size:.82rem;padding:2rem 0 3rem;border-top:1px solid #fce7f3}
 footer a{color:#db2777}
 </style>
-</head>
+` + thHeadSnippet + `</head>
 <body>
 <nav class="nav">
   <a href="/" class="nav-logo">🦋 CuteDSL</a>

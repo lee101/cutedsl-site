@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { parseJSONResponse as parseHTTPJSONResponse } from '@/lib/http';
 import { STATIC_BASE_URL } from '@/lib/static-assets';
+import { analyticsIds, identify, track, trackAuthCompleted, trackAuthStarted } from '@/lib/analytics';
 
 const API_BASE = '/api';
 const IMG_BASE = `${STATIC_BASE_URL}/images`;
@@ -228,6 +229,7 @@ export default function AccountPage() {
   const canSubmitEmailLogin = isValidEmail(emailInput) && password.length >= 8;
 
   const storeAuth = useCallback((user: UserPayload, key: string) => {
+    identify(user.id);
     setWalletAddress(user.wallet_address);
     setApiKey(key);
     setEmail(user.email || null);
@@ -334,9 +336,11 @@ export default function AccountPage() {
     if (!canSubmitEmailLogin) return;
     setLoadingAuth(true);
     setStatus(null);
+    trackAuthStarted('email', 'account');
     try {
       const data = await postJSON<AuthResponse>('/auth/email-login', { email: emailInput.trim(), password }, 'Login failed');
       storeAuth(data.user, data.api_key);
+      trackAuthCompleted('email', 'account', data);
       setStatus('Signed in. Your API key and billing account are ready.');
     } catch (err: unknown) {
       setStatus(errorMessage(err, 'Login failed'));
@@ -392,11 +396,13 @@ export default function AccountPage() {
         addr = window.prompt('Enter your Solana wallet address:') || '';
       }
       if (addr.length < 20) throw new Error('Wallet address required');
+      trackAuthStarted('wallet', 'account');
       const data = await postJSON<AuthResponse>('/auth/wallet', {
         wallet_address: addr,
         email: isValidEmail(emailInput) ? emailInput.trim() : undefined,
       }, 'Wallet login failed');
       storeAuth(data.user, data.api_key);
+      trackAuthCompleted('wallet', 'account', data);
       setStatus('Wallet connected.');
     } catch (err: unknown) {
       setStatus(errorMessage(err, 'Wallet login failed'));
@@ -533,6 +539,7 @@ export default function AccountPage() {
 
     try {
       const body: Record<string, unknown> = {
+        ...analyticsIds('account'),
         wallet_address: walletAddress,
         return_url: `${window.location.origin}/account?payment=success&session_id={CHECKOUT_SESSION_ID}`,
       };
@@ -546,6 +553,9 @@ export default function AccountPage() {
 
       const data = await postJSON<CheckoutResponse>('/stripe-checkout', body, 'Failed to start checkout');
       if (!data.client_secret || !data.publishable_key) throw new Error('Stripe checkout did not return an embedded client secret');
+      track('begin_checkout', kind === 'credits'
+        ? { plan: 'credits', value: body.amount_usd, currency: 'USD', surface: 'account' }
+        : { plan: kind, value: kind === 'annual' ? 140 : 14, currency: 'USD', surface: 'account' });
       setStripePublishableKey(data.publishable_key);
       setEmbeddedSecret(data.client_secret);
       setStatus(null);

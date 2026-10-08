@@ -1,8 +1,10 @@
 'use client';
 
+import { useEffect } from 'react';
 import Link from 'next/link';
 import { Check, CreditCard, Sparkles, X } from 'lucide-react';
 import { HTTPResponseError } from '@/lib/http';
+import { track } from '@/lib/analytics';
 
 export const SUBSCRIBE_PATH = '/account';
 
@@ -40,6 +42,10 @@ const PERKS = [
 
 export function SubscribeCard({ info, onClose, compact }: { info: PaywallInfo; onClose?: () => void; compact?: boolean }) {
   const title = info.reason === 'login' ? 'Sign in to edit with ra2' : 'Unlock unlimited image edits';
+  const surface = compact ? 'docs_inline' : 'docs_modal';
+  useEffect(() => {
+    track('paywall_open', { surface, reason: info.reason, page: window.location.pathname });
+  }, [surface, info.reason]);
   return (
     <div
       data-testid="subscribe-prompt"
@@ -73,6 +79,7 @@ export function SubscribeCard({ info, onClose, compact }: { info: PaywallInfo; o
       <Link
         href={info.subscribeUrl}
         data-testid="subscribe-cta"
+        onClick={() => track(info.reason === 'login' ? 'paywall_signup_clicked' : 'paywall_subscribe_clicked', { surface })}
         className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-pink-500 to-purple-500 px-5 py-3 text-sm font-bold text-white shadow-lg hover:shadow-pink-300/50 hover:scale-[1.01] transition-all"
       >
         <CreditCard size={16} /> {info.reason === 'login' ? 'Sign in and subscribe' : 'Subscribe now'}

@@ -790,6 +790,19 @@ func processCompletedPayment(intent CryptoCheckoutIntent, txSig string) {
 		CreditsAfter: newBalance,
 	})
 
+	trackServerEvent(thEvent{
+		Name:    "purchase",
+		UserID:  intent.UserID,
+		EventID: "crypto:" + intent.ID,
+		Props: map[string]interface{}{
+			"plan":           "cute_deposit",
+			"revenue":        intent.USDAmount,
+			"currency":       "USD",
+			"transaction_id": intent.ID,
+			"method":         "crypto_" + string(intent.Method),
+		},
+	})
+
 	// Broadcast SSE event
 	broadcastCheckoutEvent(intent.ID, "paid")
 
