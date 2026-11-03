@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from image_quality import bumpy_metrics, compact_prompt, detect_too_bumpy, retry_prompt
-from training_store import load_jobs, save_job, update_job, upload_training_artifacts
+from training_store import load_jobs, safe_join, save_job, update_job, upload_training_artifacts
 from runpod_lora_manager import refresh_runpod_status, runpod_enabled, start_runpod_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1095,7 +1095,7 @@ def _download_lora(url: str) -> str:
     os.makedirs(_lora_cache_dir, exist_ok=True)
     from urllib.parse import unquote
     filename = unquote(url.split("/")[-1])
-    local_path = os.path.join(_lora_cache_dir, filename)
+    local_path = safe_join(_lora_cache_dir, filename)
     if os.path.exists(local_path):
         return local_path
     import urllib.request
@@ -2613,7 +2613,7 @@ def _dataset_dir(dataset_name: str) -> str:
     safe = "".join(c for c in dataset_name if c.isalnum() or c in "._-")
     if not safe:
         raise ValueError("invalid dataset_name")
-    return os.path.join(DATASET_ROOT, safe)
+    return safe_join(DATASET_ROOT, safe)
 
 
 def _run_zimage_training(job_id: str, req: LoRATrainRequest):
@@ -2879,7 +2879,10 @@ async def upload_dataset(
         safe_name = "".join(c for c in base if c.isalnum() or c in "._-")
         if not safe_name:
             continue
-        out_path = os.path.join(ds_dir, safe_name)
+        try:
+            out_path = safe_join(ds_dir, safe_name)
+        except ValueError:
+            continue
         content = await f.read()
         with open(out_path, "wb") as out:
             out.write(content)

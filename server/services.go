@@ -1009,7 +1009,23 @@ func proxyTextGeneratorSpeech(req ServiceUsageRequest, backendURL string) ([]byt
 }
 
 // handleTrainStatus proxies training job status from inference server
+func validTrainJobID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func handleTrainStatus(ctx *fasthttp.RequestCtx, jobID string) {
+	if !validTrainJobID(jobID) {
+		jsonError(ctx, 404, "training job not found")
+		return
+	}
 	backendURL := serviceBackends["lora_training"]
 	endpoint := fmt.Sprintf("%s/train/%s", backendURL, jobID)
 
