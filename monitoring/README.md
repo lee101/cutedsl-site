@@ -29,18 +29,24 @@ Only one `cutedsl_monitor.py` process can run at once. The systemd service is a
 oneshot, so a timer tick cannot overlap a long repair; an additional `flock`
 also covers manual runs.
 
-Noncritical signatures need two observations by default. Confirmed hard-down,
-panic and real-canary failures can dispatch immediately. A single global repair
+Noncritical signatures need two consecutive scans (gap <= 15 min) or three
+occurrences within an hour. Panics, inference tracebacks/CUDA faults and
+real-canary failures dispatch immediately. Health failures (including 5xx and
+`starting`) are retried, use a stable per-endpoint fingerprint and need two
+consecutive scans; Go health is skipped for one scan when `cutedsl.service` is
+under 2 minutes old (never twice in a row, never in `--verify-only`). Journal
+and inference-log noise is dropped: client disconnects, deadline/i/o timeouts,
+DNS, 429/502/503/504, upstream, rate limit, shutdown, database starting. A single global repair
 lock covers frontend, backend and inference incidents. Defaults:
 
-- Agent: `gpt-5.6-sol`, medium reasoning
+- Agent: `gpt-6.1-terra`, high reasoning
 - Global cooldown: 1 hour
 - Per-category cooldown: 3 hours
 - Daily repair-agent cap: 4
 - Agent timeout: 3 hours
 - Monitor interval: 5 minutes
 - Real image canary: 6 hours; failed-canary retry: 15 minutes
-- Health transport checks: 3 attempts, 1 second apart
+- Health checks: 3 attempts, 10s/20s backoff (`CUTEDSL_HEALTH_RETRY_SECONDS`)
 
 The production host also installs `deploy/cutedsl-resolv.conf` as
 `/etc/resolv.conf`, providing multiple independent resolvers instead of relying
@@ -127,7 +133,7 @@ codex exec -C /nvme0n1-disk/code/cutedsl-site \
   --add-dir /nvme0n1-disk/code/omniserve-native \
   --add-dir /nvme0n1-disk/code/text-generator.io \
   --add-dir /nvme0n1-disk/code/netwrck \
-  -m gpt-5.6-sol \
+  -m gpt-6.1-terra \
   -c model_reasoning_effort=high \
   -s danger-full-access \
   --dangerously-bypass-approvals-and-sandbox \
@@ -171,6 +177,13 @@ The frontend app reports browser `error` and `unhandledrejection` events to:
 The Go server appends those events to:
 
 `/nvme0n1-disk/tmp/cutedsl-frontend-errors.jsonl`
+
+That path is a symlink to `/nvme0n1-disk/tmp/cutedsl-logs/frontend-errors.jsonl`,
+owned by the `svc-cutedsl` service user: the service unit drops privileges, and
+`/nvme0n1-disk/tmp` itself is not writable by that account. `deploy.sh`
+re-creates the directory, file, and symlink. If the sink is ever unwritable the
+server journals the event (`frontend error log append failed (event journaled)`)
+instead of returning 500 to the browser reporter.
 
 The frontend monitor only reacts to new JSONL error events in that file; it does not spin up agents for normal logs or non-error reports.
 

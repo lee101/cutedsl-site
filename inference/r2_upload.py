@@ -37,7 +37,24 @@ def _get_s3_client():
     if s3_client is None:
         import boto3
         session = boto3.session.Session()
-        s3_client = session.client("s3", endpoint_url=R2_ENDPOINT_URL)
+        access_key = (
+            os.getenv("CUTEDSL_R2_ACCESS_KEY_ID")
+            or os.getenv("AWS_ACCESS_KEY_ID")
+            or os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID")
+        )
+        secret_key = (
+            os.getenv("CUTEDSL_R2_SECRET_ACCESS_KEY")
+            or os.getenv("AWS_SECRET_ACCESS_KEY")
+            or os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY")
+        )
+        client_options = {"endpoint_url": R2_ENDPOINT_URL}
+        if access_key and secret_key:
+            client_options.update(
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                region_name="auto",
+            )
+        s3_client = session.client("s3", **client_options)
         logger.info("R2 client initialized: %s/%s/%s", R2_ENDPOINT_URL, R2_BUCKET, R2_BUCKET_PATH)
     return s3_client
 
@@ -74,13 +91,26 @@ def check_if_blob_exists(name: str) -> bool:
 
 
 def upload_bytes(blob_name: str, data: bytes, content_type: str = "image/webp") -> str:
-    key = _full_key(blob_name)
+    return upload_bytes_at_key(_full_key(blob_name), data, content_type)
+
+
+def upload_bytes_at_key(
+    key: str,
+    data: bytes,
+    content_type: str = "image/webp",
+    cache_control: str = "public, max-age=31536000, immutable",
+) -> str:
+    """Upload to an explicit bucket key, for static gallery image variants."""
+    key = key.strip("/")
+    if not key or any(part in {".", ".."} for part in key.split("/")):
+        raise ValueError("invalid R2 object key")
     _get_s3_client().put_object(
         Bucket=R2_BUCKET,
         Key=key,
         Body=data,
         ACL="public-read",
         ContentType=content_type,
+        CacheControl=cache_control,
     )
     url = f"https://{R2_PUBLIC_BASE_URL}/{key}"
     logger.info("uploaded %s (%d bytes)", url, len(data))

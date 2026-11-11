@@ -1776,11 +1776,32 @@ def _require_nonempty_prompt(prompt: str, field_name: str = "prompt"):
         raise HTTPException(400, str(exc)) from exc
 
 
+_error_log_lock = threading.Lock()
+ERROR_LOG_MAX_TEXT_CHARS = int(os.getenv("ERROR_LOG_MAX_TEXT_CHARS", "2000"))
+ERROR_LOG_MAX_TRACEBACK_CHARS = int(os.getenv("ERROR_LOG_MAX_TRACEBACK_CHARS", "8000"))
+ERROR_LOG_MAX_QUERY_CHARS = int(os.getenv("ERROR_LOG_MAX_QUERY_CHARS", "2048"))
+
+
+def _bounded_error_text(value, limit: int) -> str:
+    text = value if isinstance(value, str) else str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...[truncated]"
+
+
 def _write_error_event(event: dict):
+    """Append one JSON object per line, serialized against other writers.
+
+    Two threads appending a multi-kilobyte line with plain buffered I/O can
+    interleave mid-record and leave unparseable lines in the structured log.
+    Hold a lock and issue one write of a bounded record.
+    """
     try:
         os.makedirs(os.path.dirname(ERROR_LOG_PATH), exist_ok=True)
-        with open(ERROR_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+        line = json.dumps(event, sort_keys=True, default=str) + "\n"
+        with _error_log_lock:
+            with open(ERROR_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
     except Exception as e:
         logger.warning("failed to write error event: %s", e)
 
@@ -1793,15 +1814,21 @@ def _log_request_error(request: Request, exc: Exception, status_code: int, detai
         "status_code": status_code,
         "method": request.method,
         "path": request.url.path,
-        "query": _sanitize_query(request.scope.get("query_string", b"")),
+        "query": _bounded_error_text(
+            _sanitize_query(request.scope.get("query_string", b"")),
+            ERROR_LOG_MAX_QUERY_CHARS,
+        ),
         "client": request.client.host if request.client else "",
         "error_type": type(exc).__name__,
-        "error": detail or str(exc),
+        "error": _bounded_error_text(detail or str(exc), ERROR_LOG_MAX_TEXT_CHARS),
         "inference": getattr(request.state, "inference_params", {}),
         **_request_prompt_info(request),
     }
     if status_code >= 500:
-        event["traceback"] = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        rendered = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        event["traceback"] = _bounded_error_text(
+            rendered, ERROR_LOG_MAX_TRACEBACK_CHARS
+        ).splitlines(keepends=True)
     _write_error_event(event)
     logger.error(
         "request failed request_id=%s status=%d path=%s prompt_len=%s error=%s: %s",
@@ -1828,9 +1855,26 @@ def _json_safe(value):
     return str(value)
 
 
+_REQUEST_ID_MAX_LEN = 96
+_REQUEST_ID_UNSAFE = re.compile(r"[^A-Za-z0-9._:@/-]+")
+
+
+def _sanitize_request_id(raw: str | None) -> str:
+    """Bound and clean a caller-supplied request id before it reaches logs.
+
+    ``x-request-id`` is echoed into structured error events and log lines. An
+    unbounded value lets a caller inject arbitrary multi-kilobyte text (or
+    newlines) into both sinks, so keep it to a short opaque token.
+    """
+    if not raw:
+        return uuid.uuid4().hex
+    cleaned = _REQUEST_ID_UNSAFE.sub("_", raw.strip())[:_REQUEST_ID_MAX_LEN]
+    return cleaned or uuid.uuid4().hex
+
+
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    request.state.request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    request.state.request_id = _sanitize_request_id(request.headers.get("x-request-id"))
     response = await call_next(request)
     response.headers["x-request-id"] = request.state.request_id
     return response
@@ -1873,6 +1917,42 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 def _check_secret(secret: str = ""):
     if IMAGE_API_SECRETS and secret not in IMAGE_API_SECRETS:
         raise HTTPException(403, "invalid secret")
+
+
+# Mirrors the native backend's documented generation contract so invalid input
+# is rejected here instead of being forwarded and reported as a 502.
+_IMAGE_DIMENSION_RANGE = (64, 4096)
+_IMAGE_STEPS_RANGE = (1, 100)
+_IMAGE_SEED_RANGE = (-(2**63), 2**63 - 1)
+
+
+def _body_number(body: dict, field: str, default, *, cast, minimum=None, maximum=None):
+    """Coerce a client-supplied JSON number, rejecting non-numeric input.
+
+    The OpenAI-compatible surface takes arbitrary JSON, so callers can (and do)
+    send strings such as ``"abc"`` for numeric fields. A bare ``int()`` raises
+    ValueError inside the endpoint, which FastAPI turns into a 500 for a request
+    that is merely invalid.
+    """
+    raw = body.get(field)
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        raise HTTPException(400, f"{field} must be a number")
+    if cast is int and isinstance(raw, float):
+        if not raw.is_integer():
+            raise HTTPException(400, f"{field} must be an integer")
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field} must be a number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise HTTPException(400, f"{field} must be a finite number")
+    if minimum is not None and value < minimum:
+        raise HTTPException(400, f"{field} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise HTTPException(400, f"{field} must be at most {maximum}")
+    return value
 
 
 def _require_http_url(value: str, field_name: str = "url"):
@@ -2808,11 +2888,46 @@ def _native_zimage_request(req: ZImageRequest, prompt: str) -> tuple[dict, objec
     return payload, lora
 
 
+def _native_background_queue_busy() -> bool:
+    """Avoid joining the native scheduler's long background admission queue."""
+    # The status route is only a reliable admission snapshot for our local
+    # native service. Other configured backends may not expose this route.
+    if urlparse(ZIMAGE_NATIVE_FALLBACK_URL).hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    try:
+        response = requests.get(f"{ZIMAGE_NATIVE_FALLBACK_URL}/status", timeout=1.0)
+        if response.status_code != 200:
+            return False
+        snapshot = response.json()
+        admission = snapshot.get("admission") if isinstance(snapshot, dict) else None
+        if not isinstance(admission, dict):
+            return False
+        slots = int(admission.get("slots") or 0)
+        used = int(admission.get("used_slots") or 0)
+        waiting = admission.get("waiting") or {}
+        if not isinstance(waiting, dict):
+            waiting = {}
+        return (slots > 0 and used >= slots) or any(
+            int(waiting.get(tier) or 0) > 0
+            for tier in ("paid", "sub", "free", "background")
+        )
+    except (requests.RequestException, ValueError, TypeError, OverflowError):
+        # A failed status read is not evidence of saturation. The request
+        # itself retains the native service's authoritative admission path.
+        return False
+
+
 def _call_native_zimage(payload: dict) -> dict:
     """Call the co-resident native backend with bounded transient retry."""
     tier = str(payload.get("_omniserve_tier") or "paid").strip().lower()
     if tier not in {"paid", "sub", "free", "background"}:
         tier = "paid"
+    if tier == "background" and _native_background_queue_busy():
+        raise HTTPException(
+            429,
+            "native image capacity is busy; retry later",
+            headers={"Retry-After": "15"},
+        )
     request_payload = {
         key: value for key, value in payload.items() if key != "_omniserve_tier"
     }
@@ -2832,7 +2947,9 @@ def _call_native_zimage(payload: dict) -> dict:
     recovery_started = None
     headroom_cache_reclaimed = False
     while True:
+        response = None
         try:
+            request_started = time.perf_counter()
             response = requests.post(
                 f"{ZIMAGE_NATIVE_FALLBACK_URL}/v1/images/generations",
                 json=request_payload,
@@ -2850,10 +2967,47 @@ def _call_native_zimage(payload: dict) -> dict:
                         message = str(error_value)
                 except (ValueError, TypeError):
                     pass
+                # Cloudflare/nginx overflow failures can be plain text rather
+                # than OpenAI JSON. Retain only the exact gateway status line;
+                # arbitrary upstream bodies can contain credentials or prompts.
+                if not message and response.status_code in {502, 503, 504}:
+                    gateway_error = str(getattr(response, "text", "")).strip()
+                    if gateway_error == f"error code: {response.status_code}":
+                        message = f"upstream gateway unavailable ({gateway_error})"
                 message = " ".join(message.split())[:240]
                 last_error = f"native fallback returned HTTP {response.status_code}"
                 if message:
                     last_error = f"{last_error}: {message}"
+                # During an omniserve-native restart the listener can be up
+                # before its route table/image worker is ready.  It answers
+                # the otherwise valid generations path with the generic 404
+                # ``not found`` response for a short interval.  Treat only
+                # that exact readiness response as transient; malformed URLs
+                # and other client errors remain fail-fast.
+                native_route_not_ready = (
+                    response.status_code == 404
+                    and message.casefold() in {"", "not found"}
+                )
+                if native_route_not_ready:
+                    if tier == "background":
+                        raise HTTPException(
+                            429,
+                            "native fallback is restarting",
+                            headers={"Retry-After": "15"},
+                        )
+                    now = time.monotonic()
+                    if recovery_started is None:
+                        recovery_started = now
+                    restart_deadline = recovery_started + ZIMAGE_NATIVE_RESTART_GRACE_SECONDS
+                    if now < restart_deadline:
+                        logger.warning(
+                            "%s; waiting %.1fs for native route readiness",
+                            last_error,
+                            ZIMAGE_NATIVE_RESTART_POLL_SECONDS,
+                        )
+                        time.sleep(ZIMAGE_NATIVE_RESTART_POLL_SECONDS)
+                        attempt += 1
+                        continue
                 # Another managed GPU workload can temporarily keep the native
                 # backend below its explicit safety floor. The old generic
                 # 100-ms retry could not outlive even a short model residency,
@@ -2975,29 +3129,61 @@ def _call_native_zimage(payload: dict) -> dict:
                     or generation_capacity_failure
                     or admission_timeout_failure
                 )
+                # Capacity is a retryable admission condition for every tier.
+                # Returning 503 after the bounded recovery grace makes healthy
+                # callers treat shared-GPU pressure as an application outage
+                # and obscures the actionable retry interval.  Preserve 503
+                # for native restart/unknown transient failures, but expose
+                # exhausted capacity as explicit backpressure.
+                capacity_backpressure = (
+                    headroom_failure
+                    or generation_capacity_failure
+                    or admission_timeout_failure
+                )
                 raise HTTPException(
-                    429 if background_backpressure else (
+                    429 if (background_backpressure or capacity_backpressure) else (
                         503 if response.status_code in transient_statuses else 502
                     ),
                     last_error,
-                    headers={"Retry-After": "15" if background_backpressure else "5"},
+                    headers={"Retry-After": "15" if capacity_backpressure else "5"},
                 )
-            document = response.json()
-            rows = document.get("data") if isinstance(document, dict) else None
-            row = rows[0] if isinstance(rows, list) and rows else None
-            encoded = row.get("b64_json") if isinstance(row, dict) else None
-            if not isinstance(encoded, str) or not encoded:
-                raise ValueError("response has no b64_json image")
-            image_bytes = base64.b64decode(encoded, validate=True)
+            content_type = (getattr(response, "headers", {}) or {}).get(
+                "Content-Type", ""
+            ).split(";", 1)[0].strip().lower()
+            # The native gateway's overflow worker returns encoded image bytes
+            # even for response_format=b64_json. Preserve those bytes rather
+            # than retrying an already successful (and potentially paid) job.
+            if content_type in {"image/webp", "image/png", "image/jpeg"}:
+                image_bytes = response.content
+                document = {}
+                row = {"inference_time_ms": int(
+                    (time.perf_counter() - request_started) * 1000
+                )}
+                encoded = None
+            else:
+                document = response.json()
+                rows = document.get("data") if isinstance(document, dict) else None
+                row = rows[0] if isinstance(rows, list) and rows else None
+                encoded = row.get("b64_json") if isinstance(row, dict) else None
+                if not isinstance(encoded, str) or not encoded:
+                    raise ValueError("response has no b64_json image")
+                if len(encoded) > ((REMOTE_IMAGE_MAX_BYTES + 2) // 3) * 4:
+                    raise ValueError("native response image is too large")
+                image_bytes = base64.b64decode(encoded, validate=True)
+            if len(image_bytes) > REMOTE_IMAGE_MAX_BYTES:
+                raise ValueError("native response image is too large")
             with Image.open(io.BytesIO(image_bytes)) as image:
                 actual_width, actual_height = image.size
                 image_format = (image.format or row.get("format") or "webp").lower()
-            expected = (int(request_payload["width"]), int(request_payload["height"]))
-            if (actual_width, actual_height) != expected:
-                raise ValueError(
-                    f"response dimensions {actual_width}x{actual_height} do not match "
-                    f"requested {expected[0]}x{expected[1]}"
-                )
+                expected = (int(request_payload["width"]), int(request_payload["height"]))
+                if (actual_width, actual_height) != expected:
+                    raise ValueError(
+                        f"response dimensions {actual_width}x{actual_height} do not match "
+                        f"requested {expected[0]}x{expected[1]}"
+                    )
+                image.load()  # Headers alone do not prove the pixels are intact.
+            if encoded is None:
+                encoded = base64.b64encode(image_bytes).decode("ascii")
             return {
                 "encoded": encoded,
                 "image_bytes": image_bytes,
@@ -3042,8 +3228,28 @@ def _call_native_zimage(payload: dict) -> dict:
                 continue
             last_error = "native fallback response failed validation (ConnectionError)"
             raise HTTPException(503, last_error, headers={"Retry-After": "5"}) from exc
-        except (requests.RequestException, ValueError, TypeError, json.JSONDecodeError) as exc:
+        except requests.ReadTimeout as exc:
+            # The native scheduler may still have this request queued (or may
+            # already be generating it). Retrying here submits a second image
+            # job while the first can continue for much longer than our HTTP
+            # read timeout. Background callers have durable retry queues, so
+            # report backpressure; an interactive caller gets a retryable
+            # upstream timeout without an automatic duplicate generation.
+            logger.warning("native image request timed out after %.1fs (tier=%s)",
+                           ZIMAGE_NATIVE_FALLBACK_TIMEOUT_SECONDS, tier)
+            raise HTTPException(
+                429 if tier == "background" else 503,
+                "native image request timed out while queued or generating",
+                headers={"Retry-After": "15"},
+            ) from exc
+        except (requests.RequestException, ValueError, TypeError, OSError,
+                Image.DecompressionBombError) as exc:
             last_error = f"native fallback response failed validation ({type(exc).__name__})"
+            logger.warning(
+                "%s: status=%s content_type=%s",
+                last_error, getattr(response, "status_code", None),
+                (getattr(response, "headers", {}) or {}).get("Content-Type", ""),
+            )
             if attempt < ZIMAGE_NATIVE_FALLBACK_RETRIES:
                 logger.warning("%s; retrying once", last_error)
                 time.sleep(0.1)
@@ -4057,10 +4263,16 @@ async def openai_images_generations(request: Request):
     through."""
     if not LOAD_ZIMAGE:
         raise HTTPException(503, "zimage disabled")
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(400, "request body must be valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
     _check_secret(_openai_images_secret(request, body))
     prompt = str(body.get("prompt") or "")
     _require_nonempty_prompt(prompt)
+    dim_min, dim_max = _IMAGE_DIMENSION_RANGE
     width, height = ZIMAGE_DEFAULT_WIDTH, ZIMAGE_DEFAULT_HEIGHT
     size = body.get("size")
     if size:
@@ -4068,32 +4280,45 @@ async def openai_images_generations(request: Request):
             width, height = (int(x) for x in str(size).lower().split("x"))
         except ValueError:
             raise HTTPException(400, "size must be WIDTHxHEIGHT")
-    width = int(body.get("width") or width)
-    height = int(body.get("height") or height)
-    n = max(1, min(int(body.get("n") or 1), 4))
-    seed = int(body.get("seed") or 0)
+    width = _body_number(body, "width", width, cast=int, minimum=dim_min, maximum=dim_max)
+    height = _body_number(body, "height", height, cast=int, minimum=dim_min, maximum=dim_max)
+    for name, value in (("width", width), ("height", height)):
+        if not dim_min <= value <= dim_max:
+            raise HTTPException(400, f"{name} must be between {dim_min} and {dim_max}")
+    n = max(1, min(_body_number(body, "n", 1, cast=int), 4))
+    steps_min, steps_max = _IMAGE_STEPS_RANGE
+    steps = _body_number(body, "steps", None, cast=int, minimum=steps_min, maximum=steps_max)
+    if steps is None:
+        steps = _body_number(
+            body, "num_inference_steps", ZIMAGE_DEFAULT_STEPS,
+            cast=int, minimum=steps_min, maximum=steps_max,
+        )
+    seed_min, seed_max = _IMAGE_SEED_RANGE
+    seed = _body_number(body, "seed", 0, cast=int, minimum=seed_min, maximum=seed_max)
     lora_id = body.get("lora_id")
-    lora_scale = float(body.get("lora_scale") or 1.0)
+    lora_scale = _body_number(body, "lora_scale", 1.0, cast=float)
     loras = body.get("loras") or []
-    if not lora_id and loras:
+    if not lora_id and isinstance(loras, (list, tuple)) and loras:
         first = loras[0]
         lora_id = first.get("id") if isinstance(first, dict) else str(first)
         if isinstance(first, dict) and first.get("scale") is not None:
-            lora_scale = float(first["scale"])
+            lora_scale = _body_number(first, "scale", lora_scale, cast=float)
     base = dict(
         prompt=prompt, width=width, height=height,
-        num_inference_steps=int(body.get("steps") or body.get("num_inference_steps") or ZIMAGE_DEFAULT_STEPS),
-        guidance_scale=float(body.get("guidance_scale") or ZIMAGE_DEFAULT_GUIDANCE),
+        num_inference_steps=steps,
+        guidance_scale=_body_number(
+            body, "guidance_scale", ZIMAGE_DEFAULT_GUIDANCE, cast=float
+        ),
         lora_id=lora_id, lora_scale=lora_scale,
         auto_lora=bool(body.get("auto_lora", True)),
         prompt_is_final=bool(body.get("prompt_is_final", False)),
         low_priority=bool(body.get("low_priority", False)),
         quality_retry=bool(body.get("quality_retry", True)),
         enhance_prompt=bool(body.get("enhance_prompt", True)),
-        best_of=max(1, min(int(body.get("best_of") or 1), 4)),
+        best_of=max(1, min(_body_number(body, "best_of", 1, cast=int), 4)),
         score_aesthetic=bool(body.get("score_aesthetic", False)),
-        early_exit=body.get("early_exit"),
-        early_exit_min_steps=body.get("early_exit_min_steps"),
+        early_exit=_body_number(body, "early_exit", None, cast=float, minimum=0.0, maximum=1.0),
+        early_exit_min_steps=_body_number(body, "early_exit_min_steps", None, cast=int, minimum=1),
         teleport=bool(body.get("teleport", False)),
     )
     _remember_request_prompt(request, prompt)
@@ -4125,17 +4350,52 @@ async def openai_images_generations(request: Request):
 # ---------------------------------------------------------------------------
 
 
+STEP_TRACE_MAX_STEPS = 100
+
+
 class StepTraceRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
-    width: int = 512
-    height: int = 512
-    seed: int = 0
-    num_inference_steps: int = 9
+    width: int = Field(512, ge=64, le=4096)
+    height: int = Field(512, ge=64, le=4096)
+    seed: int = Field(0, ge=-(2**63), le=2**63 - 1)
+    num_inference_steps: int = Field(9, ge=1, le=STEP_TRACE_MAX_STEPS)
     guidance_scale: float = ZIMAGE_DEFAULT_GUIDANCE
     decode_x0: bool = True
     save_tensors: bool = True
     low_priority: bool = True
     sigmas: Optional[list[float]] = None
+
+    @field_validator("prompt")
+    @classmethod
+    def _validate_prompt(cls, value: str) -> str:
+        return _validate_prompt_text(value)
+
+    @field_validator("sigmas")
+    @classmethod
+    def _validate_sigmas(cls, value: Optional[list[float]]) -> Optional[list[float]]:
+        """Match the flow-match scheduler contract used by the pipeline.
+
+        ``set_timesteps`` rejects a custom schedule whose length differs from
+        ``num_inference_steps`` with a bare ValueError, which would surface as a
+        500 for invalid input. Those sigmas are also the axes of the trace, so
+        non-finite or non-monotonic schedules make the metrics meaningless.
+        """
+        if value is None:
+            return None
+        if not 1 <= len(value) <= STEP_TRACE_MAX_STEPS:
+            raise ValueError(
+                f"sigmas must contain between 1 and {STEP_TRACE_MAX_STEPS} values"
+            )
+        for index, sigma in enumerate(value):
+            if not math.isfinite(sigma):
+                raise ValueError(f"sigmas[{index}] must be finite")
+            if not 0.0 <= sigma <= 1.0:
+                raise ValueError(f"sigmas[{index}] must be between 0 and 1")
+            if index and sigma > value[index - 1]:
+                raise ValueError("sigmas must be monotonically non-increasing")
+        if value[0] <= 0.0:
+            raise ValueError("sigmas[0] must be positive")
+        return value
 
 
 def _decode_zimage_latent_to_pil(pipe, latents: torch.Tensor):
@@ -4146,11 +4406,50 @@ def _decode_zimage_latent_to_pil(pipe, latents: torch.Tensor):
     return pipe.image_processor.postprocess(img, output_type="pil")[0]
 
 
+def _step_trace_cold_load_detail() -> str | None:
+    """Explain a cold pipeline only when this deployment forbids loading it.
+
+    Deployments whose primary image backend is the co-resident native service
+    set ``ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED=0`` so that no request path can
+    load a second ~20 GB BF16 pipeline beside it. The trace needs in-process
+    modules and cannot be served by the native backend, so honour that policy
+    here instead of bypassing it. Standalone deployments have no native
+    fallback URL and keep the usual lazy-load contract.
+    """
+    if zimage_pipeline is not None or model_manager.is_loaded("zimage"):
+        return None
+    if ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED or not ZIMAGE_NATIVE_FALLBACK_URL:
+        return None
+    return (
+        "step trace requires the local zimage pipeline, but this deployment "
+        "serves zimage through the native fallback and has disabled local cold "
+        "loads (ZIMAGE_LOCAL_COLD_FALLBACK_ENABLED=0)"
+    )
+
+
 def _step_trace_sync(req: StepTraceRequest):
+    """Run one trace with the local pipeline loaded and pinned.
+
+    The trace needs in-process module access (latents, noise predictions, VAE),
+    so unlike generation it cannot be served by the native fallback. Load
+    through the model manager instead of reading the global directly: when a
+    standalone deployment has let the pipeline go idle, the old direct
+    ``zimage_pipeline is None`` check answered a valid request with 503 even
+    though the loader was available.
+    """
     if nsfw_classifier is not None:
         _unload_nsfw_classifier()
+    cold_detail = _step_trace_cold_load_detail()
+    if cold_detail:
+        raise HTTPException(
+            503, cold_detail, headers={"Retry-After": "60"}
+        )
+    return _with_zimage_model_retry("step_trace", lambda: _step_trace_run(req))
+
+
+def _step_trace_run(req: StepTraceRequest):
     if zimage_pipeline is None:
-        raise HTTPException(503, "zimage not loaded")
+        raise HTTPException(503, "zimage model failed to load")
     pipe, _ = zimage_pipeline
     if hasattr(pipe, 'to') and not hasattr(pipe, '_offload_gpu_id'):
         try:
@@ -4198,20 +4497,25 @@ def _step_trace_sync(req: StepTraceRequest):
     sigmas = [float(s) for s in pipe.scheduler.sigmas]
     final_img = result.images[0]
 
-    trace_id = f"{int(time.time() * 1000)}_s{req.seed}"
+    trace_id = f"{int(time.time() * 1000)}_s{req.seed}_{uuid.uuid4().hex[:8]}"
     out_dir = os.path.join(STEP_TRACE_DIR, trace_id)
     os.makedirs(out_dir, exist_ok=True)
     final_path = os.path.join(out_dir, "final.webp")
     final_img.save(final_path, quality=95)
 
-    from cutezimage.image_metrics import compare_images, pil_to_tensor
-    final_t = pil_to_tensor(final_img)
+    if req.decode_x0:
+        try:
+            from cutezimage.image_metrics import compare_images, pil_to_tensor
+        except ImportError as exc:
+            raise HTTPException(503, "image metrics module unavailable") from exc
+        final_t = pil_to_tensor(final_img)
 
     steps_data = []
     n = len(zs)
     for k in range(n):
         s_next = sigmas[k + 1] if k + 1 < len(sigmas) else 0.0
-        row: dict = {"step": k, "sigma": sigmas[k], "sigma_next": s_next}
+        sigma = sigmas[k] if k < len(sigmas) else 0.0
+        row: dict = {"step": k, "sigma": sigma, "sigma_next": s_next}
         if k > 0:
             dz = zs[k] - zs[k - 1]
             zn = zs[k].norm().item()
@@ -4267,11 +4571,34 @@ def _step_trace_sync(req: StepTraceRequest):
 
 
 @app.post("/experimental/step_trace")
-async def step_trace(req: StepTraceRequest):
+async def step_trace(request: Request, req: StepTraceRequest):
     if not LOAD_ZIMAGE:
         raise HTTPException(503, "zimage disabled")
-    async with gpu_slot(req.low_priority):
-        return await asyncio.get_event_loop().run_in_executor(None, _step_trace_sync, req)
+    if req.sigmas is not None and len(req.sigmas) != req.num_inference_steps:
+        raise HTTPException(
+            400, "sigmas length must equal num_inference_steps"
+        )
+    _remember_request_prompt(request, req.prompt)
+    _remember_request_inference_params(
+        request,
+        model="zimage-turbo",
+        width=req.width,
+        height=req.height,
+        num_inference_steps=req.num_inference_steps,
+        auto_lora=False,
+        teleport=False,
+        perf=False,
+        low_priority=req.low_priority,
+        decode_x0=req.decode_x0,
+        save_tensors=req.save_tensors,
+    )
+    # Reserve before queueing so /admin/hold cannot land between admission and
+    # the model pin, and so an idle-unload cannot drop the pipeline mid-trace.
+    with model_manager.reserve("zimage"):
+        async with gpu_slot(req.low_priority):
+            return await asyncio.get_running_loop().run_in_executor(
+                None, _step_trace_sync, req
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -4600,6 +4927,78 @@ def _tg_backend_headers(*, caption: bool = False) -> dict[str, str]:
     return {"secret": key} if key else {}
 
 
+# The gateway in front of the text backend answers 503 while its admission
+# queue is saturated (shared GPU lanes) even when the requested worker is
+# healthy. A single attempt turned that transient backpressure into a caller
+# visible 502, so retry the idempotent proxy routes once with a short backoff.
+TG_BACKEND_MAX_ATTEMPTS = max(1, int(os.getenv("TG_BACKEND_MAX_ATTEMPTS", "2")))
+TG_BACKEND_RETRY_BASE_SECONDS = max(
+    0.0, float(os.getenv("TG_BACKEND_RETRY_BASE_SECONDS", "0.5"))
+)
+TG_BACKEND_RETRY_MAX_SECONDS = max(
+    TG_BACKEND_RETRY_BASE_SECONDS,
+    float(os.getenv("TG_BACKEND_RETRY_MAX_SECONDS", "5")),
+)
+TG_BACKEND_TRANSIENT_STATUSES = frozenset({502, 503, 504})
+
+
+def _tg_retry_delay(response: httpx.Response | None, attempt: int) -> float:
+    headers = getattr(response, "headers", None) or {}
+    retry_after = str(headers.get("Retry-After") or "").strip()
+    if retry_after.isdigit():
+        return min(float(retry_after), TG_BACKEND_RETRY_MAX_SECONDS)
+    return min(
+        TG_BACKEND_RETRY_BASE_SECONDS * (2**attempt),
+        TG_BACKEND_RETRY_MAX_SECONDS,
+    )
+
+
+async def _tg_backend_post(
+    path: str,
+    *,
+    attempts: int | None = None,
+    **kwargs,
+) -> httpx.Response:
+    """POST to the text backend, retrying transient upstream pressure.
+
+    Retries stay bounded and never retry caller errors (4xx) or unknown 5xx,
+    so malformed audio/text cannot be replayed and an upstream bug is not
+    amplified. Transport failures are retried here and still surface as 502
+    once the attempts are exhausted.
+    """
+    total = TG_BACKEND_MAX_ATTEMPTS if attempts is None else max(1, int(attempts))
+    last_exc: Exception | None = None
+    for attempt in range(total):
+        try:
+            response = await tg_client.post(path, **kwargs)
+        except httpx.TransportError as exc:
+            last_exc = exc
+            if attempt + 1 >= total:
+                raise
+            delay = min(
+                TG_BACKEND_RETRY_BASE_SECONDS * (2**attempt),
+                TG_BACKEND_RETRY_MAX_SECONDS,
+            )
+            logger.warning(
+                "%s transport failure (%s); retrying in %.1fs",
+                path, type(exc).__name__, delay,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+            continue
+        if response.status_code in TG_BACKEND_TRANSIENT_STATUSES and attempt + 1 < total:
+            delay = _tg_retry_delay(response, attempt)
+            logger.warning(
+                "%s returned HTTP %d; retrying in %.1fs",
+                path, response.status_code, delay,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+            continue
+        return response
+    raise last_exc if last_exc is not None else RuntimeError("backend retry exhausted")
+
+
 def _tg_backend_error(service: str, exc: httpx.HTTPError) -> HTTPException:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
@@ -4609,6 +5008,21 @@ def _tg_backend_error(service: str, exc: httpx.HTTPError) -> HTTPException:
         if 400 <= status < 500:
             logger.info("%s backend rejected request (status=%d)", service, status)
             return HTTPException(status, f"{service} request rejected by backend")
+        if status in TG_BACKEND_TRANSIENT_STATUSES:
+            # The upstream is telling us to retry. Preserve that contract
+            # instead of reporting a gateway fault: callers and the browser
+            # retry on 503, but treat 502 as a hard proxy failure.
+            logger.error("%s backend temporarily unavailable (status=%d)", service, status)
+            retry_after = str(
+                (getattr(exc.response, "headers", None) or {}).get("Retry-After") or ""
+            ).strip()
+            if not retry_after.isdigit():
+                retry_after = "5"
+            return HTTPException(
+                503,
+                f"{service} backend temporarily unavailable",
+                headers={"Retry-After": str(min(int(retry_after), 30))},
+            )
     logger.error("%s backend request failed: %s", service, exc)
     return HTTPException(502, f"{service} backend request failed")
 
@@ -4616,7 +5030,7 @@ def _tg_backend_error(service: str, exc: httpx.HTTPError) -> HTTPException:
 @app.post("/synthesize")
 async def synthesize(req: TTSRequest):
     try:
-        resp = await tg_client.post(
+        resp = await _tg_backend_post(
             "/api/v1/generate_speech",
             json={"text": req.text, "voice": req.voice, "speed": req.speed},
             headers=_tg_backend_headers(),
@@ -4644,7 +5058,7 @@ class STTRequest(BaseModel):
 @app.post("/transcribe")
 async def transcribe(req: STTRequest):
     try:
-        resp = await tg_client.post(
+        resp = await _tg_backend_post(
             "/api/v1/audio-extraction",
             json={
                 "audio_url": req.audio_url,
@@ -4663,7 +5077,7 @@ async def transcribe(req: STTRequest):
 async def transcribe_file(audio_file: UploadFile = File(...)):
     try:
         content = await audio_file.read()
-        resp = await tg_client.post(
+        resp = await _tg_backend_post(
             "/api/v1/audio-file-extraction",
             files={"audio_file": (audio_file.filename, content, audio_file.content_type or "audio/wav")},
             headers=_tg_backend_headers(),
@@ -4691,13 +5105,41 @@ def _caption_backend_error(exc: httpx.HTTPError) -> HTTPException:
     return _tg_backend_error("Caption", exc)
 
 
+CAPTION_UPLOAD_MAX_BYTES = int(
+    os.getenv("CAPTION_UPLOAD_MAX_BYTES", str(REMOTE_IMAGE_MAX_BYTES))
+)
+CAPTION_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_upload_bounded(
+    upload: UploadFile, limit: int, field_name: str
+) -> bytes:
+    """Read an upload without materialising unbounded caller input.
+
+    Starlette spools past its in-memory threshold, so a caller can still push
+    arbitrary bytes here; stop at the documented limit instead of after the
+    whole body is already resident.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(CAPTION_UPLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(413, f"{field_name} is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/caption")
 async def caption_image(req: CaptionRequest):
     await asyncio.get_event_loop().run_in_executor(
         None, _validate_remote_image_url, req.image_url, "image_url"
     )
     try:
-        resp = await tg_client.post(
+        resp = await _tg_backend_post(
             "/api/v1/image-caption",
             data={"image_url": req.image_url, "fast_mode": "true"},
             headers=_caption_backend_headers(),
@@ -4710,9 +5152,16 @@ async def caption_image(req: CaptionRequest):
 
 @app.post("/caption_file")
 async def caption_file(image_file: UploadFile = File(...)):
+    content = await _read_upload_bounded(
+        image_file, CAPTION_UPLOAD_MAX_BYTES, "image_file"
+    )
+    # The caption backend cannot tell a corrupt upload from an outage: its
+    # control plane raises on undecodable bytes, which surfaces as a 5xx that
+    # the proxy retries and reports as "temporarily unavailable". Decode here
+    # so a caller mistake stays a 4xx and never looks like a backend fault.
+    _load_image_bytes(content, "image_file")
     try:
-        content = await image_file.read()
-        resp = await tg_client.post(
+        resp = await _tg_backend_post(
             "/api/v1/image-caption",
             files={"image_file": (image_file.filename, content, image_file.content_type or "image/jpeg")},
             data={"fast_mode": "true"},
@@ -4738,7 +5187,7 @@ class Gemma4Request(BaseModel):
 @app.post("/chat")
 async def gemma4_chat(req: Gemma4Request):
     try:
-        resp = await tg_client.post(
+        resp = await _tg_backend_post(
             "/v1/chat/completions",
             json={
                 "messages": req.messages,

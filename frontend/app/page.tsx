@@ -16,6 +16,7 @@ import { parseJSONResponse as parseHTTPJSONResponse, HTTPResponseError } from '@
 import { uploadToBucket } from '@/lib/uploads';
 import { STATIC_BASE_URL } from '@/lib/static-assets';
 import { SiteFooter } from './site-footer';
+import { ChatPanel } from './chat-panel';
 import { analyticsIds, identify, track, trackAuthCompleted, trackAuthStarted } from '@/lib/analytics';
 
 const API_BASE = '/api';
@@ -29,6 +30,17 @@ const NAV_LINKS: { href: string; label: string; hover: string }[] = [
   { href: '/docs', label: 'API', hover: 'hover:text-blue-500' },
   { href: '#credits', label: 'Pricing', hover: 'hover:text-purple-500' },
 ];
+
+// ra2 art generator is the default image service; Z-Image Turbo stays selectable.
+type ImageService = string;
+
+const IMAGE_SERVICES: { slug: ImageService; label: string; hint: string }[] = [
+  { slug: 'ra2', label: 'ra2 art generator', hint: 'default' },
+  { slug: 'zimage', label: 'Z-Image Turbo', hint: 'fastest' },
+];
+
+// ra2's engine wants 20 steps; Z-Image Turbo's sweet spot is 8.
+const IMAGE_STEPS: Record<ImageService, number> = { ra2: 20, zimage: 8 };
 
 interface StripeEmbeddedCheckout {
   mount: (target: string | HTMLElement) => void;
@@ -147,12 +159,25 @@ export default function Home() {
   const [connectingWallet, setConnectingWallet] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [demoPrompt, setDemoPrompt] = useState('a cute fairy in an enchanted forest, digital art, pastel colors');
+  const [demoService, setDemoService] = useState<ImageService>('ra2');
   const [demoResult, setDemoResult] = useState<string | null>(null);
   const [demoLoading, setDemoLoading] = useState(false);
   const [creatorMode, setCreatorMode] = useState<'image' | 'video'>('image');
+  const [creatorImageService, setCreatorImageService] = useState<ImageService>('ra2');
   const [creatorPrompt, setCreatorPrompt] = useState('A bioluminescent fox moving through a moonlit flower garden');
   const [creatorAspect, setCreatorAspect] = useState('16:9');
   const [creatorModel, setCreatorModel] = useState('auto-video');
+  const [videoModels, setVideoModels] = useState<{ id: string; label: string; mode: string; price_usd: number }[]>([
+    { id: 'auto-video', label: 'Auto best match', mode: 'both', price_usd: 0.15 },
+  ]);
+  useEffect(() => {
+    fetch(`${API_BASE}/video/models`).then((r) => r.json()).then((d) => d?.models?.length && setVideoModels(d.models)).catch(() => {});
+  }, []);
+  const [imageModels, setImageModels] = useState<{ id: string; label: string; price_usd: number }[]>([]);
+  const [creatorVideoURL, setCreatorVideoURL] = useState('');
+  useEffect(() => {
+    fetch(`${API_BASE}/image/models`).then((r) => r.json()).then((d) => d?.models && setImageModels(d.models)).catch(() => {});
+  }, []);
   const [creatorReference, setCreatorReference] = useState<File | null>(null);
   const [creatorReferencePreview, setCreatorReferencePreview] = useState('');
   const [creatorLoading, setCreatorLoading] = useState(false);
@@ -469,7 +494,13 @@ export default function Home() {
       const res = await fetch(`${API_BASE}/service`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ prompt: demoPrompt, width: 512, height: 512, num_steps: 8 }),
+        body: JSON.stringify({
+          service: demoService,
+          prompt: demoPrompt,
+          width: 512,
+          height: 512,
+          num_steps: IMAGE_STEPS[demoService],
+        }),
       });
       if (res.status === 401) {
         handleExpiredSession();
@@ -517,8 +548,8 @@ export default function Home() {
       openConversionFlow('create_gated');
       return;
     }
-    if (creatorMode === 'video' && !creatorReference && creatorModel === 'ltx-2.3-image-to-video') {
-      setCreatorStatus('Add a still image for the LTX 2.3 image-to-video model.');
+    if (creatorMode === 'video' && !creatorReference && videoModels.find((m) => m.id === creatorModel)?.mode === 'i2v') {
+      setCreatorStatus('Add a still image for this image-to-video model.');
       return;
     }
 
@@ -538,12 +569,15 @@ export default function Home() {
         imageURL = await uploadCreatorReference(creatorReference);
       }
       const payload = creatorMode === 'image'
-        ? { service: 'zimage', prompt: creatorPrompt.trim(), width, height, num_steps: 8 }
+        ? (creatorImageService.startsWith('op:')
+          ? { service: 'image_generate', model: creatorImageService.slice(3), prompt: creatorPrompt.trim(), width, height }
+          : { service: creatorImageService, prompt: creatorPrompt.trim(), width, height, num_steps: IMAGE_STEPS[creatorImageService] })
         : {
             service: 'video_generate',
             model: creatorModel,
             prompt: creatorPrompt.trim(),
             image_url: imageURL || undefined,
+            video_url: creatorVideoURL.trim() || undefined,
             aspect_ratio: creatorAspect,
             duration: 5,
             output_format: 'webm',
@@ -990,6 +1024,7 @@ export default function Home() {
   // USD fallbacks mirror server/services.go servicePricesUSD so cards show a
   // price before /pricing resolves (and if the backend is unreachable).
   const SERVICE_USD_FALLBACK: Record<string, number> = {
+    ra2: 0.04, 'ra2-edit': 0.04,
     zimage: 0.04, chronos2: 0.002, tts: 0.005, stt: 0.02,
     gemma4: 0.01, caption: 0.01, ltx_video: 0.30, h3_video: 2.688, flux_image: 0.04,
   };
@@ -1367,10 +1402,24 @@ export default function Home() {
                       <ChevronDown className="pointer-events-none absolute bottom-3 right-3 text-slate-400" size={16} />
                     </label>
                   ) : (
-                    <div>
+                    <label className="relative">
                       <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Model</span>
-                      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-slate-800">Z-Image Turbo</div>
-                    </div>
+                      <select value={creatorImageService} onChange={(event) => setCreatorImageService(event.target.value as ImageService)} className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 pr-9 text-sm font-bold text-slate-800 outline-none focus:border-pink-400">
+                        {IMAGE_SERVICES.map((option) => (
+                          <option key={option.slug} value={option.slug}>{option.label}{option.slug === 'ra2' ? ' · default' : ''}</option>
+                        ))}
+                        {imageModels.map((m) => (
+                          <option key={m.id} value={`op:${m.id}`}>{m.label} · ${m.price_usd.toFixed(2)}</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute bottom-3 right-3 text-slate-400" size={16} />
+                    </label>
+                  )}
+                  {creatorMode === 'video' && videoModels.find((m) => m.id === creatorModel)?.mode === 'v2v' && (
+                    <label className="col-span-2">
+                      <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Source video URL</span>
+                      <input value={creatorVideoURL} onChange={(event) => setCreatorVideoURL(event.target.value)} placeholder="https://..." className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-bold text-slate-800 outline-none focus:border-pink-400" />
+                    </label>
                   )}
                   <label>
                     <span className="mb-1.5 block text-[11px] font-extrabold uppercase tracking-wider text-slate-500">Aspect ratio</span>
@@ -1390,7 +1439,7 @@ export default function Home() {
                 </div>
 
                 <div className="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 text-xs font-bold text-slate-500 sm:flex-row sm:items-center sm:justify-between">
-                  <span>{creatorMode === 'image' ? '$0.04 / image' : creatorModel === 'ltx-video' ? '$0.08 / video' : creatorModel === 'ltx-2' ? '$0.12 / video' : creatorModel === 'ltx-2.3-image-to-video' ? '$1.85 / video' : '$0.15 / video'}</span>
+                  <span>{creatorMode === 'image' ? `${formatUsd(creatorImageService.startsWith('op:') ? (imageModels.find((m) => `op:${m.id}` === creatorImageService)?.price_usd ?? 0.04) : getServiceUsd(creatorImageService))} / image` : `$${(videoModels.find((m) => m.id === creatorModel)?.price_usd ?? 0.15).toFixed(2)} / video`}</span>
                   <span className="inline-flex items-center gap-1.5"><LockKeyhole size={14} className="text-emerald-600" /> Pay as you go · <Link href="/docs" className="text-blue-600 hover:text-blue-700">same models via API</Link></span>
                 </div>
                 {creatorStatus && <div className="mt-3 rounded-xl bg-slate-50 px-4 py-3 text-sm font-bold text-slate-600" role="status">{creatorStatus}</div>}
@@ -1405,6 +1454,7 @@ export default function Home() {
                 )}
               </div>
             </section>
+            <ChatPanel apiKey={apiKey} onNeedAccount={() => openConversionFlow('create_gated')} />
           </div>
 
           <div className="relative mx-auto w-full max-w-2xl xl:pt-16">
@@ -1499,6 +1549,29 @@ export default function Home() {
           </div>
 
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+            <Link href="/docs/ra2">
+            <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+              <div className="bg-fuchsia-100 w-14 h-14 rounded-2xl flex items-center justify-center text-fuchsia-500 mb-4 shadow-inner">
+                <Sparkles size={28} />
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                <h3 className="font-fredoka text-2xl font-bold text-slate-800 group-hover:text-fuchsia-600 transition-colors">ra2 art generator</h3>
+                <span className="bg-fuchsia-100 text-fuchsia-700 text-xs font-bold px-2 py-0.5 rounded-full">default</span>
+              </div>
+              <p className="text-slate-600 mb-4 text-sm">
+                Cinematic and illustration-specialised text-to-image. Higher quality than Z-Image Turbo, roughly 2&times; slower per image.
+              </p>
+              <div className="mt-auto">
+                <div className="flex items-center gap-2 text-fuchsia-500 font-bold text-sm">
+                  <Zap size={16} /> {formatUsd(getServiceUsd('ra2'))} <span className="text-slate-400 font-medium">/ gen</span>
+                </div>
+                {getServicePrice('ra2') > 0 && (
+                  <div className="text-xs text-slate-400 mt-1">&asymp; {formatCute(getServicePrice('ra2'))} $CUTEDSL</div>
+                )}
+              </div>
+            </div>
+            </Link>
+
             <Link href="/docs/zimage">
             <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-pink-100 w-14 h-14 rounded-2xl flex items-center justify-center text-pink-500 mb-4 shadow-inner">
@@ -1688,7 +1761,20 @@ export default function Home() {
           <div className="max-w-4xl mx-auto px-6">
             <div className="bg-white/90 rounded-3xl p-8 border border-pink-200 shadow-lg">
               <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>
-              <p className="text-slate-500 mb-6 text-sm">Generate an image with your key &mdash; the same call your app would make. <Link href="/docs/zimage" className="text-blue-600 font-bold hover:text-blue-700">See the docs</Link>.</p>
+              <p className="text-slate-500 mb-6 text-sm">Generate an image with your key &mdash; the same call your app would make. <Link href={`/docs/${demoService}`} className="text-blue-600 font-bold hover:text-blue-700">See the docs</Link>.</p>
+              <div className="mb-4 flex gap-1 rounded-xl border border-pink-100 bg-white p-1">
+                {IMAGE_SERVICES.map((option) => (
+                  <button
+                    key={option.slug}
+                    type="button"
+                    onClick={() => { setDemoService(option.slug); setDemoResult(null); }}
+                    className={`flex-1 rounded-lg px-4 py-2 text-sm font-bold transition ${demoService === option.slug ? 'bg-gradient-to-r from-pink-400 to-purple-400 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                  >
+                    {option.label}
+                    <span className={`block text-[10px] font-medium ${demoService === option.slug ? 'text-white/80' : 'text-slate-400'}`}>{option.hint}</span>
+                  </button>
+                ))}
+              </div>
               <div className="flex gap-3 mb-4">
                 <input
                   type="text"
@@ -1709,7 +1795,7 @@ export default function Home() {
               <CodeBlock language="bash" className="text-xs bg-slate-950 p-3 rounded-lg mb-4 shadow-none" code={`curl -X POST ${clientOrigin}/api/service \\
   -H "Authorization: Bearer ${apiKey}" \\
   -H "Content-Type: application/json" \\
-  -d '{"prompt":"${demoPrompt}","width":512,"height":512}'`} />
+  -d '{"service":"${demoService}","prompt":"${demoPrompt}","width":512,"height":512,"num_steps":${IMAGE_STEPS[demoService]}}'`} />
               {demoResult && (
                 <div className="mt-4">
                   <img src={demoResult} alt="Generated" className="rounded-2xl shadow-lg max-w-full mx-auto" style={{maxHeight: 512}} />
@@ -2240,12 +2326,13 @@ export default function Home() {
             <CodeBlock language="bash" className="text-xs p-4 rounded-lg shadow-none" code={`curl -X POST https://cutedsl.cc/api/service \\
   -H "Authorization: Bearer ${apiKey || 'YOUR_API_KEY'}" \\
   -H "Content-Type: application/json" \\
-  -d '{"service": "zimage", "prompt": "a cute fairy in a forest", "width": 1024}'`} />
+  -d '{"service": "ra2", "prompt": "a cute fairy in a forest", "width": 1024}'`} />
           </div>
 
           {/* Preview cards */}
           <div className="grid md:grid-cols-3 gap-4 mb-10">
             {[
+              { name: 'ra2 art generator', slug: 'ra2', icon: <Sparkles size={18} className="text-fuchsia-500" />, desc: 'Default text-to-image' },
               { name: 'Z-Image', slug: 'zimage', icon: <ImageIcon size={18} className="text-pink-500" />, desc: 'Text-to-image generation' },
               { name: 'Chronos-2', slug: 'chronos2', icon: <LineChart size={18} className="text-cyan-500" />, desc: 'Time series forecasting' },
               { name: 'Kokoro TTS', slug: 'tts', icon: <Volume2 size={18} className="text-purple-500" />, desc: 'Text-to-speech synthesis' },
@@ -2278,7 +2365,7 @@ export default function Home() {
           <Coins size={64} className="text-yellow-400 mx-auto mb-8" />
           <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTEDSL</h2>
           <p className="text-xl text-slate-200 mb-10 font-medium">
-            Pay for AI inference with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span> on Solana. First-party models (zimage, chronos2, TTS) are priced at the token&apos;s all-time high &mdash; so early holders get cheaper inference forever. The more $CUTEDSL grows, the better your rate locks in.
+            Pay for AI inference with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span> on Solana. First-party models (ra2, zimage, chronos2, TTS) are priced at the token&apos;s all-time high &mdash; so early holders get cheaper inference forever. The more $CUTEDSL grows, the better your rate locks in.
           </p>
           
           <div className="bg-white/10 border border-white/20 rounded-3xl p-8 mb-10">

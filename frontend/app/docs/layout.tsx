@@ -2,14 +2,14 @@ import type { Metadata } from 'next';
 import { staticAssetPath } from '@/lib/static-assets';
 
 export const metadata: Metadata = {
-  title: 'API Documentation — CuteDSL',
+  title: 'Text-to-Image and Video API Docs — ra2, Z-Image, Flux',
   description:
-    'Complete API reference for CuteDSL inference services. Text-to-image, time series forecasting, TTS, STT, chat, video generation, and more.',
+    'Complete API reference for CuteDSL inference services. ra2 art generator (default) and Z-Image Turbo text-to-image, video generation, time series forecasting, TTS, STT, and chat.',
   alternates: { canonical: 'https://cutedsl.cc/docs' },
   openGraph: {
-    title: 'CuteDSL API Documentation',
+    title: 'CuteDSL API — Text-to-Image, Video, TTS, Forecasting',
     description:
-      'Complete API reference for CuteDSL inference services with interactive playgrounds.',
+      'ra2 art generator, Z-Image Turbo, Flux Schnell, video, Kokoro TTS, Chronos-2, and LTX endpoints with interactive playgrounds.',
     url: 'https://cutedsl.cc/docs',
     images: [
       {
@@ -22,9 +22,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'CuteDSL API Documentation',
+    title: 'CuteDSL API — Text-to-Image, Video, TTS, Forecasting',
     description:
-      'Complete API reference for CuteDSL inference services with interactive playgrounds.',
+      'ra2 art generator, Z-Image Turbo, Flux Schnell, video, Kokoro TTS, Chronos-2, and LTX endpoints.',
     images: [staticAssetPath('/images/og-image.webp')],
   },
 };

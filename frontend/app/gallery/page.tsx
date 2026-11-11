@@ -298,7 +298,8 @@ export default function GalleryPage() {
           <p className="text-base sm:text-lg text-slate-600 max-w-3xl mx-auto font-medium">
             {imageCount > 0 ? imageCount.toLocaleString() : '100,000+'} AI-generated images —
             fairies, fantasy, anime, landscapes &amp; more.
-            Powered by <span className="text-pink-500 font-semibold">CuteDSL Z-Image Turbo</span>.
+            Generated with <span className="text-pink-500 font-semibold">CuteDSL Z-Image Turbo</span> &mdash; make your own with the default
+            {' '}<span className="text-pink-500 font-semibold">ra2 art generator</span>.
           </p>
           <div className="mt-3 flex flex-wrap justify-center gap-2">
             <Link
@@ -438,7 +439,9 @@ export default function GalleryPage() {
           </p>
           <p className="text-slate-600 leading-relaxed">
             Want to generate your own? <Link href="/#api" className="text-pink-500 hover:text-pink-600 font-semibold">Grab an API key</Link>,
-            deposit some $CUTEDSL, and call <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">POST /api/service</code> with <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">service: &quot;zimage&quot;</code>.
+            deposit some $CUTEDSL, and call <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">POST /api/service</code> with <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">service: &quot;ra2&quot;</code> for
+            the default ra2 art generator, or <code className="bg-pink-50 px-1.5 py-0.5 rounded text-pink-600">service: &quot;zimage&quot;</code> for the faster
+            Z-Image Turbo engine.
           </p>
         </section>
       </main>

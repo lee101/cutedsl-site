@@ -31,6 +31,71 @@ export interface ModelConfig {
 
 export const MODELS: ModelConfig[] = [
   {
+    slug: 'ra2',
+    name: 'ra2 art generator',
+    description: 'ra2 art generator — cinematic and illustration-specialised text-to-image at 1024x1024. Higher quality than Z-Image Turbo, roughly 2x slower per image. The default image service.',
+    category: 'image',
+    responseType: 'image',
+    pricingNote: '$0.04 per generation (mirrors the Z-Image rate)',
+    pricingTier: 'first-party',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'Text description of the image to generate', placeholder: 'cinematic portrait of a fox knight, volumetric light, 35mm film' },
+      { name: 'negative_prompt', type: 'string', required: false, description: 'Concepts to avoid in the image', placeholder: 'blurry, watermark, low detail' },
+      { name: 'width', type: 'int', required: false, default: 1024, description: 'Image width in pixels (rounded to a multiple of 32)' },
+      { name: 'height', type: 'int', required: false, default: 1024, description: 'Image height in pixels (rounded to a multiple of 32)' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Number of denoising steps (more = higher quality, slower)' },
+      { name: 'guidance', type: 'float', required: false, default: 1.0, description: 'Guidance scale — how closely to follow the prompt' },
+      { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/service \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "service": "ra2",
+    "prompt": "cinematic portrait of a fox knight, volumetric light, 35mm film",
+    "width": 1024,
+    "height": 1024,
+    "num_steps": 20,
+    "guidance": 1.0
+  }'`,
+    responseExample: {
+      result: { image_base64: '<base64-encoded WebP image>', width: 1024, height: 1024, format: 'webp', engine: 'ra2', seed: 12345, inference_time_ms: 2100, model: 'ra2' },
+      credits_used: 1000,
+      credits_remain: 49000,
+      usd_equivalent: 0.04,
+    },
+  },
+  {
+    slug: 'ra2-edit',
+    name: 'ra2 art generator (edit)',
+    description: 'ra2 art generator style transfer and edit. Send a source image plus a prompt to restyle or refine it. Same engine and price as ra2.',
+    category: 'image',
+    responseType: 'image',
+    pricingNote: '$0.04 per edit (same engine and price as ra2)',
+    pricingTier: 'first-party',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'How to restyle or refine the source image', placeholder: 'turn this into a watercolor illustration, soft pastel palette' },
+      { name: 'image_base64', type: 'string', required: true, description: 'Source image as raw base64 (no data: prefix)', placeholder: 'iVBORw0KGgoAAAANSUhEUg...' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Number of denoising steps (more = higher quality, slower)' },
+      { name: 'guidance', type: 'float', required: false, default: 1.0, description: 'Guidance scale — how closely to follow the prompt' },
+      { name: 'seed', type: 'int', required: false, description: 'Random seed for reproducible results (0 = random)' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/service \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "service": "ra2-edit",
+    "prompt": "turn this into a watercolor illustration, soft pastel palette",
+    "image_base64": "iVBORw0KGgoAAAANSUhEUg..."
+  }'`,
+    responseExample: {
+      result: { image_base64: '<base64-encoded WebP image>', width: 1024, height: 1024, format: 'webp', engine: 'ra2' },
+      credits_used: 1000,
+      credits_remain: 49000,
+      usd_equivalent: 0.04,
+    },
+  },
+  {
     slug: 'zimage',
     name: 'Z-Image Turbo',
     description: 'Text-to-image generation powered by CuteZImage with fused Triton kernels. Generates high-quality 1024x1024 images in seconds.',

@@ -26,12 +26,16 @@ const staticOrigin = STATIC_BASE_URL.startsWith('http') ? new URL(STATIC_BASE_UR
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: 'CuteDSL — AI Image & Video Studio',
+    default: 'AI Image Generator API — ra2, Z-Image Turbo, Video, TTS | CuteDSL',
     template: '%s | CuteDSL',
   },
   description:
-    'Create AI images, animate stills into video, and use the same fast models through one developer API. Pay as you go securely by card with Stripe.',
+    'Create AI images with ra2 art generator and Z-Image Turbo, turn stills into video, and ship them through one fast developer API. Pay as you go by card.',
   keywords: [
+    'AI image generator',
+    'text to image API',
+    'ra2 art generator',
+    'AI art generator',
     'AI inference',
     'model acceleration',
     'Triton kernels',
@@ -62,23 +66,23 @@ export const metadata: Metadata = {
     locale: 'en_US',
     url: siteUrl,
     siteName: 'CuteDSL',
-    title: 'CuteDSL — AI Image & Video Studio',
+    title: 'AI Image Generator API — ra2, Z-Image Turbo, Video, TTS',
     description:
-      'Create beautiful AI images, animate any still into video, and ship both through one fast developer API.',
+      'Create AI images with ra2 art generator and Z-Image Turbo, animate any still into video, and ship both through one fast developer API.',
     images: [
       {
         url: staticAssetPath('/images/og-image.webp'),
         width: 1360,
         height: 768,
-        alt: 'CuteDSL — AI Model Acceleration',
+        alt: 'CuteDSL AI image generator — ra2 and Z-Image Turbo',
       },
     ],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'CuteDSL — AI Image & Video Studio',
+    title: 'AI Image Generator API — ra2, Z-Image Turbo, Video',
     description:
-      'Create AI images, turn stills into video, and pay as you go securely by card.',
+      'Create AI images with ra2 art generator and Z-Image Turbo, turn stills into video, and pay as you go securely by card.',
     images: [staticAssetPath('/images/og-image.webp')],
   },
   alternates: {
@@ -103,7 +107,7 @@ const jsonLd = {
   name: 'CuteDSL',
   applicationCategory: 'DeveloperApplication',
   description:
-    'AI image and video creation studio with an API, accelerated inference, and pay-as-you-go card billing.',
+    'AI image and video creation studio with an API: ra2 art generator (default) and Z-Image Turbo text-to-image, accelerated inference, and pay-as-you-go card billing.',
   url: siteUrl,
   codeRepository: 'https://github.com/lee101/cutedsl',
   creator: {

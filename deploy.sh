@@ -161,6 +161,26 @@ else
     echo "  ⚠ Skipping local install ($DEPLOY_ROOT not found)"
 fi
 
+# Frontend error telemetry is appended by the de-privileged service user, and
+# /nvme0n1-disk/tmp is not writable by that account, so the JSONL sink lives in
+# a service-owned directory behind the stable path the monitors already read.
+TELEMETRY_DIR="/nvme0n1-disk/tmp/cutedsl-logs"
+TELEMETRY_LOG="$TELEMETRY_DIR/frontend-errors.jsonl"
+TELEMETRY_LINK="/nvme0n1-disk/tmp/cutedsl-frontend-errors.jsonl"
+if sudo -n true 2>/dev/null; then
+    sudo -n install -d -o svc-cutedsl -g svc-cutedsl -m 755 "$TELEMETRY_DIR"
+    sudo -n touch "$TELEMETRY_LOG"
+    sudo -n chown svc-cutedsl:svc-cutedsl "$TELEMETRY_LOG"
+    sudo -n chmod 644 "$TELEMETRY_LOG"
+    if [ -f "$TELEMETRY_LINK" ] && [ ! -L "$TELEMETRY_LINK" ]; then
+        sudo -n sh -c "cat '$TELEMETRY_LINK' >> '$TELEMETRY_LOG' && rm -f '$TELEMETRY_LINK'"
+    fi
+    sudo -n ln -sfn "$TELEMETRY_LOG" "$TELEMETRY_LINK"
+    echo "  ✓ Frontend error telemetry sink ready"
+else
+    echo "  ⚠ Skipping telemetry sink bootstrap (no non-interactive sudo)"
+fi
+
 # Step 4: Cache invalidation
 echo ""
 echo "[4/4] Clearing Cloudflare caches..."

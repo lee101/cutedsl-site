@@ -22,6 +22,11 @@ Environment=DIST_DIR=/opt/cutedsl-site/frontend/out
 # ProtectSystem=strict leaves /tmp read-only; AV1 video optimization needs a
 # writable scratch dir, so point Go's os.TempDir() at a ReadWritePath.
 Environment=TMPDIR=/nvme0n1-disk/tmp
+# Frontend error telemetry must be persisted by the service user. When the
+# unit runs as the de-privileged svc-cutedsl account, /nvme0n1-disk/tmp itself
+# is not writable, so the sink lives in a service-owned directory behind the
+# stable /nvme0n1-disk/tmp/cutedsl-frontend-errors.jsonl symlink.
+Environment=FRONTEND_ERROR_LOG_PATH=/nvme0n1-disk/tmp/cutedsl-logs/frontend-errors.jsonl
 
 # Logging
 StandardOutput=journal

@@ -1,0 +1,67 @@
+[Unit]
+Description=CuteDSL Z-Image inference (port 8100)
+After=network.target
+
+[Service]
+Type=simple
+User=administrator
+WorkingDirectory=/nvme0n1-disk/code/cutedsl-site/inference
+ExecStart=/bin/bash -c '\
+[ -f "$HOME/.secretbashrc" ] && . "$HOME/.secretbashrc"; \
+credentials_file="${CUTEDSL_INFERENCE_ENV_FILE:-/etc/netwrck-image-caption.env}"; \
+if [ -r "$credentials_file" ]; then set -a; . "$credentials_file"; set +a; fi; \
+exec env \
+    TMPDIR=/nvme0n1-disk/tmp \
+    PYTHONPATH=/nvme0n1-disk/code/cutedsl \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    IMAGE_API_SECRET=cutedsl2024 \
+    IMAGE_API_SECRETS="cutedsl2024,${NETWRCK_API_KEY:-}" \
+    LOAD_CHRONOS=0 \
+    PRELOAD_MODELS=0 \
+    ENABLE_NVFP4=0 \
+    ZIMAGE_USE_CUTE=1 \
+    ZIMAGE_CPU_OFFLOAD=auto \
+    ZIMAGE_TEXT_ENCODER_DEVICE=cuda \
+    ZIMAGE_TEXT_ENCODER_QUANT=nvfp4 \
+    ZIMAGE_NO_OFFLOAD_MIN_FREE_MB=12500 \
+    ZIMAGE_DIRECT_DEVICE_MAP=1 \
+    ZIMAGE_EARLY_EXIT=0.15 \
+    ZIMAGE_EARLY_EXIT_MIN_STEPS=5 \
+    ZIMAGE_EARLY_EXIT_CONSECUTIVE=2 \
+    ZIMAGE_SKIP_NOOP_STEPS=1 \
+    DX0_LOG=1 \
+    ZIMAGE_SKIP_WARMUP=1 \
+    ZIMAGE_DEFAULT_STEPS=9 \
+    ZIMAGE_FAST_LORA_CPU_OFFLOAD=1 \
+    CUTELORAS_FUSED=1 \
+    CUTELORAS_FUSED_BF16=0 \
+    ZIMAGE_PREWARM_LORA_IDS=pixel_art \
+    LATENT_TELEPORT_ENABLED=1 \
+    LATENT_TELEPORT_CACHE_DIR=/nvme0n1-disk/tmp/latentteleport-cache \
+    LATENT_TELEPORT_START_STEP=7 \
+    ZIMAGE_PROMPT_CACHE_SIZE=64 \
+    ZIMAGE_DYNAMIC_BATCH_ENABLED=1 \
+    BATCH_WINDOW_MS=35 \
+    ZIMAGE_DYNAMIC_BATCH_MAX_SIZE=4 \
+    ZIMAGE_DYNAMIC_BATCH_MAX_PIXELS=262144 \
+    ZIMAGE_DYNAMIC_BATCH_RESERVE_MB=512 \
+    ZIMAGE_DYNAMIC_BATCH_EXTRA_MB=1024 \
+    MAX_GPU_CONCURRENT=1 \
+    LOW_PRIORITY_IDLE_SECONDS=5.0 \
+    HF_HOME=/nvme0n1-disk/hf_cache \
+    CHRONOS_MODEL_PATH=amazon/chronos-2 \
+    MODEL_IDLE_TIMEOUT=20 \
+    CUTEZIMAGE_CPU_OFFLOAD=1 \
+    CUTEZIMAGE_SEQUENTIAL_CPU_OFFLOAD=0 \
+    CUTEZIMAGE_ENABLE_ATTENTION_SLICING=0 \
+    CUTEZIMAGE_ENABLE_VAE_SLICING=0 \
+    TG_BACKEND_URL=http://127.0.0.1:8791 \
+    TG_API_KEY="${TG_API_KEY:-}" \
+    CAPTION_BACKEND_API_KEY="${CAPTION_BACKEND_API_KEY:-${NETWRCK_IMAGE_CAPTION_SECRET:-${TG_API_KEY:-}}}" \
+    /nvme0n1-disk/code/.venv/bin/python -u server.py'
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,6 +20,8 @@ import (
 
 // Service pricing in USD (converted to $CUTE at current rate)
 var servicePricesUSD = map[string]float64{
+	"ra2":            0.04,  // per generation (default image service; mirrors zimage unless RA2_PRICE_USD)
+	"ra2-edit":       0.04,  // per edit / style transfer (always mirrors ra2)
 	"zimage":         0.04,  // per generation
 	"chronos2":       0.002, // per forecast (Chronos-2, our own ~120M model, ms-scale call)
 	"tts":            0.005, // per 100 chars
@@ -31,6 +34,8 @@ var servicePricesUSD = map[string]float64{
 	"h3_video":       2.688, // per GPU-hour reference rate; exact execution is settled asynchronously
 	"flux_image":     0.04,  // per image via fal.ai or netwrck
 	"nsfw_detect":    0.001, // per image classification
+	"image_generate": 0.04,  // OpenPaths image catalog; model overrides below
+	"chat_generate":  0.01,  // OpenPaths chat catalog; flat per request, bounded input/output; model overrides below
 }
 
 var zimageDefaultSteps = 8
@@ -39,6 +44,7 @@ var zimageHighStepPriceUSD = 0.10
 // First-party services run on our hardware — priced at ATH rate to reward early holders.
 // If you bought $CUTEDSL at $0.001 and ATH is $0.01, you pay 10x fewer tokens.
 var firstPartyServices = map[string]bool{
+	"ra2": true, "ra2-edit": true,
 	"zimage": true, "chronos2": true, "tts": true,
 	"stt": true, "gemma4": true, "caption": true, "lora_training": true,
 	"nsfw_detect": true,
@@ -49,6 +55,9 @@ var falAPIKey string
 var textGeneratorAPIKey string
 var openPathsAPIKey string
 var openPathsBaseURL string
+
+// ra2 backend bearer/API-key secret (RA2_BACKEND_SECRET)
+var ra2BackendSecret string
 
 var videoModelPricesUSD = map[string]float64{
 	"auto-video":             0.15,
@@ -77,6 +86,15 @@ func initServices() {
 	textGeneratorURL := getEnv("TG_BACKEND_URL", "http://localhost:9080")
 	nativeGatewayURL := getEnv("OMNISERVE_NATIVE_URL", textGeneratorURL)
 
+	// ra2 runs on its own omniserve-native instance (OpenAI images API).
+	ra2URL := getEnv("RA2_BACKEND_URL", "http://127.0.0.1:8792")
+	serviceBackends["ra2"] = ra2URL
+	serviceBackends["ra2-edit"] = ra2URL
+	ra2BackendSecret = getEnv("RA2_BACKEND_SECRET", "")
+	if ra2BackendSecret != "" {
+		log.Printf("ra2 backend secret configured")
+	}
+
 	serviceBackends["zimage"] = getEnv("ZIMAGE_BACKEND_URL", nativeGatewayURL)
 	serviceBackends["chronos2"] = getEnv("CHRONOS_BACKEND_URL", nativeGatewayURL)
 	serviceBackends["tts"] = getEnv("TTS_BACKEND_URL", textGeneratorURL)
@@ -86,6 +104,8 @@ func initServices() {
 	serviceBackends["lora_training"] = getEnv("LORA_TRAINING_BACKEND_URL", inferenceURL)
 	serviceBackends["ltx_video"] = "https://fal.run"
 	serviceBackends["video_generate"] = getEnv("OPENPATHS_BASE_URL", "https://openpaths.io")
+	serviceBackends["image_generate"] = getEnv("OPENPATHS_BASE_URL", "https://openpaths.io")
+	serviceBackends["chat_generate"] = getEnv("OPENPATHS_BASE_URL", "https://openpaths.io")
 	serviceBackends["flux_image"] = "https://fal.run"
 
 	falAPIKey = getEnv("FAL_KEY", getEnv("FAL_API_KEY", ""))
@@ -122,6 +142,15 @@ func initServices() {
 			servicePricesUSD[svc] = parseFloat(p)
 		}
 	}
+	// ra2 tracks the zimage rate unless RA2_PRICE_USD is set.
+	servicePricesUSD["ra2"] = servicePricesUSD["zimage"]
+	servicePricesUSD["ra2-edit"] = servicePricesUSD["zimage"]
+	if p := os.Getenv("RA2_PRICE_USD"); p != "" {
+		ra2Price := parseFloat(p)
+		servicePricesUSD["ra2"] = ra2Price
+		servicePricesUSD["ra2-edit"] = ra2Price
+	}
+
 	if p := os.Getenv("ZIMAGE_20_40_STEPS_PRICE_USD"); p != "" {
 		zimageHighStepPriceUSD = parseFloat(p)
 	}
@@ -137,6 +166,16 @@ func initServices() {
 
 	// Initialize diffusionz C engine for direct GPU inference (optional)
 	initDiffusionzEngine()
+}
+
+// defaultServiceName is the service used when /api/service omits "service".
+// ra2 (art generator) is the default image service; set RA2_DEFAULT=0 to fall
+// back to zimage.
+func defaultServiceName() string {
+	if os.Getenv("RA2_DEFAULT") == "0" {
+		return "zimage"
+	}
+	return "ra2"
 }
 
 // getServicePriceCUTE returns the current $CUTE cost for a service.
@@ -169,6 +208,16 @@ func getRequestServicePriceUSD(req ServiceUsageRequest) float64 {
 	}
 	if req.Service == "zimage" && getZImageSteps(req) >= 20 {
 		return zimageHighStepPriceUSD
+	}
+	if req.Service == "chat_generate" {
+		if price, exists := chatModelPricesUSD[strings.ToLower(strings.TrimSpace(req.Model))]; exists {
+			return price
+		}
+	}
+	if req.Service == "image_generate" {
+		if price, exists := imageModelPricesUSD[strings.ToLower(strings.TrimSpace(req.Model))]; exists {
+			return price
+		}
 	}
 	if req.Service == "video_generate" {
 		if price, exists := videoModelPricesUSD[normalizeVideoModel(req.Model)]; exists {
@@ -208,6 +257,8 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 	cutePrice := getCUTEPriceUSD()
 
 	units := map[string]string{
+		"ra2":            "per generation",
+		"ra2-edit":       "per edit",
 		"zimage":         fmt.Sprintf("per generation (base); $%.2f for 20+ steps", zimageHighStepPriceUSD),
 		"chronos2":       "per forecast",
 		"tts":            "per 100 characters",
@@ -217,6 +268,8 @@ func handleGetPricing(ctx *fasthttp.RequestCtx) {
 		"lora_training":  "per training job",
 		"ltx_video":      "per ~6s video",
 		"video_generate": "per generated video (model dependent)",
+		"image_generate": "per generated image (model dependent)",
+		"chat_generate":  "per request, up to 8k chars in / 1k tokens out (model dependent)",
 		"h3_video":       "per GPU-hour, metered by app.nz execution time (includes 20% reseller markup)",
 		"flux_image":     "per image",
 	}
@@ -250,7 +303,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	}
 
 	if req.Service == "" {
-		req.Service = "zimage"
+		req.Service = defaultServiceName()
 	}
 	if req.Service == "z-image-turbo" || req.Service == "zimage-turbo" {
 		req.Service = "zimage"
@@ -260,6 +313,11 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	_, ok := servicePricesUSD[req.Service]
 	if !ok {
 		jsonError(ctx, 400, "unknown service: "+req.Service)
+		return
+	}
+
+	if req.Service == "ra2-edit" && req.ImageBase64 == "" {
+		jsonError(ctx, 400, "ra2-edit requires image_base64")
 		return
 	}
 
@@ -585,6 +643,9 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	var method = "POST"
 
 	switch req.Service {
+	case "ra2", "ra2-edit":
+		return proxyToRA2(req, backendURL, ra2BackendSecret)
+
 	case "zimage":
 		// Fast path: use diffusionz C engine for direct GPU inference
 		if diffusionzAvailable {
@@ -728,6 +789,12 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	case "video_generate":
 		return proxyOpenPathsVideo(req)
 
+	case "chat_generate":
+		return proxyOpenPathsChat(req)
+
+	case "image_generate":
+		return proxyOpenPathsImage(req)
+
 	case "flux_image":
 		endpoint = "https://fal.run/fal-ai/flux/schnell"
 		payload := map[string]interface{}{
@@ -802,6 +869,145 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 	}
 
 	return respBody, nil
+}
+
+// ra2Request is the omniserve-native/OpenAI images contract for the ra2 service.
+type ra2Request struct {
+	Prompt         string  `json:"prompt"`
+	NegativePrompt string  `json:"negative_prompt,omitempty"`
+	Width          int     `json:"width"`
+	Height         int     `json:"height"`
+	Steps          int     `json:"steps"`
+	Seed           int     `json:"seed"`
+	GuidanceScale  float64 `json:"guidance_scale"`
+	OutputFormat   string  `json:"output_format"`
+	N              int     `json:"n"`
+	Teleport       bool    `json:"teleport,omitempty"`
+	ImageBase64    string  `json:"image_base64,omitempty"`
+}
+
+// ra2Response is the omniserve-native reply shape.
+type ra2Response struct {
+	Data []struct {
+		B64JSON         string `json:"b64_json"`
+		Seed            int64  `json:"seed"`
+		InferenceTimeMS int    `json:"inference_time_ms"`
+		Format          string `json:"format"`
+	} `json:"data"`
+	Model  string `json:"model"`
+	Format string `json:"format"`
+}
+
+// snap32 clamps a dimension to a positive multiple of 32 (ra2's engine limit).
+func snap32(v, fallback int) int {
+	if v <= 0 {
+		v = fallback
+	}
+	v -= v % 32
+	if v < 32 {
+		v = 32
+	}
+	return v
+}
+
+// proxyToRA2 translates a CuteDSL service request into the ra2 contract and
+// normalises the reply into the same JSON shape the zimage HTTP path returns.
+// ra2 is an omniserve-native instance: POST /v1/images/generations (text to
+// image) and /v1/images/edits (source image + prompt).
+func proxyToRA2(req ServiceUsageRequest, backendURL, secret string) ([]byte, error) {
+	endpoint := backendURL + "/v1/images/generations"
+	if req.Service == "ra2-edit" {
+		endpoint = backendURL + "/v1/images/edits"
+	}
+
+	width := snap32(req.Width, 1024)
+	height := snap32(req.Height, 1024)
+	steps := req.NumSteps
+	if steps <= 0 {
+		steps = 20
+	}
+	guidance := req.Guidance
+	if guidance <= 0 {
+		guidance = 1.0
+	}
+
+	payload := ra2Request{
+		Prompt:         req.Prompt,
+		NegativePrompt: req.NegativePrompt,
+		Width:          width,
+		Height:         height,
+		Steps:          steps,
+		Seed:           req.Seed,
+		GuidanceScale:  guidance,
+		OutputFormat:   "webp",
+		N:              1,
+		Teleport:       req.Service != "ra2-edit", // gateway rejects teleport for img2img
+	}
+	if req.Service == "ra2-edit" {
+		payload.ImageBase64 = req.ImageBase64
+	}
+
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if secret != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+secret)
+		httpReq.Header.Set("X-API-Key", secret)
+	}
+	// /api/service has already charged this request; untagged work parses as
+	// free and the gateway keeps free work local-only.
+	httpReq.Header.Set("X-Omniserve-Tier", "paid")
+
+	resp, err := backendClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkUpstreamPaywall(resp.StatusCode, respBody); err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("ra2 backend returned %d: %s", resp.StatusCode, truncateString(string(respBody), 500))
+	}
+
+	var ra2Resp ra2Response
+	if err := json.Unmarshal(respBody, &ra2Resp); err != nil {
+		return nil, fmt.Errorf("ra2 invalid response: %w", err)
+	}
+	if len(ra2Resp.Data) == 0 || ra2Resp.Data[0].B64JSON == "" {
+		return nil, fmt.Errorf("ra2 response contained no image")
+	}
+
+	format := ra2Resp.Data[0].Format
+	if format == "" {
+		format = ra2Resp.Format
+	}
+	if format == "" {
+		format = "webp"
+	}
+
+	return json.Marshal(map[string]interface{}{
+		"image_base64":      ra2Resp.Data[0].B64JSON,
+		"width":             width,
+		"height":            height,
+		"format":            format,
+		"engine":            "ra2",
+		"seed":              ra2Resp.Data[0].Seed,
+		"inference_time_ms": ra2Resp.Data[0].InferenceTimeMS,
+		"model":             ra2Resp.Model,
+	})
 }
 
 func proxyZImageOpenAIBackend(req ServiceUsageRequest, endpoint string, payload []byte) ([]byte, error) {

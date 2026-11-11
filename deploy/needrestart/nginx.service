@@ -1,0 +1,16 @@
+#!/bin/sh
+# Keep public origins available when needrestart refreshes nginx after a
+# library upgrade. A graceful reload starts workers with the new libraries
+# while the old workers continue serving in-flight requests.
+set -eu
+
+NGINX_BIN="${NGINX_BIN:-/usr/sbin/nginx}"
+SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-/usr/bin/systemctl}"
+
+if [ "${NR_VERBOSE:-0}" = "1" ]; then
+    set -x
+fi
+
+"$NGINX_BIN" -t
+"$SYSTEMCTL_BIN" reload nginx.service
+

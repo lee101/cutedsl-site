@@ -7,8 +7,8 @@ ERROR_LOG="${FRONTEND_ERROR_LOG_PATH:-/nvme0n1-disk/tmp/cutedsl-frontend-errors.
 STATE_FILE="${FRONTEND_CODEXEXEC_STATE:-/nvme0n1-disk/tmp/cutedsl-frontend-codexexec-autofix.state}"
 LAST_RUN_FILE="${FRONTEND_CODEXEXEC_LAST_RUN_STATE:-/nvme0n1-disk/tmp/cutedsl-frontend-codexexec-autofix-last-run}"
 COOLDOWN_SECONDS="${FRONTEND_CODEXEXEC_COOLDOWN_SECONDS:-10800}"
-MODEL="${CODEXEXEC_MODEL:-gpt-6-astra}"
-REASONING="${CODEXEXEC_REASONING:-medium}"
+MODEL="${CODEXEXEC_MODEL:-gpt-6.1-terra}"
+REASONING="${CODEXEXEC_REASONING:-high}"
 LOG="$PROJECT_DIR/monitoring/cutedsl_frontend_autofix_cron.log"
 
 cd "$PROJECT_DIR"

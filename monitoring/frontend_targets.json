@@ -1,0 +1,18 @@
+{
+  "sites": [
+    {
+      "base": "https://cutedsl.cc",
+      "routes": [
+        { "path": "/", "viewport": { "width": 1440, "height": 900 } },
+        { "path": "/", "viewport": { "width": 390, "height": 844 } },
+        { "path": "/gallery" },
+        { "path": "/docs" },
+        { "path": "/docs/zimage" },
+        { "path": "/playground" },
+        { "path": "/search" },
+        { "path": "/account" },
+        { "path": "/lora-trainer" }
+      ]
+    }
+  ]
+}

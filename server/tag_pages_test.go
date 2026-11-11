@@ -61,9 +61,9 @@ func TestCuratedTagsNonEmpty(t *testing.T) {
 
 func TestTagDisplay(t *testing.T) {
 	cases := map[string]string{
-		"fairy":             "Fairy",
-		"enchanted-forest":  "Enchanted Forest",
-		"studio-ghibli":     "Studio Ghibli",
+		"fairy":            "Fairy",
+		"enchanted-forest": "Enchanted Forest",
+		"studio-ghibli":    "Studio Ghibli",
 	}
 	for in, want := range cases {
 		if got := tagDisplay(in); got != want {

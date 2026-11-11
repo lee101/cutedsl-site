@@ -410,7 +410,9 @@ def test_transcribe_invalid_url():
     r = client.post("/transcribe", json={
         "audio_url": "https://nonexistent.example.com/audio.wav",
     })
-    assert r.status_code in (200, 502)
+    # 400: the backend refuses an undownloadable URL; tolerate transient
+    # backend outages (502) and an unexpected successful fetch.
+    assert r.status_code in (200, 400, 502)
 
 
 # ---- Caption ----

@@ -1265,6 +1265,83 @@ def test_native_fallback_retries_transient_lazy_init_and_validates_image(monkeyp
     assert cleanup_calls == [True]
 
 
+@pytest.mark.parametrize("prompt_len", [1, 147, 1024, 4096])
+def test_native_fallback_waits_for_route_readiness_404(monkeypatch, prompt_len):
+    """A native listener can return generic 404 while its image route starts."""
+    responses = iter([
+        types.SimpleNamespace(
+            status_code=404,
+            json=lambda: {"error": {"message": "not found"}},
+        ),
+        types.SimpleNamespace(
+            status_code=200,
+            json=lambda: _native_image_document(width=512, height=512),
+        ),
+    ])
+    sleeps = []
+    clock = iter([10.0])
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_GRACE_SECONDS", 30.0)
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_RESTART_POLL_SECONDS", 2.0)
+    monkeypatch.setattr(server.time, "monotonic", lambda: next(clock, 10.0))
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server.requests, "post", lambda *_args, **_kwargs: next(responses))
+
+    result = server._call_native_zimage({
+        "prompt": "x" * prompt_len,
+        "width": 512,
+        "height": 512,
+    })
+
+    assert result["backend"] == "omniserve-native"
+    assert sleeps == [2.0]
+
+
+def test_native_fallback_does_not_retry_unrelated_404(monkeypatch):
+    response = types.SimpleNamespace(
+        status_code=404,
+        json=lambda: {"error": {"message": "unknown model"}},
+    )
+    calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server.requests, "post", lambda *_args, **_kwargs: calls.append(True) or response)
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage({"prompt": "test", "width": 512, "height": 512})
+
+    assert exc_info.value.status_code == 502
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("prompt_len", [13, 80, 1024, 4096])
+@pytest.mark.parametrize("body", ["error code: 502\n", "<html>private upstream body</html>"])
+def test_native_gateway_failure_keeps_safe_diagnostic_and_request(monkeypatch, prompt_len, body):
+    def invalid_json():
+        raise ValueError("not JSON")
+
+    response = types.SimpleNamespace(status_code=502, text=body, json=invalid_json)
+    calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 1)
+    monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: None)
+    monkeypatch.setattr(server, "_cuda_free_mb", lambda: 19000)
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(server.requests, "post", lambda _url, **kw: calls.append(kw) or response)
+    payload = dict(prompt="x" * prompt_len, width=1024, height=1024, steps=8,
+                   seed=42, teleport=False, _omniserve_tier="background")
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage(payload)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.headers == {"Retry-After": "5"}
+    assert ("upstream gateway unavailable" in exc_info.value.detail) == body.startswith("error code:")
+    assert "private upstream body" not in exc_info.value.detail
+    assert len(calls) == 2
+    for call in calls:
+        assert call["json"] == {k: v for k, v in payload.items() if k != "_omniserve_tier"}
+        assert call["headers"]["X-Omniserve-Tier"] == "background"
+
+
 def test_native_fallback_preserves_bounded_backend_error_detail(monkeypatch):
     class FakeResponse:
         status_code = 500
@@ -1444,6 +1521,87 @@ def test_background_native_admission_timeout_is_retryable_backpressure(
     assert calls[0][1]["headers"]["X-Omniserve-Tier"] == "background"
     assert calls[0][1]["json"]["prompt"] == "x" * prompt_len
     assert "_omniserve_tier" not in calls[0][1]["json"]
+
+
+@pytest.mark.parametrize("prompt_len", [24, 136, 512, 4096])
+@pytest.mark.parametrize("tier,expected_status", [("background", 429), ("paid", 503)])
+def test_native_read_timeout_does_not_duplicate_generation(
+    monkeypatch, prompt_len, tier, expected_status
+):
+    calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://native")
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_RETRIES", 3)
+
+    def post(_url, **kwargs):
+        calls.append(kwargs)
+        raise server.requests.ReadTimeout("native request still queued")
+
+    monkeypatch.setattr(server.requests, "post", post)
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage({
+            "prompt": "x" * prompt_len,
+            "width": 1024,
+            "height": 1024,
+            "steps": 8,
+            "teleport": False,
+            "_omniserve_tier": tier,
+        })
+
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.headers == {"Retry-After": "15"}
+    assert len(calls) == 1
+    assert calls[0]["json"]["prompt"] == "x" * prompt_len
+    assert calls[0]["headers"]["X-Omniserve-Tier"] == tier
+
+
+@pytest.mark.parametrize("prompt_len", [24, 136, 512, 4096])
+@pytest.mark.parametrize("admission", [
+    {"slots": 8, "used_slots": 8, "waiting": {}},
+    {"slots": 8, "used_slots": 4, "waiting": {"paid": 1}},
+])
+def test_background_native_queue_preflight_returns_backpressure(
+    monkeypatch, prompt_len, admission
+):
+    calls = []
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://127.0.0.1:8791")
+    monkeypatch.setattr(server.requests, "get", lambda *_args, **_kwargs: types.SimpleNamespace(
+        status_code=200, json=lambda: {"admission": admission}
+    ))
+    monkeypatch.setattr(server.requests, "post", lambda *_args, **_kwargs: calls.append(True))
+
+    with pytest.raises(server.HTTPException) as exc_info:
+        server._call_native_zimage({
+            "prompt": "x" * prompt_len,
+            "width": 1024,
+            "height": 1024,
+            "_omniserve_tier": "background",
+        })
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers == {"Retry-After": "15"}
+    assert calls == []
+
+
+def test_native_background_preflight_fails_open_without_status(monkeypatch):
+    monkeypatch.setattr(server, "ZIMAGE_NATIVE_FALLBACK_URL", "http://127.0.0.1:8791")
+    def status_unavailable(*_args, **_kwargs):
+        raise server.requests.ConnectionError("status unavailable")
+
+    monkeypatch.setattr(server.requests, "get", status_unavailable)
+    calls = []
+    monkeypatch.setattr(server.requests, "post", lambda *_args, **_kwargs: (
+        calls.append(True) or types.SimpleNamespace(
+            status_code=200, json=lambda: _native_image_document(width=512, height=512)
+        )
+    ))
+
+    result = server._call_native_zimage({
+        "prompt": "a red fox", "width": 512, "height": 512,
+        "_omniserve_tier": "background",
+    })
+
+    assert result["width"] == 512
+    assert calls == [True]
 
 
 def test_native_fallback_waits_through_repeated_opaque_generation_failures(monkeypatch):
@@ -2522,7 +2680,7 @@ def test_native_recovery_types_share_one_grace_origin(
     monkeypatch.setattr(server, "_clear_torch_cuda_caches", lambda: None)
     with pytest.raises(server.HTTPException) as caught:
         server._call_native_zimage({"prompt": "a small woodland cabin", "width": 1024, "height": 1024})
-    assert caught.value.status_code == 503
+    assert caught.value.status_code == (429 if last_failure in {"headroom", "generation"} else 503)
     assert len(calls) == 2
     assert sleeps == [2.0]
 
@@ -2560,8 +2718,64 @@ def test_exhausted_capacity_grace_does_not_start_generic_retry(
     with pytest.raises(server.HTTPException) as caught:
         server._call_native_zimage(payload)
 
-    assert caught.value.status_code == (429 if tier == "background" else 503)
-    assert caught.value.headers == {"Retry-After": "15" if tier == "background" else "5"}
+    assert caught.value.status_code == 429
+    assert caught.value.headers == {"Retry-After": "15"}
     assert clock[0] == 2.0
     expected = {k: v for k, v in payload.items() if k != "_omniserve_tier"}
     assert calls == [expected, expected]
+
+
+@pytest.mark.parametrize('prompt_len', [19, 87, 125, 1024, 4096])
+@pytest.mark.parametrize('fmt,mime', [('WEBP', 'image/webp'), ('PNG', 'image/png'), ('JPEG', 'image/jpeg')])
+def test_native_binary_overflow_preserves_image_and_request(monkeypatch, prompt_len, fmt, mime):
+    output = io.BytesIO()
+    Image.new('RGB', (512, 512), (36, 72, 108)).save(output, format=fmt)
+    body = output.getvalue()
+    response = server.requests.Response()
+    response.status_code = 200
+    response.headers['Content-Type'] = mime + '; charset=binary'
+    response._content = body
+    calls = []
+    monkeypatch.setattr(server.requests, 'post', lambda *a, **kw: calls.append(kw) or response)
+    payload = dict(prompt='x' * prompt_len, width=512, height=512, steps=8,
+                   teleport=True, response_format='b64_json', _omniserve_tier='background')
+    result = server._call_native_zimage(payload)
+    assert len(calls) == 1
+    assert calls[0]['json'] == {k: v for k, v in payload.items() if not k.startswith('_')}
+    assert calls[0]['headers']['X-Omniserve-Tier'] == 'background'
+    assert result['image_bytes'] == body
+    assert base64.b64decode(result['encoded']) == body
+    assert result['format'] == fmt.lower()
+    assert result['teleport'] is None  # No invented cache-hit metadata.
+    assert result['model'] is None
+
+
+@pytest.mark.parametrize('failure', ['html', 'empty', 'corrupt', 'truncated', 'dimensions', 'oversize'])
+def test_native_invalid_overflow_is_bounded_and_retryable(monkeypatch, failure):
+    output = io.BytesIO()
+    Image.new('RGB', (512, 512), (36, 72, 108)).save(output, format='PNG')
+    body = output.getvalue()
+    mime = 'image/png'
+    if failure == 'html':
+        body, mime = b'<html>upstream unavailable</html>', 'text/html'
+    elif failure == 'empty':
+        body = b''
+    elif failure == 'corrupt':
+        body = b'not an image'
+    elif failure == 'truncated':
+        body = body[:60]  # A readable header, but incomplete pixel data.
+    elif failure == 'oversize':
+        monkeypatch.setattr(server, 'REMOTE_IMAGE_MAX_BYTES', len(body) - 1)
+    response = server.requests.Response()
+    response.status_code = 200
+    response.headers['Content-Type'] = mime
+    response._content = body
+    calls = []
+    monkeypatch.setattr(server.requests, 'post', lambda *a, **kw: calls.append(kw) or response)
+    monkeypatch.setattr(server, 'ZIMAGE_NATIVE_FALLBACK_RETRIES', 1)
+    monkeypatch.setattr(server.time, 'sleep', lambda _: None)
+    with pytest.raises(server.HTTPException) as exc:
+        server._call_native_zimage(dict(prompt='fox', width=1024 if failure == 'dimensions' else 512, height=512))
+    assert exc.value.status_code == 503
+    assert exc.value.headers == {'Retry-After': '5'}
+    assert len(calls) == 2

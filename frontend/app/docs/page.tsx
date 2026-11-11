@@ -40,9 +40,9 @@ export default function DocsPage() {
       <main className="max-w-5xl mx-auto px-6 pb-24">
         {/* Hero */}
         <div className="py-12">
-          <h1 className="font-fredoka text-5xl lg:text-6xl font-bold text-slate-800 mb-4">API Documentation</h1>
+          <h1 className="font-fredoka text-5xl lg:text-6xl font-bold text-slate-800 mb-4">Text-to-Image and Video API Docs</h1>
           <p className="text-lg text-slate-600 max-w-2xl">
-            All CuteDSL services use a single unified endpoint. Authenticate with your API key, specify the service, and send your request.
+            ra2 art generator (default), Z-Image Turbo, Flux Schnell, ManifoldGen video, Kokoro TTS, speech-to-text, Chronos-2 forecasting, and LoRA training. Authenticate with your API key, specify the service, and send your request.
           </p>
         </div>
 
@@ -134,7 +134,8 @@ export default function DocsPage() {
           </h2>
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
             <p className="text-slate-600 mb-4">
-              All services share a single endpoint: <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">POST /api/service</code>
+              All services share a single endpoint: <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">POST /api/service</code>.
+              Omit <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">service</code> to use <span className="font-bold">ra2</span> (ra2 art generator), the default image service; pass <code className="bg-slate-100 px-2 py-0.5 rounded text-sm font-bold">service: &quot;zimage&quot;</code> for Z-Image Turbo.
             </p>
             <CodeBlock language="bash" code={replaceApiKey(`curl -X POST https://cutedsl.cc/api/service \\
   -H "Content-Type: application/json" \\

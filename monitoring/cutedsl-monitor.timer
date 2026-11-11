@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the CuteDSL production monitor every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30
+Persistent=true
+Unit=cutedsl-monitor.service
+
+[Install]
+WantedBy=timers.target

@@ -9,8 +9,8 @@ STATE_FILE="${CODEXEXEC_STATE:-/nvme0n1-disk/tmp/cutedsl-codexexec-autofix.state
 LAST_RUN_FILE="${CODEXEXEC_LAST_RUN_STATE:-/nvme0n1-disk/tmp/cutedsl-codexexec-autofix-last-run}"
 CHECK_INTERVAL="${CODEXEXEC_CHECK_INTERVAL:-60}"
 COOLDOWN_SECONDS="${CODEXEXEC_COOLDOWN_SECONDS:-10800}"
-MODEL="${CODEXEXEC_MODEL:-gpt-6-astra}"
-REASONING="${CODEXEXEC_REASONING:-medium}"
+MODEL="${CODEXEXEC_MODEL:-gpt-6.1-terra}"
+REASONING="${CODEXEXEC_REASONING:-high}"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"

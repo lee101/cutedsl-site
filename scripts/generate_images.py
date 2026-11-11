@@ -47,6 +47,7 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "inference"))
 
+from r2_upload import R2_BUCKET, _get_s3_client, upload_bytes_at_key
 from image_quality import bumpy_metrics, compact_prompt, detect_too_bumpy, retry_prompt
 
 # Config
@@ -66,7 +67,10 @@ SIZES = {
 }
 
 WEBP_QUALITY = 85
-SAVE_LATENTS = True
+# Generated latents have no reader in the site or inference API. Keep only the
+# image variants that the gallery serves instead of growing a second local store.
+SAVE_LATENTS = False
+R2_IMAGES_PREFIX = os.getenv("CUTEDSL_IMAGES_R2_PREFIX", "cutedsl/gallery").strip("/")
 
 # Skip the legacy histogram detector (false-positives on white-background images)
 LENIENT_QUALITY = os.getenv("LENIENT_QUALITY", "0") == "1"
@@ -389,7 +393,7 @@ def iter_generation_results(
 
 
 def save_and_insert(api_result: dict, prompt: str, conn, model: str = "zimage") -> bool:
-    """Decode image, save all sizes + latent, insert into DB. Returns True on success."""
+    """Decode, publish image variants to R2, then record their stable paths."""
     img_b64 = api_result.get("image_base64")
     if not img_b64:
         return False
@@ -406,48 +410,62 @@ def save_and_insert(api_result: dict, prompt: str, conn, model: str = "zimage") 
     fname = f"{phash}_{img_id[:8]}.webp"
 
     paths = {}
+    uploaded_keys = []
     file_size = 0
+    client = _get_s3_client()
 
-    for size_name, (w, h) in SIZES.items():
-        out_dir = IMAGES_DIR / size_name
-        out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for size_name, (w, h) in SIZES.items():
+            resized = img.copy()
+            if resized.width != w or resized.height != h:
+                resized = resized.resize((w, h), Image.LANCZOS)
 
-        resized = img.copy()
-        if resized.width != w or resized.height != h:
-            resized = resized.resize((w, h), Image.LANCZOS)
+            buffer = io.BytesIO()
+            resized.save(buffer, "WEBP", quality=WEBP_QUALITY)
+            image_bytes = buffer.getvalue()
+            relpath = f"{size_name}/{fname}"
+            key = f"{R2_IMAGES_PREFIX}/{relpath}"
+            uploaded_keys.append(key)
+            upload_bytes_at_key(key, image_bytes, "image/webp")
+            paths[size_name] = relpath
 
-        out_path = out_dir / fname
-        resized.save(out_path, "WEBP", quality=WEBP_QUALITY)
-        paths[size_name] = f"{size_name}/{fname}"
+            if size_name == "originals":
+                file_size = len(image_bytes)
 
-        if size_name == "originals":
-            file_size = out_path.stat().st_size
+    except Exception as e:
+        for key in uploaded_keys:
+            try:
+                client.delete_object(Bucket=R2_BUCKET, Key=key)
+            except Exception:
+                pass
+        print(f"  R2 upload failed: {e}")
+        return False
 
-    # Save latent
     latent_path = ""
-    latent_b64 = api_result.get("latent_base64")
-    if latent_b64 and SAVE_LATENTS:
-        latent_dir = IMAGES_DIR / "latents"
-        latent_dir.mkdir(parents=True, exist_ok=True)
-        latent_fname = f"{phash}_{img_id[:8]}.pt"
-        (latent_dir / latent_fname).write_bytes(base64.b64decode(latent_b64))
-        latent_path = f"latents/{latent_fname}"
-
-    # Insert into DB
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO generated_images
-               (id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, latent_path)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (id) DO NOTHING""",
-            (img_id, prompt,
-             api_result.get("width", img.width), api_result.get("height", img.height),
-             paths.get("originals", ""), paths.get("thumbs", ""), paths.get("medium", ""),
-             file_size, model, api_result.get("seed", 0),
-             api_result.get("num_inference_steps", 9), latent_path),
-        )
-    conn.commit()
-    return True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO generated_images
+                   (id, prompt, width, height, file_path, thumb_path, med_path, file_size, model, seed, steps, latent_path)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (id) DO NOTHING""",
+                (img_id, prompt,
+                 api_result.get("width", img.width), api_result.get("height", img.height),
+                 paths.get("originals", ""), paths.get("thumbs", ""), paths.get("medium", ""),
+                 file_size, model, api_result.get("seed", 0),
+                 api_result.get("num_inference_steps", 9), latent_path),
+            )
+        conn.commit()
+        return True
+    except Exception as e:
+        # A failed commit can have an ambiguous outcome. Keep immutable R2
+        # objects so a committed row can never point at a deleted image.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"  Database insert failed; R2 assets retained for safety: {e}")
+        return False
 
 
 def trigger_reindex():
@@ -463,9 +481,9 @@ def trigger_reindex():
 
 
 def estimate_storage(count: int) -> str:
-    """Estimate storage needed for N images (3 sizes + latent)."""
-    # Rough estimates: original ~80KB, medium ~25KB, thumb ~8KB, latent ~200KB
-    per_image_kb = 80 + 25 + 8 + 200
+    """Estimate R2 storage for N images (three WebP sizes)."""
+    # Rough estimates: original ~80KB, medium ~25KB, thumb ~8KB.
+    per_image_kb = 80 + 25 + 8
     total_gb = (count * per_image_kb) / (1024 * 1024)
     return f"{total_gb:.1f} GB"
 
@@ -518,6 +536,12 @@ def main():
     if args.dry_run:
         print("(dry run — exiting)")
         return
+
+    try:
+        _get_s3_client().head_bucket(Bucket=R2_BUCKET)
+    except Exception as e:
+        raise RuntimeError(f"R2 bucket check failed for {R2_BUCKET}: {e}") from e
+    print(f"R2 destination: {R2_BUCKET}/{R2_IMAGES_PREFIX}/")
 
     # Apply offset and limit
     if args.offset > 0:
@@ -577,14 +601,8 @@ def main():
             eta_s = (len(pending) - i - 1) / max(rate, 0.01)
             eta_h = eta_s / 3600
 
-            disk_used = sum(
-                sum(f.stat().st_size for f in (IMAGES_DIR / d).iterdir() if f.is_file())
-                for d in ["originals", "medium", "thumbs"]
-                if (IMAGES_DIR / d).exists()
-            ) / (1024**3)
-
             print(f"  --- {success:,} ok, {failed:,} fail | "
-                  f"{rate:.1f} img/s | ETA {eta_h:.1f}h | disk {disk_used:.1f} GB ---")
+                  f"{rate:.1f} img/s | ETA {eta_h:.1f}h | gallery images stored in R2 ---")
 
         if success - last_reindex >= 2000:
             trigger_reindex()
