@@ -3,15 +3,17 @@
 import { browserStorage } from '@/lib/browser-storage';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { motion } from 'motion/react';
 import {
   Sparkles, Wand2, Image as ImageIcon, LineChart, Coins, Heart, Zap,
   Mic, Volume2, BookOpen, Cloud, Code, Globe, Cpu, Database, Layout, Search, Gamepad2, Users,
   Wallet, ArrowRight, RefreshCw, Copy, Check, LogOut, X, Key, Mail, Eye, EyeOff, CreditCard, Menu,
-  Video, Upload, ShieldCheck, LockKeyhole, ChevronDown
+  Video, Upload, ShieldCheck, LockKeyhole, ChevronDown, Film
 } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { CodeBlock } from '@/lib/code-block';
+import { AdSense } from '@/lib/adsense';
 import { parseJSONResponse as parseHTTPJSONResponse, HTTPResponseError } from '@/lib/http';
 import { uploadToBucket } from '@/lib/uploads';
 import { STATIC_BASE_URL } from '@/lib/static-assets';
@@ -404,7 +406,10 @@ export default function Home() {
         .catch(() => {});
     }
     // ?test=true triggers e2e API test
-    if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('test') === 'true') {
+    const query = new URLSearchParams(window.location.search);
+    const similarPrompt = query.get('prompt');
+    if (similarPrompt) setDemoPrompt(similarPrompt);
+    if (query.get('test') === 'true') {
       setTestMode(true);
       runE2ETests();
     }
@@ -1515,6 +1520,10 @@ export default function Home() {
         </div>
       </main>
 
+      <div className="relative z-10 mx-auto max-w-5xl px-6 py-4">
+        <AdSense />
+      </div>
+
       {/* E2E Test Panel (shown with ?test=true) */}
       {testMode && (
         <div className="fixed top-0 right-0 z-50 bg-slate-900 text-white p-4 rounded-bl-2xl shadow-2xl max-w-sm max-h-96 overflow-y-auto">
@@ -1577,7 +1586,7 @@ export default function Home() {
               <div className="bg-pink-100 w-14 h-14 rounded-2xl flex items-center justify-center text-pink-500 mb-4 shadow-inner">
                 <ImageIcon size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-pink-600 transition-colors">zimage</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-pink-600 transition-colors">Z-Image Turbo</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Gorgeous 1024px images in about a second. Our fastest text-to-image model.
               </p>
@@ -1597,7 +1606,7 @@ export default function Home() {
               <div className="bg-cyan-100 w-14 h-14 rounded-2xl flex items-center justify-center text-cyan-500 mb-4 shadow-inner">
                 <LineChart size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-cyan-600 transition-colors">chronos2</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-cyan-600 transition-colors">Chronos-2</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Forecast any time series in milliseconds, with confidence bands built in.
               </p>
@@ -1692,6 +1701,21 @@ export default function Home() {
             </div>
             </Link>
 
+            <Link href="/docs/manifold_video">
+            <motion.div whileHover={{ y: -10 }} className="glass-card p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
+              <div className="bg-violet-100 w-14 h-14 rounded-2xl flex items-center justify-center text-violet-500 mb-4 shadow-inner">
+                <Film size={28} />
+              </div>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-violet-600 transition-colors">ManifoldGen Video</h3>
+              <p className="text-slate-600 mb-4 text-sm">
+                AI video generator. Text-to-video and image-to-video via ManifoldGen native H3. Queued WebM with generated audio.
+              </p>
+              <div className="flex items-center gap-2 text-violet-500 font-bold text-sm mt-auto">
+                <Zap size={16} /> queued · 3 jobs/day
+              </div>
+            </motion.div>
+            </Link>
+
             <Link href="/docs/ltx_video">
             <div className="glass-card card-hover p-6 rounded-3xl relative overflow-hidden group bg-white/70 cursor-pointer">
               <div className="bg-red-100 w-14 h-14 rounded-2xl flex items-center justify-center text-red-500 mb-4 shadow-inner">
@@ -1737,7 +1761,7 @@ export default function Home() {
               <div className="bg-indigo-100 w-14 h-14 rounded-2xl flex items-center justify-center text-indigo-500 mb-4 shadow-inner">
                 <Globe size={28} />
               </div>
-              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Image</h3>
+              <h3 className="font-fredoka text-2xl font-bold text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors">Flux Schnell</h3>
               <p className="text-slate-600 mb-4 text-sm">
                 Quick 1024px drafts when you want ideas fast.
               </p>
@@ -1755,9 +1779,13 @@ export default function Home() {
         </div>
       </section>
 
+      <div className="relative z-10 mx-auto max-w-5xl px-6 py-4">
+        <AdSense />
+      </div>
+
       {/* Try It - Image Gen Demo */}
       {walletAddress && apiKey && (
-        <section className="py-16 relative z-10">
+        <section id="try-it" className="py-16 relative z-10 scroll-mt-6">
           <div className="max-w-4xl mx-auto px-6">
             <div className="bg-white/90 rounded-3xl p-8 border border-pink-200 shadow-lg">
               <h2 className="font-fredoka text-3xl font-bold text-slate-800 mb-2">Try It</h2>
@@ -2363,7 +2391,7 @@ export default function Home() {
         
         <div className="max-w-4xl mx-auto px-6 text-center relative z-10">
           <Coins size={64} className="text-yellow-400 mx-auto mb-8" />
-          <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">Powered by $CUTEDSL</h2>
+          <h2 className="font-fredoka text-5xl lg:text-6xl font-bold mb-6">$CUTEDSL on Solana</h2>
           <p className="text-xl text-slate-200 mb-10 font-medium">
             Pay for AI inference with <span className="text-pink-400 font-bold text-2xl">$CUTEDSL</span> on Solana. First-party models (ra2, zimage, chronos2, TTS) are priced at the token&apos;s all-time high &mdash; so early holders get cheaper inference forever. The more $CUTEDSL grows, the better your rate locks in.
           </p>

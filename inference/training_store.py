@@ -20,6 +20,16 @@ def job_store_dir() -> Path:
     return path
 
 
+def safe_join(base: str | os.PathLike, name: str) -> str:
+    if not name or "\x00" in name or "\\" in name:
+        raise ValueError("invalid path")
+    root = Path(base).resolve()
+    path = (root / name).resolve()
+    if path == root or not path.is_relative_to(root):
+        raise ValueError("invalid path")
+    return str(path)
+
+
 def job_status_path(job_id: str) -> Path:
     safe = "".join(c for c in job_id if c.isalnum() or c in "._-")
     if not safe:

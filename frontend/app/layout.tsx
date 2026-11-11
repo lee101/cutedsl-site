@@ -3,6 +3,7 @@ import { Fredoka, Nunito } from 'next/font/google';
 import 'highlight.js/styles/github-dark.css';
 import './globals.css';
 import { FrontendErrorReporter } from './frontend-error-reporter';
+import { SiteCreateBar } from '@/lib/site-create-bar';
 import { STATIC_BASE_URL, staticAssetPath } from '@/lib/static-assets';
 
 const fredoka = Fredoka({
@@ -46,11 +47,21 @@ export const metadata: Metadata = {
     'image to video',
     'AI video generation',
     'time series forecasting',
+    'Z-Image Turbo',
+    'Flux Schnell',
+    'Stable Diffusion API',
+    'AI video generator',
+    'text to video',
+    'ManifoldGen',
     'text to speech',
-    'torch.compile',
-    'NVFP4',
-    'Z-Image',
+    'Kokoro TTS',
+    'speech to text',
+    'time series forecasting',
     'Chronos-2',
+    'AI art gallery',
+    'LoRA training',
+    'Solana AI',
+    'CUTEDSL',
   ],
   authors: [{ name: 'Applied AI NZ', url: 'https://app.nz' }],
   creator: 'Applied AI NZ',
@@ -132,6 +143,11 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
         <script dangerouslySetInnerHTML={{ __html: thConfig }} />
         <script async src="https://twohelixes.com/static/th.js" />
         <script
+          async
+          src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-8598649123553748"
+          crossOrigin="anonymous"
+        />
+        <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
@@ -139,6 +155,7 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
       <body className="font-nunito antialiased bg-pink-50 text-slate-800 selection:bg-pink-300 selection:text-pink-900" suppressHydrationWarning>
         <FrontendErrorReporter />
         {children}
+        <SiteCreateBar />
       </body>
     </html>
   );

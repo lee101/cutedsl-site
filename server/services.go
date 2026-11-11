@@ -160,6 +160,15 @@ func initServices() {
 		}
 	}
 
+	// ra2 tracks the zimage rate unless RA2_PRICE_USD is set.
+	servicePricesUSD["ra2"] = servicePricesUSD["zimage"]
+	servicePricesUSD["ra2-edit"] = servicePricesUSD["zimage"]
+	if p := os.Getenv("RA2_PRICE_USD"); p != "" {
+		ra2Price := parseFloat(p)
+		servicePricesUSD["ra2"] = ra2Price
+		servicePricesUSD["ra2-edit"] = ra2Price
+	}
+
 	log.Printf("Service pricing loaded: %v", servicePricesUSD)
 	log.Printf("Z-Image default steps: %d, 20+ step price: $%.4f", zimageDefaultSteps, zimageHighStepPriceUSD)
 	log.Printf("Service backends: %v", serviceBackends)
@@ -455,7 +464,7 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 		maybeTriggerAutoTopup(user.ID)
 	}
 
-	result, savedImage := persistGeneratedZImage(req, user, result)
+	result, savedImage := persistGeneratedImage(req, user, result)
 
 	// Return backend response with billing info
 	response := map[string]interface{}{
@@ -472,8 +481,10 @@ func handleServiceRequest(ctx *fasthttp.RequestCtx) {
 	jsonResponse(ctx, 200, response)
 }
 
-func persistGeneratedZImage(req ServiceUsageRequest, user *User, result []byte) ([]byte, *GeneratedImage) {
-	if req.Service != "zimage" || req.Prompt == "" || user == nil {
+// persistGeneratedImage saves generated images (zimage and the default ra2
+// service) into the gallery so /api/service generations show up as saved_image.
+func persistGeneratedImage(req ServiceUsageRequest, user *User, result []byte) ([]byte, *GeneratedImage) {
+	if (req.Service != "zimage" && req.Service != "ra2") || req.Prompt == "" || user == nil {
 		return result, nil
 	}
 
@@ -487,7 +498,7 @@ func persistGeneratedZImage(req ServiceUsageRequest, user *User, result []byte) 
 	}
 	imageBytes, err := base64.StdEncoding.DecodeString(imageB64)
 	if err != nil || len(imageBytes) == 0 {
-		log.Printf("zimage persist decode failed: %v", err)
+		log.Printf("image persist decode failed: %v", err)
 		return result, nil
 	}
 
@@ -498,11 +509,11 @@ func persistGeneratedZImage(req ServiceUsageRequest, user *User, result []byte) 
 	imageDir := getEnv("IMAGES_DIR", "/sdb-disk/cutedsl-images")
 	fullPath := filepath.Join(imageDir, relPath)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		log.Printf("zimage persist mkdir failed: %v", err)
+		log.Printf("image persist mkdir failed: %v", err)
 		return result, nil
 	}
 	if err := os.WriteFile(fullPath, imageBytes, 0644); err != nil {
-		log.Printf("zimage persist write failed: %v", err)
+		log.Printf("image persist write failed: %v", err)
 		return result, nil
 	}
 
@@ -525,14 +536,14 @@ func persistGeneratedZImage(req ServiceUsageRequest, user *User, result []byte) 
 		ThumbPath:       relPath,
 		MedPath:         relPath,
 		FileSize:        int64(len(imageBytes)),
-		Model:           "zimage",
+		Model:           req.Service,
 		Seed:            seed,
 		Steps:           steps,
 		CreatedByUserID: user.ID,
 		CreatedAt:       time.Now(),
 	}
 	if err := dbConn.InsertGeneratedImage(img); err != nil {
-		log.Printf("zimage persist db insert failed: %v", err)
+		log.Printf("image persist db insert failed: %v", err)
 		return result, nil
 	}
 
@@ -674,6 +685,7 @@ func proxyToBackend(req ServiceUsageRequest, backendURL string) ([]byte, error) 
 				// Return a JSON response matching the HTTP backend format
 				result, _ := json.Marshal(map[string]interface{}{
 					"image_bytes_len": len(imgBytes),
+					"image_base64":    base64.StdEncoding.EncodeToString(imgBytes),
 					"width":           width,
 					"height":          height,
 					"format":          "webp",
@@ -1200,7 +1212,23 @@ func proxyTextGeneratorSpeech(req ServiceUsageRequest, backendURL string) ([]byt
 }
 
 // handleTrainStatus proxies training job status from inference server
+func validTrainJobID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func handleTrainStatus(ctx *fasthttp.RequestCtx, jobID string) {
+	if !validTrainJobID(jobID) {
+		jsonError(ctx, 404, "training job not found")
+		return
+	}
 	backendURL := serviceBackends["lora_training"]
 	endpoint := fmt.Sprintf("%s/train/%s", backendURL, jobID)
 

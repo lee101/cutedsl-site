@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -113,5 +114,18 @@ func TestProxyTextGeneratorSpeechDefaults(t *testing.T) {
 	}
 	if result["format"] != "mp3" {
 		t.Fatalf("format = %v, want mp3", result["format"])
+	}
+}
+
+func TestValidTrainJobID(t *testing.T) {
+	for _, id := range []string{"0b7c6f3e-1a2b-4c5d-8e9f-0123456789ab", "job_1"} {
+		if !validTrainJobID(id) {
+			t.Fatalf("rejected %q", id)
+		}
+	}
+	for _, id := range []string{"", "?", "x?y=1", "a/b", "..", "%2e%2e", "a\\b", "a\x00b", strings.Repeat("a", 65)} {
+		if validTrainJobID(id) {
+			t.Fatalf("accepted %q", id)
+		}
 	}
 }

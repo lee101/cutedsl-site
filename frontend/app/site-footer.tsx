@@ -10,6 +10,7 @@ const exploreLinks = [
   { label: 'Home', href: '/' },
   { label: 'Creator Tools', href: '/tools' },
   { label: 'AI Art Gallery', href: '/gallery' },
+  { label: 'AI Video Gallery', href: '/video-gallery' },
   { label: 'Art Playground', href: '/playground' },
   { label: 'Search Images', href: '/search' },
   { label: 'Evals & Benchmarks', href: '/evals' },
@@ -21,7 +22,10 @@ const exploreLinks = [
 
 const modelLinks = [
   { label: 'Live Inference API', href: 'https://images.netwrck.com/docs' },
+  { label: 'RA2 Art Generator', href: '/docs/ra2' },
+  { label: 'RA2 Edit', href: '/docs/ra2-edit' },
   { label: 'Z-Image Turbo', href: '/docs/zimage' },
+  { label: 'ManifoldGen Video', href: '/docs/manifold_video' },
   { label: 'Chronos2 Forecasting', href: '/docs/chronos2' },
   { label: 'Text to Speech', href: '/docs/tts' },
   { label: 'Speech to Text', href: '/docs/stt' },
@@ -32,6 +36,7 @@ const modelLinks = [
 ];
 
 const ecosystemLinks = [
+  { label: 'ManifoldGen — AI video', href: 'https://manifoldgen.com' },
   { label: 'Applied AI NZ', href: 'https://app.nz' },
   { label: 'app.nz Prompt Library', href: 'https://app.nz/prompts' },
   { label: 'app.nz Alternatives', href: 'https://app.nz/alternatives' },

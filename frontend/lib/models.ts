@@ -27,6 +27,8 @@ export interface ModelConfig {
   responseExample: Record<string, unknown>;
   pricingNote: string;
   pricingTier: 'first-party' | 'third-party';
+  /** Override playground POST path. Default `/service` with `{service: slug, ...}`. */
+  requestPath?: string;
 }
 
 export const MODELS: ModelConfig[] = [
@@ -98,7 +100,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'zimage',
     name: 'Z-Image Turbo',
-    description: 'Text-to-image generation powered by CuteZImage with fused Triton kernels. Generates high-quality 1024x1024 images in seconds.',
+    description: 'Z-Image Turbo text-to-image. 1024x1024 AI art from a prompt, fused Triton kernels, a few seconds per image.',
     category: 'image',
     responseType: 'image',
     pricingNote: '$0.04 per generation; $0.10 for 20+ steps',
@@ -132,7 +134,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'chronos2',
     name: 'Chronos-2',
-    description: 'Time series forecasting with CuteChronos2 acceleration. Achieves 27x speedup over baseline with custom Triton kernels.',
+    description: 'Chronos-2 time series forecasting API. Quantile forecasts with 27x faster inference via custom Triton kernels.',
     category: 'timeseries',
     responseType: 'json',
     pricingNote: '$0.002 per forecast',
@@ -160,7 +162,7 @@ export const MODELS: ModelConfig[] = [
   {
     slug: 'tts',
     name: 'Supertonic TTS',
-    description: 'High-quality text-to-speech powered by text-generator.io Supertonic and Kokoro voices. Natural-sounding speech synthesis with language, speed, and step controls.',
+    description: 'Supertonic text-to-speech via text-generator.io. 20+ Kokoro voices with language, speed, and step controls.',
     category: 'audio',
     responseType: 'audio',
     pricingNote: '$0.005 per 100 characters',
@@ -266,7 +268,7 @@ curl -X POST https://cutedsl.cc/api/service \\
   {
     slug: 'caption',
     name: 'Image Caption',
-    description: 'Automatic image captioning powered by GitBase. Generates descriptive captions for any image URL.',
+    description: 'Image captioning. GitBase captions from an image URL for alt text and search.',
     category: 'text',
     responseType: 'json',
     pricingNote: '$0.01 per image',
@@ -297,9 +299,53 @@ curl -X POST https://cutedsl.cc/api/service \\
     },
   },
   {
+    slug: 'manifold_video',
+    name: 'ManifoldGen Video',
+    description: 'ManifoldGen text-to-video and image-to-video. Queued native H3 jobs, WebM, optional start frame and generated audio.',
+    category: 'video',
+    responseType: 'video',
+    pricingNote: 'queued · 3 jobs/day default',
+    pricingTier: 'third-party',
+    requestPath: '/generations',
+    params: [
+      { name: 'prompt', type: 'string', required: true, description: 'Motion description for the clip', placeholder: 'A glass whale swims through a flooded library, slow crane shot, volumetric light' },
+      { name: 'aspect_ratio', type: 'string', required: false, default: '16:9', description: 'Output aspect ratio', options: ['16:9', '9:16', '1:1'] },
+      { name: 'size', type: 'string', required: false, default: 'preview', description: 'Pixel-area tier: preview, balanced, or native H3', options: ['preview', 'balanced', 'native'] },
+      { name: 'duration', type: 'int', required: false, default: 5, description: 'Clip length in seconds (4–60)' },
+      { name: 'num_steps', type: 'int', required: false, default: 20, description: 'Denoising steps (8–40)' },
+      { name: 'first_frame', type: 'string', required: false, description: 'Public http(s) URL of a still to animate (image-to-video)', placeholder: 'https://cutedsl.cc/images/thumbs/example.webp' },
+    ],
+    curlExample: `curl -X POST https://cutedsl.cc/api/generations \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "prompt": "A glass whale swims through a flooded library, slow crane shot",
+    "aspect_ratio": "16:9",
+    "size": "preview",
+    "duration": 5,
+    "num_steps": 20,
+    "include_audio": true
+  }'
+
+# Poll until completed (do not re-POST):
+curl https://cutedsl.cc/api/generations/JOB_ID \\
+  -H "Authorization: Bearer YOUR_API_KEY"`,
+    responseExample: {
+      job: {
+        job_id: 'gen_abc123',
+        service: 'video',
+        kind: 'video',
+        status: 'queued',
+        prompt: 'A glass whale swims through a flooded library, slow crane shot',
+        is_public: false,
+      },
+      status_url: '/api/generations/gen_abc123',
+    },
+  },
+  {
     slug: 'ltx_video',
     name: 'LTX Video',
-    description: 'Text-to-video generation using LTX 2.3. Creates ~6 second 1080p videos at 25fps from text prompts.',
+    description: 'LTX 2.3 text-to-video. ~6 second 1080p 25fps clips from a prompt.',
     category: 'video',
     responseType: 'video',
     pricingNote: '$0.30 per ~6s video',
@@ -410,7 +456,7 @@ curl -X POST https://cutedsl.cc/api/service \\
   {
     slug: 'flux_image',
     name: 'Flux Schnell',
-    description: 'Fast image generation using Flux Schnell via fal.ai. Produces 1024x1024 images with minimal latency.',
+    description: 'Flux Schnell AI image generator. Fast 1024x1024 text-to-image via fal.ai.',
     category: 'image',
     responseType: 'image',
     pricingNote: '$0.04 per image',
@@ -435,7 +481,7 @@ curl -X POST https://cutedsl.cc/api/service \\
   {
     slug: 'lora_training',
     name: 'LoRA Training',
-    description: 'Fine-tune models with LoRA adapters. Train custom adapters for Z-Image or Chronos-2 on your own data.',
+    description: 'LoRA training for Z-Image Turbo or Chronos-2 on your dataset.',
     category: 'training',
     responseType: 'json',
     pricingNote: '$5.00 per training job',

@@ -74,7 +74,7 @@ function getSuggestions(query: string, maxResults = 8): AutocompleteSuggestion[]
   return results.slice(0, maxResults);
 }
 
-export function useAutocomplete(input: string) {
+export function useAutocomplete(input: string, enabled = true) {
   const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [isOpen, setIsOpen] = useState(false);
@@ -82,17 +82,17 @@ export function useAutocomplete(input: string) {
 
   // Load word frequencies on first use
   useEffect(() => {
-    if (!loadedRef.current) {
+    if (enabled && !loadedRef.current) {
       loadedRef.current = true;
       loadFrequencies();
     }
-  }, []);
+  }, [enabled]);
 
   // Update suggestions when input changes
   useEffect(() => {
     // Small debounce for typing performance
     const timer = setTimeout(() => {
-      if (!input || input.length < 1) {
+      if (!enabled || !input || input.length < 1) {
         setSuggestions([]);
         setIsOpen(false);
         return;
@@ -105,7 +105,7 @@ export function useAutocomplete(input: string) {
     }, 50);
 
     return () => clearTimeout(timer);
-  }, [input]);
+  }, [input, enabled]);
 
   const selectSuggestion = useCallback((index: number) => {
     if (index >= 0 && index < suggestions.length) {

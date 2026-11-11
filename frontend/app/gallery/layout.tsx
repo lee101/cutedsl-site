@@ -6,7 +6,7 @@ const siteUrl = 'https://cutedsl.cc';
 export const metadata: Metadata = {
   title: 'AI Art Gallery — 100,000+ Fairy, Fantasy & Anime Images',
   description:
-    'Browse 100,000+ AI-generated images — fairies, fantasy characters, cute animals, anime, landscapes and more. Made with CuteDSL Z-Image Turbo on Solana. Free to view, prompt-searchable, Pinterest-style masonry.',
+    'Browse 100,000+ prompt-searchable AI images—fairies, fantasy, anime, landscapes and more—made with CuteDSL Z-Image Turbo on Solana.',
   keywords: [
     'AI art gallery',
     'AI generated images',

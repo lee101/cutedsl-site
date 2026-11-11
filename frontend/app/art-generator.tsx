@@ -87,6 +87,14 @@ interface StripeCheckoutResponse {
   publishable_key?: string;
 }
 
+type ImageService = 'ra2' | 'zimage';
+
+// ra2 art generator is the default image model; Z-Image Turbo stays selectable.
+const IMAGE_SERVICES: { slug: ImageService; label: string; hint: string }[] = [
+  { slug: 'ra2', label: 'ra2 art generator', hint: 'higher quality, ~2x slower' },
+  { slug: 'zimage', label: 'Z-Image Turbo', hint: 'fastest' },
+];
+
 interface ArtGeneratorProps {
   initialPrompt?: string;
   compact?: boolean;
@@ -134,11 +142,13 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
   const [status, setStatus] = useState<string | null>(null);
   const [resultURL, setResultURL] = useState<string | null>(null);
   const [savedImage, setSavedImage] = useState<GalleryImage | null>(null);
+  const [service, setService] = useState<ImageService>('ra2');
+  const [servicePricesUSD, setServicePricesUSD] = useState<Record<ImageService, number>>({ ra2: 1, zimage: 1 });
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [width, setWidth] = useState(1024);
   const [height, setHeight] = useState(1024);
-  const [steps, setSteps] = useState(8);
-  const [guidance, setGuidance] = useState(3.5);
+  const [steps, setSteps] = useState(20);
+  const [guidance, setGuidance] = useState(1.0);
   const [seed, setSeed] = useState('');
   const [publishableKey, setPublishableKey] = useState('');
   const [clientSecret, setClientSecret] = useState('');
@@ -152,6 +162,28 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
     setApiKey(browserStorage.getItem('cutedsl_api_key'));
     setEmail(browserStorage.getItem('cutedsl_email') || '');
   }, [initialPrompt]);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/pricing`)
+      .then(res => res.json())
+      .then(data => {
+        const list: { service: string; price_usd: number }[] = data.pricing || [];
+        const priceFor = (slug: ImageService, fallback: number) => {
+          const usd = Number(list.find(item => item.service === slug)?.price_usd);
+          return Number.isFinite(usd) && usd > 0 ? usd : fallback;
+        };
+        setServicePricesUSD(prev => ({ ra2: priceFor('ra2', prev.ra2), zimage: priceFor('zimage', prev.zimage) }));
+      })
+      .catch(() => {});
+  }, []);
+
+  const switchService = (next: ImageService) => {
+    setService(next);
+    setSteps(next === 'ra2' ? 20 : 8);
+    setGuidance(next === 'ra2' ? 1.0 : 3.5);
+    setResultURL(null);
+    setStatus(null);
+  };
 
   useEffect(() => {
     if (!clientSecret || !publishableKey || !checkoutRef.current) return;
@@ -288,7 +320,7 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${activeKey}` },
         body: JSON.stringify({
-          service: 'zimage',
+          service,
           prompt: cleanPrompt,
           width: normalizedWidth,
           height: normalizedHeight,
@@ -343,6 +375,24 @@ export function ArtGenerator({ initialPrompt = '', compact = false, title = 'Mak
         className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-relaxed text-slate-800 outline-none focus:border-pink-400 focus:bg-white focus:ring-2 focus:ring-pink-100"
         placeholder="Describe the image you want to generate..."
       />
+      <div className="mt-3">
+        <p className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5">Model</p>
+        <div className="flex gap-1 rounded-xl border border-pink-100 bg-white/70 p-1">
+          {IMAGE_SERVICES.map(option => (
+            <button
+              key={option.slug}
+              type="button"
+              onClick={() => switchService(option.slug)}
+              className={`flex-1 rounded-lg px-3 py-2 text-xs font-bold transition ${service === option.slug ? 'bg-gradient-to-r from-pink-500 to-purple-500 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              {option.label}
+              <span className={`block text-[10px] font-medium ${service === option.slug ? 'text-white/80' : 'text-slate-400'}`}>
+                {option.hint} &middot; ${servicePricesUSD[option.slug].toFixed(2)}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/70">
         <button
           type="button"

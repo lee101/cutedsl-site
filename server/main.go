@@ -187,6 +187,10 @@ func requestHandler(ctx *fasthttp.RequestCtx) {
 		handleSitemapTags(ctx)
 		return
 	}
+	if path == "/sitemap-videos.xml" && isSitemapMethod {
+		handleSitemapVideos(ctx)
+		return
+	}
 
 	// Server-rendered prompt detail page (SEO). /prompt/<image_id>
 	if strings.HasPrefix(path, "/prompt/") && method == "GET" {
@@ -269,6 +273,9 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 
 	case path == "/api/frontend-error" && method == "POST":
 		handleFrontendError(ctx)
+
+	case path == "/api/media-proxy" && (method == "GET" || method == "HEAD"):
+		handleMediaProxy(ctx)
 
 	// Crypto checkout - create deposit
 	case path == "/api/crypto-checkout" && method == "POST":
@@ -381,6 +388,20 @@ func routeAPI(ctx *fasthttp.RequestCtx, path, method string) {
 
 	case path == "/api/images/count" && method == "GET":
 		handleImageCount(ctx)
+
+	// Durable ManifoldGen-backed generation queue and public video gallery.
+	case path == "/api/generations" && method == "POST":
+		handleCreateGeneration(ctx)
+	case path == "/api/generations" && method == "GET":
+		handleListGenerations(ctx)
+	case path == "/api/generations/pricing" && method == "GET":
+		handleGenerationPricing(ctx)
+	case strings.HasPrefix(path, "/api/generations/") && strings.HasSuffix(path, "/publish") && method == "POST":
+		handlePublishGeneration(ctx, strings.TrimSuffix(strings.TrimPrefix(path, "/api/generations/"), "/publish"))
+	case strings.HasPrefix(path, "/api/generations/") && method == "GET":
+		handleGetGeneration(ctx, strings.TrimPrefix(path, "/api/generations/"))
+	case path == "/api/videos" && method == "GET":
+		handlePublicVideos(ctx)
 
 	// Swap (buy $CUTEDSL via bags.fm liquidity pool)
 	case path == "/api/swap/quote" && method == "GET":
